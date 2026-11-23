@@ -542,6 +542,47 @@ timing data that way). Run `run-engine.mjs archive` first: it copies them with a
 overwriting an earlier archive. It is owner-invoked, takes the lock but changes nothing in engine state, refuses another run's id (`run_mismatch`), and does not copy
 `.attempts/` (envelopes and outputs). `usage.jsonl` is copied as it stands: run `archive` when nothing is dispatching or importing usage,
 or its last line may be a partial record (the manifest hashes the copy, not a repaired file).
+`archive --retire true` (S-13a) is the one exception to "changes nothing": after the copy it refuses while any attempt is
+live or not proven quiescent (`retire_live_attempts`) or when the live bytes differ from the archived copy (`retire_mismatch`),
+first finishes the RUN-STATE authority observation of the live state and persists it (a crash after a quiescent commit and
+before a command's final observation leaves lines unclassified), copies, writes `<archive>/retired/retire.json` (run, final
+seq, state digest, whether an authority record existed), then RENAMES (never deletes) the live engine log, usage ledger and
+state, the state last, into `<archive>/retired/`, so a new run of the ticket can `init`. A crash between renames leaves the state live; `archive --retire true` again completes it.
+
+**Run adoption (`adopt`, S-13a, same base).** A new run can take over the still-valid work of an archived run of the same
+ticket and approved plan instead of re-dispatching it. Flow: `archive --retire true` the old run; the owner appends a new
+`START` of the new run for the same narrative (that START is the approval: `adopt` has no authority of its own); `init` the
+new run; `run-engine.mjs adopt --from <archive dir>`; then `drive`. `adopt` runs only right after `init` (zero attempts, every
+node pending, no RED, freeze, review or earlier adoption: else `adoption_window_closed`, also what a second or concurrent
+`adopt` gets) and writes one atomic commit or nothing. The source must be FINAL: the completed `archive --retire true` of its
+run (retire record and retired state present) holding that run's latest state; an earlier or plain `archive`, a retire that
+crashed before renaming the state, or an archive superseded by a later state of the run is `adopt_source_not_final`. A copy of
+the archived state is observed against the current plan before any check, so a line that appeared while its work could run is
+untrusted even when its own observation never finished; a source without a complete observation is
+`adopt_source_unobserved`. Whole refusals (exit 1, nothing written): `--from` not a run archive directly under `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/` after resolving symlinks (`adopt_source_outside`); a
+manifest or file that does not verify (`adopt_archive_invalid`); a live or unretired archived attempt (`adopt_source_live`); a
+different plan digest (`adopt_plan_mismatch`: cross-plan adoption is refused); policy semantics that differ other than the
+pinned base and the repository identity flag (`adopt_policy_mismatch`); under `config.repoIdentity`, an archived run whose
+`S.base` names another repository than this run's (`adopt_identity_mismatch`, R14; an archive naming none is adopted, and a
+flag-off run never gets this refusal). Adoption never touches `S.base`, the `IDENTITY_BOUND` note or a freeze base, so every
+later identity check of the adopting run is unchanged; units on either side (`adopt_units_unsupported`); a latched security REAPPROVAL (`adopt_reapproval_pending`); an
+outstanding archived judgment as `status` would compute it: stored judgments, failed nodes and repairs, refused RED re-runs and
+security judgments (`adopt_source_judged`); a RUN-STATE line this run trusts that the archived run saw appear while
+its work could run (`adopt_authority_untrusted`). The binding of the new run (narrative, START and DAG bytes) is re-verified
+first, as by every mutating command. Per node, an archived `done` node is
+adopted only when its definition (id, deps, reads, writes, othersOwned, resources, redSpecs, evidence, phase, role, risk,
+modelTier, promptFile path, acceptance, checks; not complexity or estimatedMemoryMb, which only schedule) is unchanged (`node_scope_changed`), its read and write fingerprints equal the work tree
+(`node_files_changed`) and every dependency is adopted (`dep_not_adopted`: a changed node invalidates every dependent). A
+RED-bearing node also needs its archived RED evidence to bind the new run's specs and runner and to be unchanged by the
+engine's own RED-validity check (same spec bytes, same base); the evidence is then carried verbatim. Otherwise the node is not
+adopted and the run stops on the judgment `adopt_red_unverified` (or `adopt_red_missing`; exit 2): re-running RED after the
+dependents' implementation is in the tree would only report `spec_not_failing`. A moved base always gives
+`adopt_red_unverified` in this slice. No command clears it in that run, and a second `adopt` is always
+`adoption_window_closed`: the clearing path is a fresh run (`archive --retire true`, a new START, `init`), adopted after the
+archived bytes are restored, or not adopted at all. Adopted nodes carry `adopted: { run_id, archive, manifest_sha256 }`; one `ADOPTED`
+engine note lists the adopted and rejected nodes (no RUN-STATE line). The archived builder roster (every builder, repairs
+included, and through a chained adoption) is carried, so an original builder is still `reviewer_is_builder` at the final review. Review records, the freeze, repairs, security state,
+test-kinds records, unit evidence and usage rows are never adopted; the archived usage stays in its archive.
 
 **Plan roots are not node writes.** A node whose `writes` or `othersOwned` sit under `.specs/` or
 `.spec/` is `dag_invalid` at `init` (the carrier always refused such a worker, as a `node_failed` at
