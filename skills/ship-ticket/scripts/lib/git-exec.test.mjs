@@ -658,8 +658,8 @@ test('run() normalises the status map before spawn: an accessor entry is refused
 // each exactly 40 lowercase hex. The runner reads the length ONCE and each element ONCE into local primitives, validates
 // those, and BUILDS the stdin bytes (`<oid>\n` per line, at most 99 x 41 = 4059 bytes) from them; no caller-owned object
 // is ever validated and then used. Every other call keeps stdin 'ignore'; `input` stays an unknown run key.
-// PROPOSED, PENDING OWNER APPROVAL: this replaces the approved R3 Buffer interface. The read-once property is asserted
-// (a counting Proxy and a value-changing getter), so a validate-then-reread gap cannot return unseen.
+// OWNER-APPROVED amendment R3' (2026-11-23, D-A12) replaces the earlier Buffer interface. The read-once property is
+// asserted (a counting Proxy and a value-changing getter), so a validate-then-reread gap cannot return unseen.
 const OID = (c = 'a') => c.repeat(40);
 const LINES = (oids) => Buffer.from(oids.map((o) => `${o}\n`).join(''));
 const ECHO_STDIN = "let b=[];process.stdin.on('data',(d)=>b.push(d));process.stdin.on('end',()=>process.stdout.write(Buffer.concat(b)))";

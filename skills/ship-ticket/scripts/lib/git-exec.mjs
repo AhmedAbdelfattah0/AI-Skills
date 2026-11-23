@@ -259,8 +259,9 @@ const statusMap = (m) => {
  * else, where `oids` is an array of 1..99 strings, each 40 lowercase hex. Its length is read ONCE and each element ONCE
  * into local primitives; those are validated and the stdin bytes are BUILT here from them (`<oid>\n` lines, at most
  * 99 x 41 = 4059 bytes, under the 4 KiB bound). No caller-owned object is validated and then used.
- * PROPOSED, PENDING OWNER APPROVAL: this replaces the approved R3 Buffer interface (validating a caller-owned Buffer
- * could not be made sound: three review rounds found bypasses).
+ * OWNER-APPROVED amendment R3' (2026-11-23, D-A12): this replaces the earlier Buffer interface (validating a caller-owned
+ * Buffer could not be made sound). Threat-model assumption (owner-approved, this scope only): arbitrary malicious
+ * JavaScript executing inside the trusted host process is out of scope.
  */
 const STDIN_MAX_OIDS = 99;
 const STDIN_OID = /^[0-9a-f]{40}$/;

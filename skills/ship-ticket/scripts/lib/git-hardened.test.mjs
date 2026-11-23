@@ -97,7 +97,7 @@ test('[M01] win32: createContext refuses platform_unsupported before any spawn o
 test('the export list is pinned', () => {
   assert.deepEqual(Object.keys(H).sort(), ['DEFAULTS', 'GitCellUnqualified', 'OPS_TABLE', 'QUALIFIED_CELLS', 'createContext', 'initStore', 'op', 'openSource', 'openStore', 'verifyWorktree']);
 });
-test('T1: the closed OPS table and the qualified cells equal lib/git-ops.golden.json exactly', async () => {
+test('T1 lint: the closed OPS table and the qualified cells equal lib/git-ops.golden.json exactly', async () => {
   const golden = JSON.parse(readFileSync(join(here, 'git-ops.golden.json'), 'utf8'));
   assert.deepEqual(JSON.parse(JSON.stringify(H.OPS_TABLE)), golden.ops);
   const committed = await import(pathToFileURL(join(here, 'git-hardened.mjs')).href);
@@ -113,8 +113,12 @@ test('T1: the closed OPS table and the qualified cells equal lib/git-ops.golden.
   assert.ok(!H.OPS_TABLE.some((r) => r.argv.includes('worktree')), 'no `git worktree` row exists');
 });
 
-// T1 caller scan (V2 row 8): git-exec.mjs is imported only by the hardened libs; a git-hardened `op` call takes a literal,
-// registered id; the op binding is never aliased, passed or re-exported.
+// T1 caller scan (V2 row 8; owner-approved amendment T1', 2026-11-23): a DEVELOPMENT LINT / guardrail over reviewed
+// code, not a security isolation boundary (arbitrary malicious JavaScript executing inside the trusted host process is
+// out of scope). It checks that git-exec.mjs is imported only by the hardened libs, that a git-hardened `op` call takes a
+// literal registered id, and that the op binding is not aliased, passed or re-exported; it refuses the common loader and
+// alias forms in lib/ modules. It cannot see string-built or computed specifiers outside lib/, runtime reflection, or
+// code loaded from disk or a child process.
 const VENDOR = join(here, '..', '..', 'vendor', 'acorn');
 const UP = JSON.parse(readFileSync(join(VENDOR, 'UPSTREAM.json'), 'utf8'));
 const vendorOk = ['LICENSE', 'acorn.mjs'].every((f) => createHash('sha256').update(readFileSync(join(VENDOR, f))).digest('hex') === UP.files[f]?.sha256);
@@ -193,12 +197,12 @@ function scriptModules(dir = join(here, '..'), rel = '') {
   return readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? (['node_modules', 'vendor'].includes(d.name) ? [] : scriptModules(join(dir, d.name), `${rel}${d.name}/`))
     : /\.(?:mjs|js|cjs)$/.test(d.name) && !/\.test\.|\.test-helper\./.test(d.name) ? [`${rel}${d.name}`] : []));
 }
-test('T1: no runtime module outside the hardened libs imports git-exec.mjs, and every op call names a literal registered id', () => {
+test('T1 lint (not an isolation boundary): no runtime module outside the hardened libs imports git-exec.mjs, and every op call names a literal registered id', () => {
   const offences = scriptModules().flatMap((rel) => t1(rel, readFileSync(join(here, '..', rel), 'utf8')));
   assert.deepEqual(offences, []);
   assert.ok(scriptModules().includes('lib/git-hardened.mjs') && scriptModules().length > 20, 'the scan reached the scripts tree');
 });
-test('[M54] T1: the scan flags every planted pattern (positive controls)', () => {
+test('[M54] T1 lint: the scan flags every planted pattern (positive controls)', () => {
   const ops = [{ id: 'blob.read', policy: 'raw-object', callers: ['x.mjs'] }, { id: 'store.init', policy: 'internal', callers: [] }];
   const cases = [
     ["import { gitRunner } from './lib/git-exec.mjs';", /imports lib\/git-exec\.mjs/],
@@ -928,6 +932,18 @@ test('[M53] R2 cost bound: more reachable objects than maxObjects is object_too_
   const source = H.openSource(ctx, { toplevel: top });
   assert.throws(() => H.initStore(ctx, { dir: join(tmp(t), 'store'), source, oids: [head] }), code('object_too_large'));
   assert.doesNotThrow(() => storeOf(t, ctxOf(t, { maxObjects: 50 }), top, [head]), 'control: 42 objects under 50');
+});
+
+test('runtime protections (independent of T1): handles are bound to their context; another context, a forged or a copied handle is git_op_invalid', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const ctxA = ctxOf(t);
+  const ctxB = ctxOf(t);
+  const { store, source } = storeOf(t, ctxA, top, [head]);
+  assert.throws(() => H.initStore(ctxB, { dir: join(tmp(t), 's'), source, oids: [head] }), code('git_op_invalid'), 'a source handle from another context');
+  assert.throws(() => H.verifyWorktree(ctxB, { source, store, oid: head }), code('git_op_invalid'), 'handles from another context');
+  for (const h of [{}, Object.freeze({}), { ...store }, Object.create(store)]) assert.throws(() => H.verifyWorktree(ctxA, { source, store: h, oid: head }), code('git_op_invalid'));
+  assert.deepEqual([Object.keys(store), Object.keys(source), Object.keys(ctxA)], [[], [], ['dispose']], 'nothing reachable from the tokens');
+  assert.ok(!('runner' in H) && !Object.keys(H).some((k) => /run|exec|spawn/i.test(k) && k !== 'verifyWorktree'), 'no runner or spawn helper is exported');
 });
 
 // ------------------------------------------------------------------ attempt 2 (D-A12), test-first

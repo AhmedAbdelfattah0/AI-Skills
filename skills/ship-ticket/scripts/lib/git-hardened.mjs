@@ -6,6 +6,10 @@
 // entries and .gitignore files (read by ls-files under I) and the bytes of <common>/info/exclude (copied here).
 // Custom code; nothing is copied from upstream. Node 18 compatible, synchronous, POSIX only (win32 refuses first).
 // Written in the T4a grammar (lib/git-exec.test.mjs): no lossy decode, no reflection, Buffers for every path byte.
+// BOUNDARIES (owner-approved amendment T1', 2026-11-23): arbitrary malicious JavaScript executing inside the trusted host
+// process is out of scope; T1 (git-hardened.test.mjs) is a development lint/guardrail, not a security isolation boundary.
+// The runtime protections are independent of T1: module-private WeakMaps (no exported runner or state), opaque frozen
+// handles (a forged or copied handle is git_op_invalid), the closed OPS table, strict typed refusals.
 import { chmodSync, closeSync, constants, copyFileSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readSync,
   readlinkSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';

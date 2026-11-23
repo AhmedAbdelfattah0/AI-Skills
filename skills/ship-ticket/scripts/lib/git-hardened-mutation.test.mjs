@@ -30,6 +30,7 @@ export const EXEC_MUTANTS = [
  * [tag, what the mutant removes, from, to, also?, platform?]: each `from` must occur exactly once in lib/git-hardened.mjs. A
  * platform-bound mutant runs only there: M29 (name normalisation) is equivalent on a normalisation-sensitive filesystem
  * (Linux: the NFC path then simply does not exist, so the walk still reports `missing`); its kill needs APFS (darwin).
+ * M56 (typed removal errors) needs `chflags uchg` to make an unlink fail without root, so its test and mutant are darwin-only.
  */
 export const MUTANTS = [
   ['M01', 'skip the win32 refusal', "  if (process.platform === 'win32') throw fail('platform_unsupported', 'context.create');\n", ''],
@@ -74,7 +75,7 @@ export const MUTANTS = [
   ['M51', 'verifyWorktree skips the store identity check', "function op_(st, h, id, operands, deadline) {\n  if (!sameNode(lstatOrNull(h.storeDir), h.stat)) throw fail('context_tampered', id);\n", 'function op_(st, h, id, operands, deadline) {\n'],
   ['M52', 'batch-check line count not checked', "    if (sizes.length !== chunk.oids.length) throw fail('object_corrupt', 'store.sizes');\n", ''],
   ['M55', 'meters check the budget but not the deadline', 'if (n > cap || Date.now() > deadline) throw fail(code, op);', 'if (n > cap) throw fail(code, op);'],
-  ['M56', 'raw fs errors escape removal', "  try { removeTreeRaw(root, dev, spend, deadline); } catch (e) { if (e instanceof GitError) throw e; throw fail('lane_remove_failed', 'remove'); }", '  removeTreeRaw(root, dev, spend, deadline);'],
+  ['M56', 'raw fs errors escape removal', "  try { removeTreeRaw(root, dev, spend, deadline); } catch (e) { if (e instanceof GitError) throw e; throw fail('lane_remove_failed', 'remove'); }", '  removeTreeRaw(root, dev, spend, deadline);', [], 'darwin'],
   ['M47', 'a populated gitlink is enumerated completely without any charge', 'if (hasEntry(abs, spendFiles)) diff', 'if (listDir(abs, () => 0).length !== 0) diff'],
   ['M53', 'no object-count bound', "  if (all.length > st.maxObjects) throw fail('object_too_large', 'store.walk');\n", ''],
   ['M11', 'stdin passed to a row that declares none (the row binding must refuse it)', "git(st, 'store.walk', Vs, [head, base], { deadline })", "git(st, 'store.walk', Vs, [head, base], { stdin: { kind: 'oid-lines', oids: [head] }, deadline })"],
