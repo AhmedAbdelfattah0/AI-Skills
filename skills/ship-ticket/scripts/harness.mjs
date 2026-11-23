@@ -329,11 +329,12 @@ export function resourceSnapshot() {
 export const HOST_POLICY = Object.freeze({
   pressure_levels: Object.freeze([1, 2, 4]), // documented kern.memorystatus_vm_pressure_level values
   pressure_hold_level: 2,        // any sample in the window >= 2 holds
-  load_fraction: 0.6,            // any of load1/5/15 >= 60% of cores holds
+  load_num: 3,                   // any of load1/5/15 >= 60% of cores (= 3/5, compared as 5*load >= 3*cores, no float fraction) holds
+  load_den: 5,
   sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
   sample_gap_max_ms: 30000,      // a larger gap is stale (held_resample)
   max_snapshot_age_ms: 30000,    // snapshot.now_ms - latest.t_ms must be 0..30 s (freshness bound)
-  swap_growth_tolerance_mb: 2,   // swap USED growth above this many MB across the window holds (held_swap); flat/falling is fine
+  swap_growth_tolerance_kb100: 204800, // 2 MB = 2*1024 KB = 204800 hundredths-of-KB; swap USED growth STRICTLY above this (exact integers) holds (held_swap); flat/falling is fine
   open_stale_ms: 180000,         // an 'open' history whose last counted sample is older than 3 min is a COLD START (held, two clean samples)
   max_samples: 16,
   max_cores: 4096,
@@ -382,17 +383,17 @@ function validHistory(h) {
   return x;
 }
 const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'provider_errors'];
-const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swap_used_mb', 'load1', 'load5', 'load15'];
+const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swap_used_kb100', 'load1', 'load5', 'load15'];
 // Unknown properties are rejected (stricter): an unrecognised field could be a signal this version does not understand.
 const onlyKeys = (o, keys) => Object.keys(o).every(k => keys.includes(k));
 function validSample(x) {
-  return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && Number.isFinite(x.swap_used_mb) && x.swap_used_mb >= 0 && x.swap_used_mb <= 1e9
+  return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swap_used_kb100)
     && ['load1', 'load5', 'load15'].every(k => typeof x[k] === 'number' && Number.isFinite(x[k]) && x[k] >= 0);
 }
 
 /**
  * admitHost(snapshot, cls, running, history)  -- the approved positional contract.
- *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swap_used_mb, load1, load5, load15}] (oldest first),
+ *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swap_used_kb100, load1, load5, load15}] (oldest first),
  *               provider_errors (count or [{kind,t_ms}]) }   (no process counting: unknown properties such as heavy_processes are rejected)
  *   cls: 'HEAVY'|'LIGHT'   running: {total, heavy} nonneg safe ints, heavy <= total
  *   history: undefined | {state:'open'|'held', clean_streak, last_admit_t_ms, last_sample_t_ms} as returned last time
@@ -434,13 +435,14 @@ export function admitHost(snapshot, cls, running, history) {
     // Swap USED growth (MB) above the tolerance between ANY earlier and later sample of the window. Falling or flat is fine; high
     // absolute swap alone never blocks (recorded policy). POLICY NOTE: the recorded policy says 'no swapout growth'; swap-used growth
     // is the same intent from a single-record numeric source (vm.swapusage) instead of multi-line vm_stat text.
-    let min = samples[0].swap_used_mb;
-    for (const x of samples.slice(1)) { if (x.swap_used_mb - min > HOST_POLICY.swap_growth_tolerance_mb) swap = 'growing'; min = Math.min(min, x.swap_used_mb); }
+    let min = samples[0].swap_used_kb100;
+    for (const x of samples.slice(1)) { if (x.swap_used_kb100 - min > HOST_POLICY.swap_growth_tolerance_kb100) swap = 'growing'; min = Math.min(min, x.swap_used_kb100); }   // exact safe integers
   }
   if (swap !== 'flat') holds.push('held_swap');
-  const loadLimit = HOST_POLICY.load_fraction * cores;
+  // Exact: load >= (3/5)*cores  <=>  5*load >= 3*cores. Kernel loadavg is fixed-point (multiples of 1/2048), so 5*load is exact.
+  const loadLimit = cores * HOST_POLICY.load_num / HOST_POLICY.load_den;   // display only
   // The WHOLE window counts: an earlier high reading is not forgotten because the latest one dipped under the limit.
-  const loadHigh = samples.some(x => ['load1', 'load5', 'load15'].some(k => x[k] >= loadLimit));
+  const loadHigh = samples.some(x => ['load1', 'load5', 'load15'].some(k => x[k] * HOST_POLICY.load_den >= cores * HOST_POLICY.load_num));
   if (loadHigh) holds.push('held_load');
   if (providers > 0) holds.push('held_provider');
   // A sample counts only if it is >= 15 s after the last counted one; replays and near-duplicates are ONE sample.
@@ -483,7 +485,7 @@ export function admitHost(snapshot, cls, running, history) {
  * CR/NUL or any extra byte makes it null (= snapshot_unavailable).
  * AUDIT (everything hostSnapshot/admitHost reads from outside):
  *   1. sysctl -n kern.memorystatus_vm_pressure_level  -> parsePressure, grammar /^[124]\n?$/
- *   2. sysctl -n vm.swapusage                        -> parseSwapUsedMb, grammar below (one record)
+ *   2. sysctl -n vm.swapusage                        -> parseSwapUsedKb100, grammar below (one record)
  *   3. os.loadavg()                                  -> array of exactly 3, finite >= 0 (range-checked in admitHost)
  *   4. injected now()/cpus()/providerErrors/platform -> range/type validated in admitHost
  *   5. caller-supplied snapshot, cls, running, history -> validated in admitHost
@@ -496,15 +498,22 @@ export function parsePressure(out) {
 }
 const SWAP_NUM = '(0|[1-9]\\d{0,8})\\.(\\d{2})';
 const SWAP_RE = new RegExp('^total = ' + SWAP_NUM + '([KMG])  used = ' + SWAP_NUM + '([KMG])  free = ' + SWAP_NUM + '([KMG])(  \\(encrypted\\))?\\n?$');
-const UNIT_MB = { K: 1 / 1024, M: 1, G: 1024 };
-/** Accepts exactly `total = N.NNu  used = N.NNu  free = N.NNu` with optional `  (encrypted)`, u in K|M|G, N up to 9 integer digits. */
-export function parseSwapUsedMb(out) {
+const UNIT_KB100 = { K: 1n, M: 1024n, G: 1048576n };   // hundredths-of-KB per hundredth of the unit (1 MB = 1024 KB, 1 GB = 1024 MB)
+/**
+ * Accepts exactly `total = N.NNu  used = N.NNu  free = N.NNu` with optional `  (encrypted)`, u in K|M|G, up to 9 integer digits.
+ * EXACT arithmetic, no float and no tolerance: each N.NN is the integer count of hundredths (BigInt), converted to a common exact
+ * integer unit (hundredths of KB). Requires total === used + free EXACTLY (which implies used <= total) (live macOS output satisfies this
+ * exactly; any rounding mismatch is rejected = fail-closed). Returns used in hundredths of KB as a safe integer, or null.
+ */
+export function parseSwapUsedKb100(out) {
   if (typeof out !== 'string') return null;   // the grammar itself is length-bounded (< 120 chars)
   const m = SWAP_RE.exec(out);
   if (!m) return null;
-  const mb = (i, u) => Number(m[i] + '.' + m[i + 1]) * UNIT_MB[m[u]];
-  const total = mb(1, 3), used = mb(4, 6);
-  return Number.isFinite(used) && used <= total + 0.01 ? Math.round(used * 100) / 100 : null;
+  const v = (i, u) => (BigInt(m[i]) * 100n + BigInt(m[i + 1])) * UNIT_KB100[m[u]];
+  const total = v(1, 3), used = v(4, 6), free = v(7, 9);
+  // used <= total is implied by the exact sum (free >= 0), so it needs no separate (tolerance-prone) comparison.
+  if (total !== used + free || total > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(used);
 }
 const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl' });
 /**
@@ -527,7 +536,7 @@ export async function hostSnapshot(probe = {}) {
     if (i > 0) await sleep(intervalMs);
     const la = loadavg();
     const [l1, l5, l15] = Array.isArray(la) && la.length === 3 ? la : [null, null, null];
-    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swap_used_mb: parseSwapUsedMb(run(BIN.sysctl, ['-n', 'vm.swapusage'])), load1: l1, load5: l5, load15: l15 });
+    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swap_used_kb100: parseSwapUsedKb100(run(BIN.sysctl, ['-n', 'vm.swapusage'])), load1: l1, load5: l5, load15: l15 });
   }
   base.now_ms = now();
   return base;

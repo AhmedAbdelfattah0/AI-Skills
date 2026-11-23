@@ -105,12 +105,16 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   is treated as a cold start (two clean samples again). Unknown snapshot properties are rejected (fail-closed: a new snapshot field holds every call
   until `admitHost` learns it).
   Swap signal (POLICY NOTE, flagged for the owner): the recorded policy says "swap flat (no swapout
-  growth)"; `admitHost` uses swap USED growth in MB (above a 2 MB tolerance, between any earlier and later
+  growth)"; `admitHost` uses swap USED growth (above a 2 MB tolerance, strictly greater, between any earlier and later
   sample of the window) from the single-record `sysctl -n vm.swapusage`, the same intent from a numeric
   one-line source instead of multi-line `vm_stat` text; high absolute swap alone never blocks. The snapshot
   schema is `ship-ticket-host-snapshot-v2`. Every kernel input is matched by ONE whole-output grammar (no
   splitting or line selection): pressure `/^[124]\n?$/`, swap `total = N.NNu  used = N.NNu  free = N.NNu`
-  with only `  (encrypted)` optional (`u` is K, M or G); any other shape is `snapshot_unavailable`.
+  with only `  (encrypted)` optional (`u` is K, M or G); any other shape is `snapshot_unavailable`. All swap
+  and load decisions use EXACT arithmetic: each `N.NN` is parsed to an integer count of hundredths (BigInt), converted to
+  one common integer unit (hundredths of KB), `used <= total` and `total == used + free` are compared exactly (no
+  tolerance; values beyond the safe-integer range are rejected, never rounded), growth is an exact integer difference
+  compared with the exact 2 MB tolerance, and load is compared as `5*load >= 3*cores`.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers
