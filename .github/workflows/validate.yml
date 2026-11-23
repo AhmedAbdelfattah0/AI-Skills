@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -42,6 +44,11 @@ jobs:
         run: node --test skills/vapt/effectiveness.test.mjs
       - name: Test vendored security-audit validators
         run: node --test skills/security-audit/validate-findings.test.cjs skills/security-audit/validate-coverage-ledger.test.cjs
+      # Append-only is checked against the PR base (pull_request) or the pre-push sha (push); needs fetch-depth: 0.
+      - name: Test and check review-rounds ledgers
+        env:
+          REVIEW_ROUNDS_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: node --test scripts/review-rounds.test.mjs && node scripts/review-rounds.mjs check --base "$REVIEW_ROUNDS_BASE"
 
   # The library CLI links (symlinks, or junctions on Windows), copies and updates skill directories,
   # so it is tested on every OS and on the minimum Node. Each test runs a temp copy of the CLI
