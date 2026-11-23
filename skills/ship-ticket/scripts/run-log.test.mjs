@@ -781,6 +781,18 @@ test('old-reader fixture: its verbatim block is byte-identical (LF) to the pre-S
   assert.equal(frozen, `${original.replace(/\n+$/, '')}\n`, 'the fixture is the unmodified pre-S5 reader');
 });
 
+test('old-reader fixture (F-112-2): SCHEMA and the event-name list are frozen literals, not live imports', () => {
+  const text = lf(readText(LEGACY_READER, 'utf8'));
+  assert.match(text, /^const SCHEMA = 'ship-ticket-run-log-v1';$/m, 'the fixture SCHEMA literal equals the frozen pre-S5 value');
+  assert.ok(!/measure\/events\.mjs/.test(text.replace(/^\/\/.*$/gm, '')), 'no code line imports the current events module');
+  const names = /const FROZEN_EVENT_NAMES = new Set\(\[(.*?)\]\);/.exec(text);
+  assert.ok(names, 'the frozen name list exists');
+  assert.deepEqual(names[1].split(',').map((n) => n.trim().replace(/'/g, '')),
+    ['run_mode', 'review_lane', 'repair_batch', 'gate_run', 'owner_decision', 'host_sleep', 'milestone', 'finding', 'closure', 'log_loss']);
+  const blob = spawnSync('git', ['-C', dirname(script), 'show', `${LEGACY_SOURCE.commit}:skills/ship-ticket/scripts/measure/events.mjs`], { encoding: 'utf8' });
+  if (blob.status === 0) assert.ok(blob.stdout.includes("export const RUN_LOG_SCHEMA = 'ship-ticket-run-log-v1';"), 'the frozen value is what the pre-S5 module held');
+});
+
 // ------------------------------------------------------------------ S5 repair: in-lock ordering and bounds, capped carry-forward, accurate check
 const holdLock = (f) => writeFileSync(`${f.path}.lock`, JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'test', nonce: 'held-by-test' }));
 const releaseLock = (f) => rmSync(`${f.path}.lock`, { force: true });
