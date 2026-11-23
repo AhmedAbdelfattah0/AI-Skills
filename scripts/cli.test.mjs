@@ -889,6 +889,30 @@ test('no support claim in README, AGENTS.md, install.sh or package.json names a 
   assert.ok(seen >= 4, `the scan found the claims it is meant to police (${seen})`);
 });
 
+test('CI runs Node 22 only and every job in validate.yml and sync-external.yml has timeout-minutes', () => {
+  for (const f of ['validate.yml', 'sync-external.yml']) {
+    const yml = readFileSync(join(REPO, '.github', 'workflows', f), 'utf8');
+    // Every node-version is the floor or a matrix reference; every matrix node list is the floor alone.
+    const versions = [...yml.matchAll(/node-version:[ \t]*'?([^'\n]*?)'?[ \t]*$/gm)].map((m) => m[1]);
+    assert.ok(versions.length >= 1, `${f} sets a node-version`);
+    for (const v of versions) {
+      assert.ok(v === '${{ matrix.node }}' || v === String(NODE_FLOOR), `${f} node-version ${v}`);
+    }
+    const lists = [...yml.matchAll(/^\s+node:\s*\[([^\]]*)\]/gm)].map((m) => m[1].replace(/['\s]/g, ''));
+    for (const l of lists) assert.equal(l, String(NODE_FLOOR), `${f} matrix node list`);
+    if (f === 'validate.yml') assert.equal(lists.length, 2, 'cli and harness matrices were found');
+    // Every top-level job (two-space indent under jobs:) declares a timeout.
+    const jobsText = yml.slice(yml.indexOf('\njobs:'));
+    const blocks = jobsText.split(/^  (?=[A-Za-z][\w-]*:\s*$)/m).slice(1);
+    assert.ok(blocks.length >= 1, `${f} has jobs`);
+    for (const b of blocks) {
+      const name = b.split(':')[0];
+      assert.match(b, /^    timeout-minutes:\s*\d+\s*$/m, `${f} job ${name} has timeout-minutes`);
+    }
+    if (f === 'validate.yml') assert.equal(blocks.length, 4, 'validate, cli, harness, engine-properties');
+  }
+});
+
 // Runs the real install.sh with a stand-in `node` and a `git` that records any call and fails. The
 // clone target is an existing non-git directory, so a regressed guard is refused by install.sh itself.
 function installWith(t, nodeMajorOutput) {
