@@ -145,6 +145,7 @@ jobs:
           skills/ship-ticket/scripts/check-pr-scope.test.mjs
           skills/ship-ticket/scripts/engine-base.test.mjs
           skills/ship-ticket/scripts/run-engine-base.test.mjs
+          skills/ship-ticket/scripts/wave.test.mjs
           skills/ship-ticket/scripts/engine-adopt.test.mjs
           skills/ship-ticket/scripts/run-engine-adopt.test.mjs
           skills/ship-ticket/scripts/engine-identity.test.mjs
