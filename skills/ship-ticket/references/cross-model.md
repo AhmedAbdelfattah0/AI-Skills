@@ -271,10 +271,13 @@ Outcomes, independent of the carrier:
   (the checker never deadlocks a legitimate escalation), but it is not
   debate-qualified for execution: START needs a concrete disposition of every
   outstanding finding.
-- `LIMIT_REACHED`, with `limit: {kind: configured_budget | provider_limit | resource_limit, evidence}`:
-  the configured value, or the provider/relay error text. The findings list may be
-  empty (a first-dispatch quota failure) with `incomplete_review: true`.
-  `LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.
+- `LIMIT_REACHED` is recorded only for a configured budget; a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified. The limit is
+  `limit: {kind: configured_budget, evidence}`, the evidence naming the configured
+  value it reached. A provider or resource failure (a quota, a permission error, a
+  timeout) is recorded as `UNRESOLVED` with `incomplete_review: true`: the retained
+  relay result of the last attempt must show the actual failure (status not
+  `completed`, or exit code not 0), the findings may be empty, and it reaches START
+  only through the owner's disposition of id `LIMIT`. `LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.
 - `SKIPPED`: only with the owner exception frozen in the plan.
 
 `DEGRADED` is not an outcome: a substitute carrier is `carrier.degraded: true`.
@@ -350,7 +353,7 @@ it the attestation hash and resolvable evidence are mandatory. A plan without
 (`DEBATE_POLICY_CUTOFF` in `brief.mjs`, finalized at merge).
 
 An `UNRESOLVED` or `LIMIT_REACHED` plan may START only when every outstanding
-canonical finding (and, for `LIMIT_REACHED`, the limit itself as id `LIMIT`) has a
+canonical finding (and, for `LIMIT_REACHED` or an incomplete review, the limit itself as id `LIMIT`) has a
 concrete disposition in the frozen dispositions line of the approved digest:
 `accept_risk` with the accepted-risk text, `decided` with the actual decision, or
 `waived` with the frozen exception. A pending finding has no row and blocks START
@@ -360,11 +363,11 @@ again (`debate_reconfirm_required`). The attestation never closes a finding on i
 own: its ledger must equal the one derived from the response objects. Populated names or timestamps are
 never proof of authorization. Documented limit: this detects inconsistency, replay
 and stale or unrelated results; it cannot authenticate against a host able to
-fabricate every input. A provider or resource limit quotes text from one string of one whole diagnostic
-source of the last attempt: the relay `error` field, one whole error event, or the
-dispatch error; never a counterpart message or event. The class is read from the
-whole source, so one event naming both a permission error and a 429 is ambiguous and
-supports neither kind. Host-trust residual, the same property as
+fabricate every input. No relay text is classified: whether a failure was a quota, a
+permission error or a timeout is for the owner to read in the retained diagnostics
+(D-A10, 2026-11-23: three classification strategies each failed review, because no
+heuristic separates diagnostic evidence from metadata and benign warnings in an
+unstructured provider payload). Host-trust residual, the same property as
 `SECURITY_POLICY_CUTOFF` in engine-dag.mjs: a new plan without `debate_policy`
 whose START `approved_at` is backdated before `DEBATE_POLICY_CUTOFF` passes as
 legacy, because the host writes `approved_at`; no new mechanism closes that. Engine

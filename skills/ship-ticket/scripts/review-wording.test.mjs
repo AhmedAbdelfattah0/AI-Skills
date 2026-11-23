@@ -233,6 +233,8 @@ const S4_SUPERSEDED = [
   // approved amendment 2026-11-23: the free-text header grammar and machine-read section 7 Markdown are gone
   /response header/i, /finding <ID>: conceded/i, /probe-ok/i, /Section 7 must be fence-free/i, /machine-read lines \(`\*\*Result/i,
   /Design change cell/i, /Debate carrier and exceptions requested/i, /predeclared `Attestation:/i,
+  // D-A10 (2026-11-23): provider and resource limits are no longer LIMIT_REACHED kinds; no relay text is classified
+  /provider_limit/i, /resource_limit/i, /provider or resource limit is reported as/i, /one whole diagnostic\s+source/i,
 ];
 test('S4: no superseded debate scope, cap or default-skip instruction survives in SKILL.md, AGENTS.md or any reference', () => {
   const files = S4_FILES();
@@ -274,6 +276,7 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(x.includes('The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval.'));
   assert.ok(x.includes('`CONVERGED` requires the counterpart\'s confirmation of the exact final plan digest'));
   assert.ok(x.includes('`LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.'));
+  assert.ok(x.includes('`LIMIT_REACHED` is recorded only for a configured budget; a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified.'));
   assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));
   assert.ok(x.includes('Evolution (owner-requested, 2026-11-22): evidence-driven stopping instead of the old call/minute cap, the checkpoint, the plan-resident attestation and digest cycle, the `debate-check` checker and the separate carrier field.'));
   assert.ok(x.includes('`node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root> --repo <repo>`'));

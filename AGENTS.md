@@ -489,8 +489,8 @@ default call or minute cap. It stops on evidence: `CONVERGED` needs the
 counterpart's AGREE as one schema-validated response object (never free text) for
 the exact final plan digest; rounds that stop being
 productive climb a diagnostic ladder and then escalate as `UNRESOLVED`; an
-owner-configured budget or a provider or resource limit is reported as
-`LIMIT_REACHED`, never as convergence. `brief.mjs debate-check` verifies the
+owner-configured budget is reported as `LIMIT_REACHED`, and a provider or resource
+failure as `UNRESOLVED` with `incomplete_review`, never as convergence. `brief.mjs debate-check` verifies the
 plan-resident attestation and the retained relay evidence without forcing
 agreement, and outstanding positions go to the one human approval, never
 manufactured consensus or an endless loop.

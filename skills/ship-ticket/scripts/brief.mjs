@@ -184,7 +184,6 @@ const DEBATE_ID_FORMAT = /^debate-[A-Za-z0-9][A-Za-z0-9._-]{0,100}-\d{8}T\d{4}Z$
 const CARRIER_KINDS = { codex: ['codex_relay'], claude: ['claude_relay', 'native_session'], fable: ['native_session', 'claude_relay'] };
 const PAIRED = { claude: 'codex', codex: 'claude' };
 const ROUND_STATUS = ['completed', 'failed', 'timeout', 'aborted', 'unavailable'];
-const LIMIT_KINDS = ['configured_budget', 'provider_limit', 'resource_limit'];
 const SEVERITIES = ['blocker', 'major', 'minor'];
 const CONCRETE = new Set(['accept_risk', 'decided', 'waived']);
 const BRIEF_LINE = /^(request_id|plan_version|plan_digest): (\S+)$/;
@@ -194,6 +193,19 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const placeholder = (v) => !nonEmpty(v) || /^(none|tbd|todo|pending|n\/a|-)$/i.test(v.trim()) || /<[^>]*>/.test(v);
 
 /** Keys sorted at every depth; arrays keep their order. */
+const MAX_JSON_DEPTH = 64;
+/** Whether a parsed JSON value nests deeper than MAX_JSON_DEPTH, measured ITERATIVELY (no recursion over untrusted depth). */
+const tooDeep = (root) => {
+  const stack = [[root, 0]];
+  while (stack.length) {
+    const [v, d] = stack.pop();
+    if (d > MAX_JSON_DEPTH) return true;
+    if (Array.isArray(v)) for (const x of v) stack.push([x, d + 1]);
+    else if (isObject(v)) for (const x of Object.values(v)) stack.push([x, d + 1]);
+  }
+  return false;
+};
+/** Keys sorted at every depth; arrays keep their order. Callers refuse values deeper than MAX_JSON_DEPTH first. */
 function canonical(v) {
   if (Array.isArray(v)) return v.map(canonical);
   if (isObject(v)) return Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])]));
@@ -237,6 +249,7 @@ export function readAttestation(planText) {
   let att;
   try { att = JSON.parse(line.slice(ATTEST_HEAD.length, line.length - ATTEST_TAIL.length)); } catch (err) { return bad('debate_attestation_invalid', `the attestation JSON does not parse: ${err.message}`); }
   if (!isObject(att)) return bad('debate_attestation_invalid', 'the attestation is not a JSON object');
+  if (tooDeep(att)) return bad('debate_attestation_invalid', `the attestation JSON nests deeper than ${MAX_JSON_DEPTH} levels`);
   let again;
   try { again = serializeAttestation(att); } catch (err) { return bad('debate_attestation_invalid', err.message); }
   if (again !== line) return bad('debate_attestation_invalid', 'the attestation line is not in canonical form (use `brief.mjs debate-serialize`; never hand-edit it)');
@@ -283,6 +296,7 @@ function readDispositions(narr) {
   let d;
   try { d = JSON.parse(line.slice(DISPO_HEAD.length)); } catch (err) { return { error: `the ${DISPO_TOKEN} JSON does not parse: ${err.message}` }; }
   if (!sameKeys(d, DISPO_KEYS)) return { error: `the ${DISPO_TOKEN} object must hold exactly ${DISPO_KEYS.join(', ')}` };
+  if (tooDeep(d)) return { error: `the ${DISPO_TOKEN} JSON nests deeper than ${MAX_JSON_DEPTH} levels` };
   if (serializeDispositions(d) !== line) return { error: `the ${DISPO_TOKEN} line is not exactly \`${DISPO_HEAD}<canonical JSON>\` from column 1 (use \`brief.mjs debate-serialize --dispositions\`)` };
   if (d.v !== 1 || typeof d.debate_id !== 'string' || !DEBATE_OUTCOMES.includes(d.outcome) || typeof d.carrier_degraded !== 'boolean'
     || !(d.degradation_ack === null || typeof d.degradation_ack === 'string')) return { error: `${DISPO_TOKEN}: v 1, debate_id, outcome, carrier_degraded and degradation_ack have the wrong type or value` };
@@ -652,15 +666,22 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
     if (open.some(([, d]) => d.rank >= RANK.major)) add('debate_open_finding', `CONVERGED with an open blocker or major in the derived ledger: ${open.filter(([, d]) => d.rank >= RANK.major).map(([id]) => id).join(', ')}`);
     if (!['done', 'not_applicable'].includes(att.contract_recheck)) add('debate_outcome_invalid', 'CONVERGED needs contract_recheck done or not_applicable (changed-contract compatibility rechecked)');
     if (att.limit !== null && att.limit !== undefined) add('debate_outcome_invalid', 'CONVERGED carries no limit');
+    if (att.incomplete_review === true) add('debate_outcome_invalid', 'CONVERGED is never an incomplete review');
   } else {
     if (att.plan_digest !== digest) add('debate_digest_mismatch', `the attestation binds ${att.plan_digest}, but the frozen narrative digest is ${digest}`);
-    if (outcome === 'UNRESOLVED') {
+    if (outcome === 'UNRESOLVED' && att.incomplete_review === true) {
+      const relay = last ? perRound.get(last.n)?.relay : null;
+      if (!relay) add('debate_outcome_invalid', 'an incomplete review needs the retained relay result of the failed last attempt');
+      else if (relay.status === 'completed' && relay.exitCode === 0) add('debate_outcome_invalid', 'an incomplete review needs a failed last attempt, but its retained relay result says completed with exit 0');
+      if (open.some(([id]) => !nonEmpty(attById.get(id)?.host_position) || !nonEmpty(attById.get(id)?.counterpart_position))) add('debate_outcome_invalid', 'every outstanding canonical finding needs both positions');
+      if (final !== null && final !== undefined) add('debate_outcome_invalid', 'UNRESOLVED carries no final confirmation');
+    } else if (outcome === 'UNRESOLVED') {
       if (!open.length || open.some(([id]) => !nonEmpty(attById.get(id)?.host_position) || !nonEmpty(attById.get(id)?.counterpart_position))) add('debate_outcome_invalid', 'UNRESOLVED needs at least one outstanding canonical finding, each with both positions');
-      if (!completedNumbers.size) add('debate_outcome_invalid', 'UNRESOLVED needs at least one verified counterpart response; a debate that never got one is LIMIT_REACHED');
+      if (!completedNumbers.size) add('debate_outcome_invalid', 'UNRESOLVED needs at least one verified counterpart response; a debate that stopped on a failure is UNRESOLVED with incomplete_review');
       if (final !== null && final !== undefined) add('debate_outcome_invalid', 'UNRESOLVED carries no final confirmation');
     } else if (outcome === 'LIMIT_REACHED') {
       if (att.final !== null) add('debate_outcome_invalid', 'LIMIT_REACHED is never converted to CONVERGED: final must be null');
-      checkLimit(att, last, last ? perRound.get(last.n)?.diag : null, add);
+      checkLimit(att, add);
       if (!ledger.size && att.incomplete_review !== true) add('debate_limit_invalid', 'a limit reached with no findings must say incomplete_review: true');
     } else if (outcome === 'SKIPPED') {
       if (rounds.length || findings.length || (final !== null && final !== undefined)) add('debate_outcome_invalid', 'SKIPPED records no round, finding or confirmation');
@@ -668,88 +689,33 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
     }
   }
   const byId = new Map(asList(D?.dispositions).map((row) => [row.id, row]));
-  const need = [...base.outstanding, ...(outcome === 'LIMIT_REACHED' ? ['LIMIT'] : [])];
+  const needsLimit = outcome === 'LIMIT_REACHED' || (outcome === 'UNRESOLVED' && att.incomplete_review === true);
+  const need = [...base.outstanding, ...(needsLimit ? ['LIMIT'] : [])];
   base.pending = outcome === 'CONVERGED' || outcome === 'SKIPPED' ? [] : need.filter((id) => dispositionProblem(id, byId.get(id), D, rounds, digest));
   base.debate_qualified = outcome === 'CONVERGED' && errors.length === 0;
   const m = (k, v) => (v === null || v === undefined ? [] : [`${k}=${v}`]);
   base.run_log_metrics = [...m('debate_outcome', outcome.toLowerCase()), ...m('debate_carrier', carrier.agent), ...m('debate_carrier_degraded', carrier.degraded),
     ...m('debate_rounds', metrics.rounds), ...m('debate_calls', metrics.calls), ...m('debate_minutes', metrics.minutes),
     ...m('plan_debate_started_at', metrics.started_at), ...m('plan_debate_ended_at', metrics.ended_at), ...(typeof metrics.tokens === 'number' ? [`debate_tokens=${metrics.tokens}`] : [])];
-  return done({ attestation: att, line: got.line, byId, D, rounds });
-}
-
-const PROVIDER_RE = /\b(429|quota|rate.?limit\w*|usage limit\w*)\b/i;
-const RESOURCE_RE = /\b(EPERM|EACCES|ENOMEM|ENOSPC|EMFILE|out of memory|killed|timed? ?out)\b/i;
-/**
- * The class of one whole diagnostic string: provider when only provider/quota/rate-limit markers occur, resource when
- * only permission/resource/kill/timeout markers occur, ambiguous when both do, unclassified when neither does. Only
- * provider and resource support a limit kind. A dispatch error's structured class must agree with its text.
- */
-function entryClass(text, dispatchClass = null) {
-  const p = PROVIDER_RE.test(text), r = RESOURCE_RE.test(text);
-  const fromText = p && !r ? 'provider' : r && !p ? 'resource' : p && r ? 'ambiguous' : 'unclassified';
-  if (!dispatchClass) return fromText;
-  const structured = dispatchClass === 'provider' ? 'provider' : ['permission_denied', 'resource'].includes(dispatchClass) ? 'resource' : 'ambiguous';
-  return fromText === 'unclassified' || fromText === structured ? structured : 'ambiguous';
-}
-/**
- * Every string leaf of a JSON value: string values, object KEYS, numbers and booleans rendered as strings, at every
- * depth and inside arrays. There is no depth cap and no field list (`d` only tracks depth; nothing is cut).
- */
-const valueLeaves = (v, d = 0) => (typeof v === 'string' ? [v]
-  : typeof v === 'number' || typeof v === 'boolean' ? [String(v)]
-    : Array.isArray(v) ? v.flatMap((x) => valueLeaves(x, d + 1))
-      : isObject(v) ? Object.entries(v).flatMap(([k, x]) => [k, ...valueLeaves(x, d + 1)]) : []);
-/**
- * The diagnostic sources of a relay result, ONE per whole source: the result's `error` value, and each error event of
- * events.jsonl (`type: error`, `turn.failed`, or an item of type `error`), each read IN FULL from the canonical string
- * leaves of its whole JSON value (no field is selected, so no field can be missed). Message events (agent messages,
- * reasoning, the final message) never count. Each source's string is classified as a whole: an event naming both a
- * 429 and EPERM, in any fields, is ambiguous and supports neither kind. Exported for the generated position test.
- */
-export function diagnosticEntries(res, eventsText) {
-  const out = [];
-  const push = (v) => { const text = valueLeaves(v).join('\n'); if (text.trim()) out.push({ text, cls: entryClass(text) }); };
-  if (res?.error !== undefined && res.error !== null) push(res.error);
-  for (const l of normalise(eventsText).split('\n')) {
-    let e;
-    try { e = JSON.parse(l); } catch { continue; }
-    if (!isObject(e)) continue;
-    const item = isObject(e.item) ? e.item : null;
-    const isError = e.type === 'error' || e.type === 'turn.failed' || item?.type === 'error';
-    if (!isError) continue;
-    push(e);
-  }
-  return out;
+  return done({ attestation: att, line: got.line, byId, D, rounds, needsLimit });
 }
 
 /**
- * The limit record: kind and kind-specific evidence. configured_budget names the configured value it reached; a
- * provider or resource limit quotes text that occurs in the last attempt's RETAINED diagnostics (relay result, events
- * or dispatch error), and that text must be of the limit's class: a provider limit needs provider, quota or rate-limit
- * diagnostics; EPERM or EACCES is a permission or resource limit, never a provider limit.
+ * The limit record (D-A10, 2026-11-23): LIMIT_REACHED is recorded only for a configured budget, whose evidence names the
+ * configured value it reached. A provider or resource failure is not classified from text at all: it is UNRESOLVED with
+ * incomplete_review, the retained relay result showing the actual failure.
  */
-function checkLimit(att, last, lastDiag, add) {
+function checkLimit(att, add) {
   const L = att.limit;
-  if (!isObject(L) || !LIMIT_KINDS.includes(L.kind) || !nonEmpty(L.evidence)) { add('debate_limit_invalid', `limit must be {kind: ${LIMIT_KINDS.join(' | ')}, evidence}`); return; }
-  if (L.kind === 'configured_budget') {
-    const b = isObject(att.budget) ? att.budget : {};
-    const used = isObject(att.metrics) ? att.metrics : {};
-    const configured = [[b.max_rounds, used.rounds], [b.max_minutes, used.minutes]].filter(([v]) => typeof v === 'number');
-    if (!configured.length) add('debate_limit_invalid', 'configured_budget needs a configured max_rounds or max_minutes (an owner or repository override)');
-    else if (!configured.some(([v, u]) => typeof u === 'number' && u >= v && L.evidence.includes(String(v)))) add('debate_limit_invalid', 'the configured budget was not reached, or the evidence does not name the configured value');
-  } else if (!last || last.status === 'completed') add('debate_limit_invalid', `${L.kind} needs a last attempt with its actual status (failed, timeout, aborted or unavailable) and diagnostics`);
-  else {
-    const ev = L.evidence.trim();
-    const hits = asList(lastDiag).filter((e) => e.text.includes(ev));
-    const providerish = hits.some((e) => e.cls === 'provider');
-    const resourceish = hits.some((e) => e.cls === 'resource');
-    if (!hits.length) add('debate_limit_invalid', 'the limit evidence is not quoted from one retained diagnostic entry of the last attempt (the relay error, an error event or the dispatch error; never a counterpart message)');
-    else {
-      if (L.kind === 'provider_limit' && !providerish) add('debate_limit_invalid', 'provider_limit needs a diagnostic entry of the provider class (quota or rate limit only); EPERM or EACCES is a permission or resource limit, and an entry naming both is ambiguous');
-      if (L.kind === 'resource_limit' && !resourceish) add('debate_limit_invalid', 'resource_limit needs a diagnostic entry of the resource class (permission, resource, kill or timeout only); an entry naming both is ambiguous');
-    }
+  if (!isObject(L) || L.kind !== 'configured_budget' || !nonEmpty(L.evidence)) {
+    add('debate_limit_invalid', 'LIMIT_REACHED is recorded only for a configured budget ({kind: configured_budget, evidence: the configured value}); a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified');
+    return;
   }
+  const b = isObject(att.budget) ? att.budget : {};
+  const used = isObject(att.metrics) ? att.metrics : {};
+  const configured = [[b.max_rounds, used.rounds], [b.max_minutes, used.minutes]].filter(([v]) => typeof v === 'number');
+  if (!configured.length) add('debate_limit_invalid', 'configured_budget needs a configured max_rounds or max_minutes (an owner or repository override)');
+  else if (!configured.some(([v, u]) => typeof u === 'number' && u >= v && L.evidence.includes(String(v)))) add('debate_limit_invalid', 'the configured budget was not reached, or the evidence does not name the configured value');
 }
 
 /**
@@ -760,7 +726,7 @@ function checkLimit(att, last, lastDiag, add) {
  * Returns { diag, response }.
  */
 function verifyRound(r, att, bundleDir, add) {
-  const out = { diag: [], response: null };
+  const out = { relay: null, response: null };
   const kind = att.carrier.kind;
   const files = isObject(r.files) ? r.files : {};
   const hashes = isObject(r.sha256) ? r.sha256 : {};
@@ -783,14 +749,13 @@ function verifyRound(r, att, bundleDir, add) {
   if (r.status !== 'completed' && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
-    else out.diag = [{ text: e.text, cls: entryClass(e.text, e.class) }];
   }
   const expect = { request_id: r.request_id, plan_version: r.plan_version, plan_digest: r.plan_digest };
   let parsed = null;
   if (got.result) {
     let res;
     try { res = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(got.result)); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not UTF-8 JSON`); return out; }
-    out.diag = diagnosticEntries(res, got.events ? got.events.toString('utf8') : '');
+    out.relay = { status: res.status, exitCode: res.exitCode };
     const status = /_unavailable$/.test(String(res.status)) ? 'unavailable' : res.status;
     if (status !== r.status) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
     if (res.exitCode !== r.exit_code) add('debate_evidence_mismatch', `round ${r.n} records exit ${r.exit_code}, the relay result says ${res.exitCode}`);
@@ -861,7 +826,7 @@ function debateStartCheck(planText, start, { bundleDir, repo, digest, add }) {
   const v = verifyDebate(planText, { bundleDir, repo });
   for (const e of v.errors) put(e.code, e.message);
   if (added || v.outcome === 'CONVERGED' || v.outcome === 'SKIPPED') return;
-  const need = [...v.outstanding, ...(v.outcome === 'LIMIT_REACHED' ? ['LIMIT'] : [])];
+  const need = [...v.outstanding, ...(v.needsLimit ? ['LIMIT'] : [])];
   for (const id of need) {
     const p = dispositionProblem(id, v.byId.get(id), v.D, v.rounds, digest);
     if (p) add(p[0], p[1]);

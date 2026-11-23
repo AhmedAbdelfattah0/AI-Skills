@@ -308,39 +308,6 @@ function limited(t, { narr: n0 = narrative(), over = {}, roundOpts = {} } = {}) 
   return { bundle, D, att, line, narr, text: planText(narr, [line]) };
 }
 
-test('LIMIT_REACHED: first-dispatch quota failure with empty findings is valid, with or without a result file', (t) => {
-  const withFile = limited(t);
-  assert.deepEqual(pre(withFile).errors, []);
-  assert.equal(pre(withFile).debate_qualified, false);
-  const noFile = limited(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'codex exited before writing result.json: usage limit' } } });
-  assert.deepEqual(pre(noFile).errors, []);
-  const nothing = limited(t, { roundOpts: { noResult: true } });
-  assert.ok(codes(pre(nothing)).includes('debate_evidence_missing'), 'no result file and no dispatch-failure evidence');
-  const notIncomplete = limited(t, { over: { incomplete_review: false } });
-  assert.ok(codes(pre(notIncomplete)).includes('debate_limit_invalid'), 'empty findings must say incomplete_review');
-  const claimsConverged = limited(t, { over: { final: { request_id: 'req-1', plan_version: 'v1', plan_digest: 'sha256:x', verdict: 'AGREE' } } });
-  assert.ok(codes(pre(claimsConverged)).includes('debate_outcome_invalid'), 'LIMIT_REACHED is never converted to CONVERGED');
-  const qualifiedClaim = limited(t, { over: { debate_qualified: true } });
-  assert.ok(codes(pre(qualifiedClaim)).includes('debate_outcome_invalid'), 'an attestation may not self-declare qualification');
-  const noKind = limited(t, { over: { limit: { kind: 'tired', evidence: 'x' } } });
-  assert.ok(codes(pre(noKind)).includes('debate_limit_invalid'));
-  const fakeSuccess = limited(t, { roundOpts: { result_status: 'completed', result_exit: 0 } });
-  assert.ok(codes(pre(fakeSuccess)).includes('debate_evidence_mismatch'), 'a failed attempt keeps its actual relay status');
-});
-
-test('LIMIT_REACHED: configured_budget needs the configured value and its being reached; provider_limit needs the error text', (t) => {
-  const ok = limited(t, { roundOpts: { status: 'completed', verdict: 'CHANGES_REQUESTED' }, over: { findings: [FIND({ status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })], budget: { max_rounds: 1, max_minutes: null }, metrics: { rounds: 1, calls: 1, minutes: 9, started_at: '2026-11-22T10:00:00Z', ended_at: '2026-11-22T10:09:00Z', tokens: null }, limit: { kind: 'configured_budget', evidence: 'max_rounds: 1 (repository override)' } } });
-  assert.deepEqual(pre(ok).errors, []);
-  const noBudget = limited(t, { roundOpts: { status: 'completed' }, over: { limit: { kind: 'configured_budget', evidence: 'max_rounds: 1' } } });
-  assert.ok(codes(pre(noBudget)).includes('debate_limit_invalid'), 'no configured budget');
-  const notReached = limited(t, { roundOpts: { status: 'completed' }, over: { budget: { max_rounds: 5, max_minutes: null }, limit: { kind: 'configured_budget', evidence: 'max_rounds: 5' } } });
-  assert.ok(codes(pre(notReached)).includes('debate_limit_invalid'), 'the budget was not reached');
-  const noText = limited(t, { over: { limit: { kind: 'provider_limit', evidence: '' } } });
-  assert.ok(codes(pre(noText)).includes('debate_limit_invalid'));
-  const providerButCompleted = limited(t, { roundOpts: { status: 'completed' } });
-  assert.ok(codes(pre(providerButCompleted)).includes('debate_limit_invalid'), 'a provider limit needs a failed, timed-out, aborted or unavailable last attempt');
-});
-
 function skipped(t, { carrier } = {}) {
   const narr = withResult(narrative({ carrier: carrier ?? { exception: 'SKIPPED', reason: 'docs-only follow-up agreed with the owner', exceptionAck: B.SKIP_ACK } }), 'SKIPPED');
   const att = attestation({ outcome: 'SKIPPED', plan_digest: digestOf(narr), rounds: [], findings: [], final: null, metrics: { rounds: 0, calls: 0, minutes: 0, started_at: null, ended_at: null, tokens: null } });
@@ -401,8 +368,7 @@ test('property: UNRESOLVED and LIMIT_REACHED are never refused solely because th
   for (const sev of ['blocker', 'major', 'minor']) {
     variants.push(unresolved(t, { r1: { findings: [{ id: 'P3', status: 'new', severity: sev }] }, findings: [FIND({ id: 'P3', severity: sev, status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] }));
   }
-  for (const status of ['failed', 'timeout', 'aborted', 'unavailable']) variants.push(limited(t, { roundOpts: { status } }));
-  variants.push(limited(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'quota' } } }));
+  for (const status of ['failed', 'timeout', 'aborted', 'unavailable']) variants.push(incomplete(t, { roundOpts: { status } }));
   for (const x of variants) {
     const r = pre(x);
     assert.deepEqual(r.errors, [], `${x.att.outcome} ${JSON.stringify(r.errors)}`);
@@ -477,7 +443,7 @@ test('start-check: UNRESOLVED blocks START while a disposition is pending; concr
 });
 
 test('start-check: LIMIT_REACHED needs an owner disposition of the limit; SKIPPED with its exception may START', (t) => {
-  const lx = (rows) => { const x = limited(t, { narr: narrative({ rows }) }); return codes(sc(planText(x.narr, [x.line, startLine(x)]), retain(t, x))); };
+  const lx = (rows) => { const x = limited(t, { narr: narrative({ rows }), over: { rounds: [], findings: [], incomplete_review: true, budget: { max_rounds: null, max_minutes: 1 }, metrics: { rounds: 0, calls: 0, minutes: 1, started_at: null, ended_at: null, tokens: null }, limit: { kind: 'configured_budget', evidence: 'max_minutes: 1' } } }); return codes(sc(planText(x.narr, [x.line, startLine(x)]), retain(t, x))); };
   assert.deepEqual(lx([]), ['debate_disposition_pending']);
   assert.deepEqual(lx([['LIMIT', 'accept_risk', 'The owner accepts planning without a counterpart review: quota exhausted.', 'no']]), []);
   const s = skipped(t);
@@ -720,6 +686,14 @@ async function mutant(find, replace) {
   try { return await import(pathToFileURL(path).href); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 const MUTANTS = [
+  ['D-A10: LIMIT_REACHED only for a configured budget', "if (!isObject(L) || L.kind !== 'configured_budget' || !nonEmpty(L.evidence)) {", "if (L?.kind !== 'configured_budget') return; if (false) {",
+    (t) => ({ x: limited(t, { roundOpts: { result_error: 'usage limit reached (429)' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
+  ['D-A10: an incomplete review needs a failed relay result', "else if (relay.status === 'completed' && relay.exitCode === 0) add('debate_outcome_invalid'", "else if (false) add('debate_outcome_invalid'",
+    (t) => ({ x: incomplete(t, { roundOpts: { status: 'completed', verdict: 'AGREE', findings: [] } }), code: 'debate_outcome_invalid' })],
+  ['D-A10: an incomplete review needs a retained relay result', "if (!relay) add('debate_outcome_invalid'", "if (!relay) void ('debate_outcome_invalid'",
+    (t) => ({ x: incomplete(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'spawn failed' } } }), code: 'debate_outcome_invalid' })],
+  ['D-A10: CONVERGED is never an incomplete review', "if (att.incomplete_review === true) add('debate_outcome_invalid', 'CONVERGED", "if (false) add('debate_outcome_invalid', 'CONVERGED",
+    (t) => ({ x: converged(t, { over: { incomplete_review: true } }), code: 'debate_outcome_invalid' })],
   ['D-A9: no comment spans a line', "if (lines[n].indexOf('-->', at + 4) < 0) return", 'if (false) return',
     (t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: ')); return { x: converged(t, { narr: base.replace(line, `<!--\n${line}\n-->`) }), code: 'debate_narrative_hidden_markup' }; }],
   ['dispositions debate_id binding', "if (D && D.debate_id !== att.debate_id) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
@@ -768,10 +742,8 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { over: { host: { agent: 'codex', identity: 'codex:gpt-5.5' }, carrier: { agent: 'claude', kind: 'claude_relay', identity: 'claude:opus-5-5', degraded: false } }, r1: { kind: 'claude_relay', session: 's' }, r2: { kind: 'claude_relay', session: 's', auth_method: 'api_key' } }), code: 'debate_carrier_invalid' })],
   ['configured budget reached', "else if (!configured.some(([v, u]) => typeof u === 'number' && u >= v && L.evidence.includes(String(v)))) add('debate_limit_invalid'", "else if (false) add('debate_limit_invalid'",
     (t) => ({ x: limited(t, { roundOpts: { status: 'completed' }, over: { budget: { max_rounds: 5, max_minutes: null }, limit: { kind: 'configured_budget', evidence: 'max_rounds: 5' } } }), code: 'debate_limit_invalid' })],
-  ['provider limit needs a failed attempt', "} else if (!last || last.status === 'completed') add('debate_limit_invalid'", "} else if (false) add('debate_limit_invalid'",
-    (t) => ({ x: limited(t, { roundOpts: { status: 'completed', result_error: 'usage limit reached (429)' } }), code: 'debate_limit_invalid' })],
   ['empty findings need incomplete_review', "if (!ledger.size && att.incomplete_review !== true) add('debate_limit_invalid'", "if (false) add('debate_limit_invalid'",
-    (t) => ({ x: limited(t, { over: { incomplete_review: false } }), code: 'debate_limit_invalid' })],
+    (t) => ({ x: limited(t, { over: { rounds: [], findings: [], incomplete_review: false, budget: { max_rounds: null, max_minutes: 1 }, metrics: { rounds: 0, calls: 0, minutes: 1, started_at: null, ended_at: null, tokens: null }, limit: { kind: 'configured_budget', evidence: 'max_minutes: 1' } } }), code: 'debate_limit_invalid' })],
   ['UNRESOLVED needs an outstanding finding', "if (!open.length || open.some(([id]) => !nonEmpty(attById.get(id)?.host_position) || !nonEmpty(attById.get(id)?.counterpart_position))) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
     (t) => ({ x: unresolved(t, { r2: { verdict: 'AGREE', findings: [{ id: 'P3', status: 'confirmed' }] }, findings: [FIND({ id: 'P3', closed_round: 2 })] }), code: 'debate_outcome_invalid' })],
   ['canonical attestation bytes', 'if (again !== line) return bad(', 'if (false) return bad(',
@@ -792,10 +764,6 @@ const MUTANTS = [
     (t) => ({ x: unresolved(t, { r2: { findings: [] } }), code: 'debate_response_invalid' })],
   ['exactly one dispositions line', 'if (count !== 1) return { error:', 'if (false) return { error:',
     (t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: ')); return { x: converged(t, { narr: base.replace('## 8.', `${line}\n\n## 8.`) }), code: 'debate_attestation_invalid' }; }],
-  ['limit class from the whole entry, not the quoted words', "const providerish = hits.some((e) => e.cls === 'provider');", 'const providerish = PROVIDER_RE.test(ev);',
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn EPERM. No quota problem.' }, over: { limit: { kind: 'provider_limit', evidence: 'No quota problem.' } } }), code: 'debate_limit_invalid' })],
-  ['counterpart message events never count', 'if (!isError) continue;', 'if (false) continue;',
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn failed', events: '{"type":"item.completed","item":{"type":"agent_message","text":"usage limit reached (429)"}}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
   ['dispositions line canonical bytes', 'if (serializeDispositions(d) !== line) return { error:', 'if (false) return { error:',
     (t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
       const loose = 'debate-dispositions-v1: ' + JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(line.slice(24))).reverse())); return { x: converged(t, { narr: base.replace(line, loose) }), code: 'debate_attestation_invalid' }; }],
@@ -813,14 +781,8 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { over: { findings: [FIND(), FIND({ id: 'P7', severity: 'minor', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] } }), code: 'debate_attestation_invalid' })],
   ['no symlink inside a bundle', "if (lstatSync(p).isSymbolicLink()) return { code: 'debate_evidence_mismatch'", "if (false) return { code: 'debate_evidence_mismatch'",
     (t) => { const x = converged(t); spawnSync('mv', [join(x.bundle, 'r2'), join(x.bundle, 'r2real')]); symlinkSync('r2real', join(x.bundle, 'r2')); return { x, code: 'debate_evidence_mismatch' }; }],
-  ['limit evidence quoted from one diagnostic entry', "if (!hits.length) add('debate_limit_invalid'", "if (!hits.length) void ('debate_limit_invalid'",
-    (t) => ({ x: limited(t, { over: { limit: { kind: 'provider_limit', evidence: 'quota exhausted at 3am' } } }), code: 'debate_limit_invalid' })],
-  ['provider limit needs provider diagnostics', "if (L.kind === 'provider_limit' && !providerish) add('debate_limit_invalid'", "if (false) add('debate_limit_invalid'",
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted' }, over: { limit: { kind: 'provider_limit', evidence: 'EPERM: operation not permitted' } } }), code: 'debate_limit_invalid' })],
   ['dispositions-line outcome matches the attestation', "if (D && D.outcome !== outcome) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
     (t) => ({ x: converged(t, { narr: withResult(narrative(), 'UNRESOLVED') }), code: 'debate_outcome_invalid' })],
-  ['diagnostics: no field selection (the whole event is read)', '    push(e);\n', '    push([e.message, e.error]);\n',
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn failed', events: '{"type":"error","message":"usage limit reached (429)","code":"EPERM"}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
   ['{-leading attestation refused', "if (R.events.some((e) => Object.hasOwn(e, 'debate-attestation-v1') || Object.hasOwn(e, 'debate_id'))) {", 'if (false) {',
     (t) => { const x = converged(t); return { x, text: planText(x.narr, [JSON.stringify({ debate_id: DEBATE_ID, outcome: 'CONVERGED' })]), code: 'debate_attestation_invalid' }; }],
 ];
@@ -828,12 +790,11 @@ const PROBE_OK = { relay_present: true, codex_version: { status: 0, version: 'co
   dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', codexVersion: 'codex-cli 1.0.0', finalMessage: PROBE_MSG('n') } },
   resume: { result: { status: 'completed', threadId: 't', sandbox: 'read-only' } }, cancel: { child_seen: true, result: { status: 'timeout' }, survivors: [] }, coverage: { before: 'c', after: 'c', ignored_before: 'i', ignored_after: 'i' } };
 const OTHER_MUTANTS = [
-  ['diagnostics: object keys are leaves', 'Object.entries(v).flatMap(([k, x]) => [k, ...valueLeaves(x, d + 1)])', 'Object.values(v).flatMap((x) => valueLeaves(x, d + 1))',
-    (mod) => mod.diagnosticEntries({}, '{"type":"error","message":"usage limit reached (429)","meta":{"EPERM":"seen"}}\n')[0].cls === 'ambiguous'],
-  ['diagnostics: array elements are leaves', 'Array.isArray(v) ? v.flatMap((x) => valueLeaves(x, d + 1))', 'Array.isArray(v) ? []',
-    (mod) => mod.diagnosticEntries({}, '{"type":"error","message":"usage limit reached (429)","details":["context","EPERM"]}\n')[0].cls === 'ambiguous'],
-  ['diagnostics: no depth cap', 'const valueLeaves = (v, d = 0) => (typeof v', 'const valueLeaves = (v, d = 0) => (d > 3 ? [] : typeof v',
-    (mod) => mod.diagnosticEntries({}, `${JSON.stringify({ type: 'error', message: 'usage limit reached (429)', deep6: { nested: { nested: { nested: { nested: { nested: { leaf: 'EPERM' } } } } } } })}\n`)[0].cls === 'ambiguous'],
+  ['D-A10: untrusted JSON depth is checked iteratively before serializing', 'if (d > MAX_JSON_DEPTH) return true;', 'if (false) return true;',
+    (mod, t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
+      const deep = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), dispositions: [{ id: 'P1', kind: 'accept_risk', resolution: DEEP(5000, 'x'), design_change: false }] })}`;
+      const x = converged(t, { narr: base.replace(line, deep) });
+      try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_attestation_invalid'); } catch { return false; } }],
   ['probe: fresh_result needs an explicit AGREE', "probeExpect(o.nonce)).obj?.verdict === 'AGREE' ?", 'probeExpect(o.nonce)).ok ?',
     (mod) => mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only',
       finalMessage: JSON.stringify({ v: 1, request_id: 'probe-n1', plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}`, verdict: 'CHANGES_REQUESTED', findings: [{ id: 'P1', status: 'new', severity: 'major' }] }) } } }).fresh_result.result === 'fail'],
@@ -907,6 +868,8 @@ for (const [name, find, replace, make] of MUTANTS) {
   });
 }
 const START_MUTANTS = [
+  ['D-A10: an incomplete review needs the LIMIT disposition', "const needsLimit = outcome === 'LIMIT_REACHED' || (outcome === 'UNRESOLVED' && att.incomplete_review === true);", "const needsLimit = outcome === 'LIMIT_REACHED';",
+    (t) => ({ x: incomplete(t), code: 'debate_disposition_pending' })],
   ['waived needs the frozen exception', "if (row.kind === 'waived' && !exceptionOk(D, 'WAIVED') && !exceptionOk(D, 'SKIPPED')) return ['debate_disposition_pending'", "if (false) return ['debate_disposition_pending'",
     (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'waived', 'Out of scope.', 'no']] }) }), code: 'debate_disposition_pending' })],
   ['pending disposition', "if (placeholder(row.resolution)) return ['debate_disposition_pending'", "if (false) return ['debate_disposition_pending'",
@@ -1030,13 +993,6 @@ test('[rr1-6] retained bundle containment: a symlink inside it, or a symlinked d
   const y = converged(t);
   assert.equal(B.retainBundle(y.text, { from: y.bundle, to: B.debateLocator(common, TICKET, DEBATE_ID), root: common, repo: REPO }).ok, false);
   assert.deepEqual(readdirSync(elsewhere), [], 'nothing was written through the symlink');
-});
-
-test('[rr1-7] limit evidence must occur in the retained diagnostics and match the limit kind', (t) => {
-  const eperm = 'EPERM: operation not permitted';
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: eperm } }))).includes('debate_limit_invalid'), 'quota text not in the diagnostics');
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: eperm }, over: { limit: { kind: 'provider_limit', evidence: eperm } } }))).includes('debate_limit_invalid'), 'EPERM is not a provider limit');
-  assert.deepEqual(pre(limited(t, { roundOpts: { result_error: eperm }, over: { limit: { kind: 'resource_limit', evidence: eperm } } })).errors, []);
 });
 
 test('[rr1-8] probe classifier is carrier-specific: a Claude relay uses sessionId, readOnly and subscription auth', () => {
@@ -1178,14 +1134,6 @@ test('[rr2-b] a new version may take several exchanges: v1 CR -> v2 CR -> v2 AGR
   assert.deepEqual(codes(sc(planText(stale.narr, [stale.line, startLine(stale)]), retain(t, stale))), ['debate_reconfirm_required'], 'the AGREE reuses a version an older digest used');
 });
 
-test('[rr2-c] the limit class is read from the quoted evidence itself, inside one diagnostic entry', (t) => {
-  const mixed = 'EPERM: operation not permitted. No quota problem.';
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: mixed }, over: { limit: { kind: 'provider_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'));
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: mixed }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'), 'repair 3: an ambiguous entry fails closed for both kinds');
-  const split = limited(t, { roundOpts: { result_error: 'usage limit', events: '{"type":"error","message":"reached (429)"}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } });
-  assert.ok(codes(pre(split)).includes('debate_limit_invalid'), 'evidence stitched across two diagnostic entries');
-});
-
 // ================================================================== REAL relay evidence (fixtures/debate-evidence, provenance.json)
 // The files are real codex-delegate relay output with privacy redactions (@REPO@, @SCRATCH@, @HOME@). The redacted bytes
 // differ from the originals; the tests rebind the path fields and hash what they materialize.
@@ -1288,16 +1236,6 @@ test('[rr3-B2] inherited GIT_* overrides are scrubbed and the workdir must be a 
   assert.ok(codes(pre(converged(t, { over: { workdir: wd }, r1: { workdir: wd }, r2: { workdir: wd } }))).includes('debate_workdir_unbound'), 'a hand-made gitdir whose commondir points at the repository is not a registered worktree');
 });
 
-test('[rr3-B3] limit evidence: counterpart message events never count; an ambiguous diagnostic entry matches no limit class', (t) => {
-  const msg = '{"type":"item.completed","item":{"type":"agent_message","text":"usage limit reached (429)"}}\n';
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: msg }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'), 'quoted from an agent_message event');
-  const err = '{"type":"error","message":"usage limit reached (429)"}\n';
-  assert.deepEqual(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: err }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } })).errors, [], 'an error event counts');
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn EPERM. No quota problem.' }, over: { limit: { kind: 'provider_limit', evidence: 'No quota problem.' } } }))).includes('debate_limit_invalid'), 'the entry is a permission error, whatever the quoted words say');
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted. No quota problem.' }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'), 'an ambiguous entry fails closed');
-  assert.deepEqual(pre(limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted' }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } })).errors, []);
-});
-
 test('[rr3-B4] the pinned CLI must report a non-empty version that the relay reports too', { skip: POSIX_ONLY }, (t) => {
   const f = probeFixture(t);
   const out = JSON.parse(probe({ ...f, codex: '/usr/bin/true' }, 'ok').stdout);
@@ -1324,12 +1262,6 @@ test('[a2-B1-red] a fenced Markdown table (4-space pseudo-closer) never authoriz
   assert.deepEqual(codes(sc(planText(x.narr, [x.line, startLine(x)]), retain(t, x))), ['debate_disposition_pending'], 'fenced Markdown has no authority');
   const sample = converged(t, { narr: withResult(narrative({ body: 'Do the thing.\n\n    ~~~\n    an indented code sample\n' }), 'CONVERGED') });
   assert.deepEqual(pre(sample).errors, [], 'an indented code sample containing ~~~ is not a fence opener');
-});
-
-test('[a2-B3-red] one error event holding EPERM and 429 is ambiguous: it supports neither limit kind', (t) => {
-  const ev = '{"type":"error","message":"EPERM: operation not permitted","error":"usage limit reached (429)"}\n';
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: ev }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'));
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: ev }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'));
 });
 
 test('[a2-schema-red] the counterpart response v1: every rejection-table row', () => {
@@ -1559,48 +1491,95 @@ test('[da9] debate-serialize --dispositions prints the canonical line; one of --
 // ================================================================== Round 1 (new attempt) repair: B3 whole-value diagnostics
 // Each diagnostic source (the relay result's error value; each error event) is classified from ALL its string leaves:
 // values AND object keys, at every depth, in arrays, numbers rendered as strings. No field list exists to forget a field.
-test('[r1a-B3] the Codex inputs: a code field or item.error carrying EPERM makes a 429 event ambiguous', (t) => {
-  const ev1 = '{"type":"error","message":"usage limit reached (429)","code":"EPERM"}\n';
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: ev1 }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'), 'code field');
-  const ev2 = '{"type":"turn.failed","message":"usage limit reached (429)","item":{"type":"error","error":"EPERM"}}\n';
-  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: ev2 }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'), 'item.error');
-});
-
-const P_MARKS = ['usage limit reached (429)', 'quota exceeded', 'rate limit', 429];
-const R_MARKS = ['EPERM', 'ENOMEM', 'operation timed out'];
-const POSITIONS = ['message', 'code', 'error', 'item.error', 'array', 'key', 'deep1', 'deep2', 'deep3', 'deep4', 'deep5', 'deep6'];
-/** Place `mark` at `pos` in the event `e` (distinct roots per position, so two placements never collide). */
-function place(e, mark, pos) {
-  const m = typeof mark === 'number' && ['key'].includes(pos) ? String(mark) : mark;
-  if (pos === 'message') e.message = m; else if (pos === 'code') e.code = m; else if (pos === 'error') e.error = m;
-  else if (pos === 'item.error') e.item = { type: 'error', error: m };
-  else if (pos === 'array') e.details = ['context', m];
-  else if (pos === 'key') e.meta = { [m]: 'seen' };
-  else { const d = Number(pos.slice(4)); let node = { leaf: m }; for (let k = 1; k < d; k += 1) node = { nested: node }; e[`deep${d}`] = node; }
-  return e;
-}
-test('[r1a-B3] generated: every provider x resource marker pair in different positions is ambiguous; one marker anywhere classifies by it', () => {
-  let pairs = 0, singles = 0;
-  const cls = (e) => { const out = B.diagnosticEntries({}, `${JSON.stringify(e)}\n`); assert.equal(out.length, 1, JSON.stringify(e)); return out[0].cls; };
-  for (const pm of P_MARKS) for (const rm of R_MARKS) for (const a of POSITIONS) for (const b of POSITIONS) {
-    if (a === b) continue;
-    assert.equal(cls(place(place({ type: 'error' }, pm, a), rm, b)), 'ambiguous', `${pm}@${a} + ${rm}@${b}`);
-    pairs += 1;
-  }
-  for (const pos of POSITIONS) {
-    for (const pm of P_MARKS) { assert.equal(cls(place({ type: 'error' }, pm, pos)), 'provider', `${pm}@${pos}`); singles += 1; }
-    for (const rm of R_MARKS) { assert.equal(cls(place({ type: 'error' }, rm, pos)), 'resource', `${rm}@${pos}`); singles += 1; }
-  }
-  assert.equal(cls({ type: 'error', message: 'something else' }), 'unclassified');
-  // the result.json error value is one whole source too, whatever its shape
-  assert.equal(B.diagnosticEntries({ error: place(place({}, 429, 'deep3'), 'EPERM', 'key') }, '')[0].cls, 'ambiguous');
-  assert.equal(B.diagnosticEntries({}, '{"type":"item.completed","item":{"type":"agent_message","text":"usage limit reached (429)"}}\n').length, 0, 'message events never count');
-  assert.equal(pairs, P_MARKS.length * R_MARKS.length * POSITIONS.length * (POSITIONS.length - 1));
-  assert.ok(singles > 70, `singles ${singles}`);
-});
-
 test('[r1a-probe] fresh_result needs an explicit AGREE: a schema-valid CHANGES_REQUESTED no-op answer is a failure', () => {
   const cr = JSON.stringify({ v: 1, request_id: 'probe-n1', plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}`, verdict: 'CHANGES_REQUESTED', findings: [{ id: 'P1', status: 'new', severity: 'major' }] });
   const obs = { relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only', finalMessage: cr } } };
   assert.equal(B.classifyProbe(obs).fresh_result.result, 'fail');
+});
+
+// ================================================================== D-A10 (2026-11-23): no textual limit classification
+// LIMIT_REACHED is accepted only for a configured budget. A provider or resource failure is UNRESOLVED with
+// incomplete_review: true, the retained relay result showing the actual failure (status not completed, or exit not 0).
+const DEEP = (n, leaf) => { let v = leaf; for (let k = 0; k < n; k += 1) v = { a: v }; return v; };
+const A10_ATTACKS = {
+  hook_warning: { events: '{"type":"item.completed","item":{"type":"error","message":"clamping SessionEnd hook timeout to 3s in hooks.json"}}\n' },
+  key_only_rate_limit: { events: '{"type":"error","message":"invalid request","rate_limit":false}\n' },
+  eperm_false_key: { events: '{"type":"error","message":"usage limit reached (429)","EPERM":false}\n' },
+  code_field: { events: '{"type":"error","message":"usage limit reached (429)","code":"EPERM"}\n' },
+  item_error: { events: '{"type":"turn.failed","message":"usage limit reached (429)","item":{"type":"error","error":"EPERM"}}\n' },
+  deep_5000: { events: `${JSON.stringify({ type: 'error', nested: DEEP(5000, 'usage limit reached (429)') })}\n` },
+};
+function incomplete(t, { roundOpts = {}, over = {} } = {}) {
+  const narr = withResult(narrative(), 'UNRESOLVED');
+  const bundle = tmp(t, 'debate-bundle-');
+  const rounds = [round(bundle, 1, { plan_version: 'v1', status: 'failed', ...roundOpts })];
+  const att = attestation({ outcome: 'UNRESOLVED', plan_digest: digestOf(narr), rounds, findings: [], final: null, incomplete_review: true, limit: null, ...over });
+  const line = B.serializeAttestation(att);
+  return { bundle, att, line, narr, D: digestOf(narr), text: planText(narr, [line]) };
+}
+test('[a10] every Round 1/2 attack input is refused as a provider or resource LIMIT_REACHED (no text is classified)', (t) => {
+  for (const [name, a] of Object.entries(A10_ATTACKS)) {
+    for (const kind of ['provider_limit', 'resource_limit']) {
+      const x = limited(t, { roundOpts: { result_error: 'usage limit reached (429)', ...a }, over: { limit: { kind, evidence: 'usage limit reached (429)' } } });
+      assert.ok(codes(pre(x)).includes('debate_limit_invalid'), `${name} ${kind}`);
+    }
+  }
+  const classed = limited(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'spawn failed' } }, over: { limit: { kind: 'provider_limit', evidence: 'spawn failed' } } });
+  assert.ok(codes(pre(classed)).includes('debate_limit_invalid'), 'a structured class never promotes text into a limit');
+});
+test('[a10] a provider or resource failure is UNRESOLVED with incomplete_review, accepted only when the retained relay result shows the failure', (t) => {
+  for (const [name, a] of Object.entries(A10_ATTACKS)) {
+    const failed = incomplete(t, { roundOpts: a });
+    assert.deepEqual(pre(failed).errors, [], `${name}: a failed relay result is retained evidence`);
+    assert.equal(pre(failed).debate_qualified, false);
+    const completed = incomplete(t, { roundOpts: { ...a, status: 'completed', verdict: 'AGREE', findings: [] } });
+    assert.ok(codes(pre(completed)).includes('debate_outcome_invalid'), `${name}: a completed run with exit 0 is not a failure`);
+  }
+  assert.ok(codes(pre(incomplete(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'spawn failed' } } }))).includes('debate_outcome_invalid'), 'no retained relay result, no failure evidence');
+  assert.ok(codes(pre(incomplete(t, { roundOpts: { result_status: 'completed', result_exit: 0 } }))).includes('debate_evidence_mismatch'), 'a fabricated failure record over a completed result');
+  assert.ok(codes(pre(incomplete(t, { roundOpts: { status: 'timeout' } }))).length === 0, 'a relay timeout is a failure');
+});
+test('[a10] the real fixtures (completed runs carrying Codex hook warnings) are never treated as failed', (t) => {
+  for (const [set, rid] of [['json-2026-11-23', 's4-json-2'], ['auth-2026-11-22', 's4-auth-evidence-1']]) {
+    const bundle = tmp(t, 'debate-bundle-');
+    const m = materialize(set, bundle, 'r1', { '@REPO@': REPO, '@SCRATCH@': bundle, '@HOME@': tmpdir() });
+    assert.ok(readFileSync(join(bundle, 'r1', 'events.jsonl'), 'utf8').includes('hook'), `${set} carries hook warnings`);
+    const narr = withResult(narrative(), 'UNRESOLVED');
+    const r1 = realRecord(1, m, { plan_version: 'v1', request_id: rid, verdict: set.startsWith('json') ? 'CHANGES_REQUESTED' : 'AGREE', plan_digest: set.startsWith('json') ? 'sha256:61b30a7aba034465f06c0587c7dcb0537b8b5190426db51b826a827259e0a1e6' : OLD_DIGEST });
+    const att = attestation({ outcome: 'UNRESOLVED', plan_digest: digestOf(narr), rounds: [r1], findings: [], final: null, incomplete_review: true, limit: null });
+    assert.ok(codes(B.debateCheck(planText(narr, [B.serializeAttestation(att)]), { bundleDir: bundle, repo: REPO })).includes('debate_outcome_invalid'), set);
+  }
+});
+test('[a10] configured_budget is the one LIMIT_REACHED kind: reached and named is accepted, otherwise refused', (t) => {
+  const budget = (b, m, ev) => limited(t, { roundOpts: { status: 'completed', verdict: 'CHANGES_REQUESTED' }, over: { findings: [FIND({ status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })],
+    budget: b, metrics: { rounds: m, calls: m, minutes: 9, started_at: '2026-11-22T10:00:00Z', ended_at: '2026-11-22T10:09:00Z', tokens: null }, limit: { kind: 'configured_budget', evidence: ev } } });
+  assert.deepEqual(pre(budget({ max_rounds: 1, max_minutes: null }, 1, 'max_rounds: 1 (repository override)')).errors, []);
+  assert.ok(codes(pre(budget({ max_rounds: 5, max_minutes: null }, 1, 'max_rounds: 5'))).includes('debate_limit_invalid'), 'not reached');
+  assert.ok(codes(pre(budget({ max_rounds: null, max_minutes: null }, 1, 'max_rounds: 1'))).includes('debate_limit_invalid'), 'no configured budget');
+});
+test('[a10] untrusted JSON depth never overflows the stack: a 5,000-deep attestation, dispositions or response value is refused', (t) => {
+  const x = converged(t);
+  const deepAtt = B.serializeAttestation.length >= 0 ? `<!-- debate-attestation-v1 ${JSON.stringify({ ...JSON.parse(x.line.slice(27, -4)), deep: DEEP(5000, 1) })} -->` : '';
+  let r;
+  assert.doesNotThrow(() => { r = pre(x, planText(x.narr, [deepAtt])); });
+  assert.ok(codes(r).includes('debate_attestation_invalid'), JSON.stringify(r.errors).slice(0, 200));
+  const base = withResult(narrative(), 'CONVERGED');
+  const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
+  const deepLine = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), deep: DEEP(5000, 1) })}`;
+  assert.doesNotThrow(() => { r = pre(converged(t, { narr: base.replace(line, deepLine) })); });
+  assert.ok(codes(r).includes('debate_attestation_invalid'));
+  assert.equal(B.parseResponse(JSON.stringify({ v: 1, request_id: 'r', plan_version: 'v1', plan_digest: R_D, verdict: 'AGREE', findings: [{ id: 'P1', status: 'confirmed', note: DEEP(5000, 'x') }] })).code, 'debate_response_invalid');
+  const inField = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), dispositions: [{ id: 'P1', kind: 'accept_risk', resolution: DEEP(5000, 'x'), design_change: false }] })}`;
+  assert.doesNotThrow(() => { r = pre(converged(t, { narr: base.replace(line, inField) })); }, 'a deep value inside an allowed field reaches the serializer');
+  assert.ok(codes(r).includes('debate_attestation_invalid'));
+  const attField = `<!-- debate-attestation-v1 ${JSON.stringify({ ...JSON.parse(x.line.slice(27, -4)), findings: [{ ...FIND(), host_position: DEEP(5000, 'x') }] })} -->`;
+  assert.doesNotThrow(() => { r = pre(x, planText(x.narr, [attField])); });
+  assert.ok(codes(r).includes('debate_attestation_invalid'));
+});
+test('[a10] start-check: an incomplete review reaches START only through the owner disposition of LIMIT', (t) => {
+  const go = (rows) => { const narr = withResult(narrative({ rows }), 'UNRESOLVED'); const x = incomplete(t); const y = { ...x, narr, text: planText(narr, [x.line]) };
+    const att = { ...x.att, plan_digest: digestOf(narr) }; const line = B.serializeAttestation(att); const z = { ...y, att, line, D: digestOf(narr), text: planText(narr, [line]) };
+    return codes(sc(planText(z.narr, [z.line, startLine(z)]), retain(t, z))); };
+  assert.deepEqual(go([]), ['debate_disposition_pending']);
+  assert.deepEqual(go([['LIMIT', 'accept_risk', 'The owner accepts planning without a completed counterpart review: quota exhausted.', 'no']]), []);
 });
