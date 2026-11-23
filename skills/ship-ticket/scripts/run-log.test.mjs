@@ -745,28 +745,40 @@ test('AC4 check: one JSON line, exit 0 healthy and 1 with a reason (non-repo, un
   }
 });
 
-test('old-reader compatibility: origin/main rowsFromText accepts rows carrying timestamp_source and label', async (t) => {
-  const old = spawnSync('git', ['-C', dirname(script), 'show', 'origin/main:skills/ship-ticket/scripts/run-log.mjs'], { encoding: 'utf8' });
-  if (old.status !== 0) { t.skip('origin/main is not available in this checkout'); return; }
-  const src = old.stdout;
-  const body = src.slice(src.indexOf('function rowsFromText'), src.indexOf('function carrierBinding'));
-  assert.ok(body.includes('function validCarrierTiming'), 'extracted the unmodified old reader');
-  const dir = mkdtempSync(join(tmpdir(), 'old-reader-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const url = (m) => new URL(`./${m}`, import.meta.url).href;
-  writeFileSync(join(dir, 'old.mjs'), `import { basename } from 'node:path';\nimport { buildRun } from '${url('run-summary.mjs')}';\n`
-    + `import { RUN_LOG_SCHEMA as SCHEMA, isEventName } from '${url('measure/events.mjs')}';\n`
-    + `const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);\nconst SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;\nexport ${body}`);
-  const { rowsFromText } = await import(new URL(`file://${join(dir, 'old.mjs').replaceAll('\\', '/').replace(/^([A-Za-z]:)/, '/$1')}`).href);
+// The old reader is a FROZEN copy (fixtures/legacy-run-log-reader.mjs), not `git show origin/main:...`: once S5 is on
+// main, origin/main IS the new reader, and the extraction became self-referential (and broke: pairWarnings undefined).
+const LEGACY_READER = fileURLToPath(new URL('./fixtures/legacy-run-log-reader.mjs', import.meta.url));
+const LEGACY_SOURCE = { commit: '3b7792c9c1f45dc654a75504589d3e55c659ac92', path: 'skills/ship-ticket/scripts/run-log.mjs' };
+const lf = (text) => text.replace(/\r\n/g, '\n');
+test('old-reader compatibility: the frozen pre-S5 rowsFromText accepts rows carrying timestamp_source and label', async (t) => {
+  const { rowsFromText } = await import(new URL('./fixtures/legacy-run-log-reader.mjs', import.meta.url).href);
   const f = fixture(t);
   const ago = (ms) => new Date(Date.now() - ms).toISOString();
   assert.equal(f.cli(...phaseArgs('start', 'a'), '--started-at', ago(60000)).status, 0);
   assert.equal(f.cli(...phaseArgs('end', 'a'), '--ended-at', ago(30000)).status, 0);
   const text = readText(f.path, 'utf8');
   assert.match(text, /"timestamp_source":"supplied"/);
+  assert.match(text, /"label":"estimated"/);
   const { rows, warnings } = rowsFromText(text, f.path);
   assert.deepEqual(warnings, []);
   assert.equal(rows.length, 2);
+  // positive control: the frozen reader still rejects what it must, so the test cannot pass vacuously
+  const bad = rowsFromText(`${JSON.stringify({ ...rows[0], schema: 'other-v9' })}\n${JSON.stringify({ ...rows[1], ticket: 'T2' })}\n`, f.path);
+  assert.deepEqual(bad.rows, []);
+  assert.deepEqual(bad.warnings.map((w) => w.code).sort(), ['ticket_mismatch', 'unsupported_schema']);
+});
+
+test('old-reader fixture: its verbatim block is byte-identical (LF) to the pre-S5 source blob when that object is available', (t) => {
+  const fixtureText = lf(readText(LEGACY_READER, 'utf8'));
+  const begin = fixtureText.indexOf('// BEGIN verbatim\n'), end = fixtureText.indexOf('// END verbatim');
+  assert.ok(begin > 0 && end > begin, 'the fixture has its BEGIN/END markers');
+  const frozen = fixtureText.slice(begin + '// BEGIN verbatim\n'.length, end).replace(/^export /, '');
+  assert.ok(frozen.startsWith('function rowsFromText(contents, path) {') && frozen.includes('function validCarrierTiming'), 'the fixture holds the reader');
+  const blob = spawnSync('git', ['-C', dirname(script), 'show', `${LEGACY_SOURCE.commit}:${LEGACY_SOURCE.path}`], { encoding: 'utf8' });
+  if (blob.status !== 0) { t.skip(`source object ${LEGACY_SOURCE.commit.slice(0, 7)} is not in this checkout (shallow clone): the byte pin is checked where it exists`); return; }
+  const src = lf(blob.stdout);
+  const original = src.slice(src.indexOf('function rowsFromText'), src.indexOf('function carrierBinding'));
+  assert.equal(frozen, `${original.replace(/\n+$/, '')}\n`, 'the fixture is the unmodified pre-S5 reader');
 });
 
 // ------------------------------------------------------------------ S5 repair: in-lock ordering and bounds, capped carry-forward, accurate check
