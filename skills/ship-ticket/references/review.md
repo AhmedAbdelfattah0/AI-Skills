@@ -425,24 +425,34 @@ With `config.unitReview`, the per-unit reviews, the unit repair routing and the 
 
 ## Two-cycle limit
 
+In force from 2026-11-23 (owner P0 priority); engine enforcement of the assessment step arrives with FR-4c.
+
 A review cycle is counted per implementation revision (head), not per reviewer. Opus and Codex on the same head
-are one cycle. Each implementation attempt has at most two cycles:
+are one cycle. There are at most two cycles per implementation attempt:
 
 - **Cycle 1:** the independent reviews of one head. Reconcile their findings into one consolidated repair plan
   (the one repair batch above).
-- **Cycle 2:** the independent review of the consolidated repair (the targeted confirmation above).
+- **Cycle 2:** the targeted confirmation above, the independent review of the consolidated repair. It is not a
+  new full review, and it does not allow any number of repair batches.
+
+An implementation attempt is never reset by a commit or a new head: "new head = new attempt" is not a way round
+the cap. A new attempt starts only through owner authority: a RUN-STATE `RETRY` for ticket runs; for Factory-dev
+PRs, a recorded owner-approved revised plan or strategy.
 
 A failed confirmation is the terminal `FAIL` above. When cycle 2 still returns a qualifying Major or Blocker,
-STOP automatic repair and write a structured Root-Cause / Architecture Assessment. There is no third automatic
-repair cycle, and no second repair batch clears it. Owner approval is required before resuming with a revised
-plan or an explicitly justified corrective strategy; a revised plan returns to the one native approval, and a
-change beyond the approved scope needs the owner. Never waive a failing mandatory gate, never downgrade a
-severity to meet the limit, and never treat the escalation as approval to ship. Preserve the unresolved
-findings, the primary review and the confirmation in the record. A same-defect-class failure is the usual
-trigger; challenge a finding that is wrong with evidence (`reject — factually wrong`) rather than patching to it.
+STOP automatic repair and write a structured Root-Cause / Architecture Assessment. The same applies when the
+confirmation fails on the same defect class as a primary finding, whatever its severity (including a Minor) and
+including a failed check: any confirmation that fails on the same defect class requires re-assessment, never
+another patch. There is no third automatic repair cycle, and no second repair batch clears it. Owner approval is
+required before resuming with a revised plan or an explicitly justified corrective strategy; a revised plan
+returns to the one native approval, and a change beyond the approved scope needs the owner. Never waive a failing
+mandatory gate, never downgrade a severity to meet the limit, and never treat the escalation as approval to
+ship. Preserve the unresolved findings, the primary review and the confirmation in the record. Challenge a
+finding that is wrong with evidence (`reject — factually wrong`) rather than patching to it.
 
-A provider refusal of a review brief is recorded as `provider_refused`, with the provider's message. Never
-reword, split or re-scope a brief to pass a provider safeguard, and never resubmit an altered brief.
+A provider refusal of a review brief is recorded as `provider_refused`, with the provider's message. No engine or
+record field exists for it yet, so it is recorded manually (ledger or PR note) until one does. Never reword, split
+or re-scope a brief to pass a provider safeguard, and never resubmit an altered brief.
 
 **Assessment template** (file `.specs/reviews/<KEY>/assessment-<review_execution>.md`):
 
@@ -455,8 +465,11 @@ reword, split or re-scope a brief to pass a provider safeguard, and never resubm
    fresh builder, and whether to reuse instead of repair.
 5. What changes in the next attempt and which guarantees it keeps.
 
-The engine checks that the assessment exists and is bound, never the engineering choice: the agents reason about
-the cause and pick the approach; the owner approves the resumption.
+**Manual versus engine today.** The engine enforces only: one repair per review execution (`round_limit`), one
+confirmation per review execution (`confirmation_spent`), and that a new original review needs a RUN-STATE
+`RETRY` (`retry_unauthorized`). Until FR-4c, writing the assessment, binding it to the record and obtaining the
+owner's approval to resume are orchestrator duties, and nothing checks that the assessment file exists. The
+agents reason about the cause and pick the approach; the owner approves the resumption.
 
 ## Packets and instances
 

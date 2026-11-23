@@ -48,6 +48,39 @@ test('a provider refusal is recorded as provider_refused and the brief is never 
   assert.ok(section.includes('Never reword, split or re-scope a brief to pass a provider safeguard'));
 });
 
+test('at most two cycles per implementation attempt, in force from 2026-11-23', () => {
+  assert.ok(section.includes('at most two cycles per implementation attempt'));
+  assert.ok(section.includes('In force from 2026-11-23'));
+});
+
+test('cycle 2 is the targeted confirmation, not a new full review or any number of repair batches', () => {
+  assert.ok(section.includes('the targeted confirmation above, the independent review of the consolidated repair'));
+  assert.ok(section.includes('It is not a new full review, and it does not allow any number of repair batches'));
+});
+
+test('an implementation attempt is never reset by a commit or new head', () => {
+  assert.ok(section.includes('An implementation attempt is never reset by a commit or a new head'));
+  assert.ok(section.includes('A new attempt starts only through owner authority'));
+  assert.ok(section.includes('RUN-STATE `RETRY`'));
+});
+
+test('a same-class failed confirmation, even a Minor or a failed check, still requires re-assessment', () => {
+  assert.ok(section.includes('fails on the same defect class as a primary finding, whatever its severity (including a Minor) and including a failed check'));
+  assert.ok(section.includes('requires re-assessment, never another patch'));
+});
+
+test('manual versus engine enforcement is stated and no non-existent check is promised', () => {
+  assert.ok(section.includes('**Manual versus engine today.**'));
+  for (const c of ['`round_limit`', '`confirmation_spent`', '`retry_unauthorized`']) assert.ok(section.includes(c), c);
+  assert.ok(section.includes('Until FR-4c, writing the assessment'));
+  assert.ok(section.includes('nothing checks that the assessment file exists'));
+  assert.ok(!section.includes('The engine checks that the assessment exists'));
+});
+
+test('provider_refused is recorded manually until a field exists', () => {
+  assert.ok(section.includes('it is recorded manually (ledger or PR note) until one does'));
+});
+
 test('the assessment template names the five classes and the smallest defensible corrective approach', () => {
   for (const c of ['architecture defect', 'implementation defect', 'unclear acceptance contract', 'trust-boundary failure', 'incomplete test strategy']) {
     assert.ok(section.includes(c), `class: ${c}`);
@@ -59,6 +92,3 @@ test('the assessment template names the five classes and the smallest defensible
   assert.ok(section.includes('.specs/reviews/<KEY>/assessment-<review_execution>.md'));
 });
 
-test('the Factory records and checks the assessment, it does not choose the engineering answer', () => {
-  assert.ok(section.includes('checks that the assessment exists and is bound, never the engineering choice'));
-});
