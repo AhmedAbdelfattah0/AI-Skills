@@ -726,7 +726,7 @@ test('[I27] [I30] A2-6 the snapshot read: NUL-separated values, every scope, esc
   ({ fx, o, read } = snapRepo(t));
   const inc = join(fx.root, 'extra.cfg');
   writeFileSync(inc, `[remote "origin"]\n\tpushurl = ${o.ghUrl('evil/other')}\n`);
-  o.git('config', `includeIf.gitdir:${fx.repo}/.git/.path`, inc);
+  o.git('config', `includeIf.gitdir:${fx.repo}/.path`, inc); // 'gitdir:<repo>/' matches <repo>/** (its .git included)
   amb(read(), /pushes to/, 'an includeIf contribution');
   ({ fx, o, read } = snapRepo(t));
   o.git('config', 'extensions.worktreeConfig', 'true');

@@ -403,15 +403,27 @@ Limits:
 **Repository identity (S-28a, opt-in).** `config.repoIdentity: true` (exactly `true`, never
 defaulted, bound by the DAG digest) requires `config.pinnedBase`. It binds the run to ONE GitHub
 repository, trust on first use at `init`. The identity of record is `S.base.{ remote, identity }`,
-and no other key holds it. `init` refuses `identity_unbound`, writing nothing, when the remote names
-no repository on github.com: a local path, another host (`gitlab.com`), or a port (`github.com:8443`). The
-check is S-28a's own (`githubUrl` in `engine-identity.mjs`); `repositoryOf`, which flag-off runs use, is unchanged. Otherwise it records an `IDENTITY_BOUND` event
+and no other key holds it. Every remote URL value of the run (fetch and push) goes through ONE strict
+parser, `strictGithub` in `github-identity.mjs`. It accepts `https://github.com/<o>/<r>`,
+`ssh://[user@]github.com/<o>/<r>` and `[user@]github.com:<o>/<r>` (optional `.git` and `/`). It refuses
+any other host, any port, plaintext `http://` and `git://`, an https user part (`https://evil.invalid#@github.com/...`
+reaches another host), a user, owner or repo starting with `-`, `.` and `..`, and anything after the repo.
+`repositoryOf`, which runs without the flag use, is unchanged. `init` refuses `identity_unbound`,
+writing nothing, when the remote names no repository on github.com. It refuses `remote_ambiguous` for
+several fetch or push values, or a push value naming another repository. Otherwise it records an `IDENTITY_BOUND` event
 and policy version 9 to 12, which is the pinned version 5 to 8 plus `repoIdentity`. An engine without
 S-28a refuses 9 to 12 with `policy_version_unsupported`, and never reads such a run as a plain pinned
 run.
 
-Each gate re-reads the remote, read-only and hardened, and checks in this order. The remote's URL is
-read once: the base is read by the URL whose identity was just checked, never re-read from config.
+Each check takes ONE snapshot: the remote's `url` and `pushurl` values from ONE `git config -z
+--get-regexp` process, read-only and hardened. The values are NUL-separated, so a value holding a
+newline cannot forge a key. The remote name is regex-escaped. Every scope counts (system, global,
+local, worktree, `includeIf`), and any git failure is refused. The identity is compared from that
+snapshot, and the base is then read by the snapshot's URL: no consumer re-reads the configured URL.
+Init, reassess, review and confirmation take one snapshot each; ship-ready takes two, one before its
+proof and one after it. The snapshot covers those values only. `ls-remote` is a separate git process
+that reads config itself (`url.*.insteadOf`, `http.*`, `core.sshCommand`). At reassess, S-12's own
+base check (`pinnedBaseRefusal`) runs by the snapshot, so both modes share one base check.
 
 | Gate | Check, in order | On a pass |
 |---|---|---|
@@ -441,8 +453,12 @@ With the flag off, the engine behaves as before, byte for byte: no `freeze.base`
 `ship_ready.base`, and no identity event. Rollback is the flag.
 
 S-28a limits:
-- The identity is the CONFIGURED URL. `insteadOf`, `pushInsteadOf` and credential helpers are not
-  resolved, and the `ls-remote` answer is not attested.
+- The identity is the CONFIGURED URL. The endpoint behind it is not proven: `url.*.insteadOf`
+  applies when `ls-remote` (or a fetch) runs, credential helpers are not checked, and the
+  `ls-remote` answer is not attested.
+- `pushInsteadOf`, `branch.*.pushRemote` and `remote.pushDefault` are not bound. The engine never
+  pushes; binding a push target is S-28b's publication binding.
+- `status` still reads the remote's URL for its advisory `base` block. It decides and writes nothing.
 - A same-user rewrite of `state.json` together with the URL is not caught.
 - Nothing is re-read between two gates, so a change made between gates is caught at the next one.
   Ship-ready, which no gate follows, reads both again after its proof.
