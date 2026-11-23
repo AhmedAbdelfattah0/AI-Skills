@@ -4,7 +4,7 @@
 // Compares the rule text of SKILL.md and references/*.md at a pinned base commit
 // (read with `git show <base>:<path>`, never a moving branch) with the working tree.
 // A sentence may move between files; it may not vanish, appear from nowhere or be
-// copied without a reason. Dependency-free, Node >= 18, ESM.
+// copied without a reason. Dependency-free, Node >= 22, ESM.
 //
 // Usage:
 //   node sentence-check.mjs --base 2c5dbd7 [--allowlist allowlist.json] [--json out.json]

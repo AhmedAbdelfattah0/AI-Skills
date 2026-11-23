@@ -1,6 +1,6 @@
 # Execution harness (BUILD, PROVE, SHIP; never PLAN)
 
-Bundled dependency-free Node helpers (Node >= 18) under `ship-ticket/scripts/`,
+Bundled dependency-free Node helpers (Node >= 22) under `ship-ticket/scripts/`,
 distributed by the existing installer with the skill. They make the existing
 dependency-driven orchestration measurable and enforce its safety rules at the
 process boundary. They do not replace the DAG, approval, reviewer independence

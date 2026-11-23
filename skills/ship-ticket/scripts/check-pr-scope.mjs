@@ -5,7 +5,7 @@
  * record. The orchestrator runs it before announcing REVIEW and again on the frozen candidate at SHIP (manual flow
  * included). No gate, engine step or ship-ready check reads it, and the engine never imports it: it adds no authority.
  * The Files touched table is explanation for the approver and is read by no script.
- * Dependency-free Node >= 18; git and candidate-id.mjs through spawnSync with an argument list, no shell.
+ * Dependency-free Node >= 22; git and candidate-id.mjs through spawnSync with an argument list, no shell.
  *
  * CLI: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]
  *      check-pr-scope.mjs lint --plan <plan.md>            (the same rule function on the plan alone, before approval)

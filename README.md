@@ -20,12 +20,12 @@ curl -fsSL https://raw.githubusercontent.com/AhmedAbdelfattah0/AI-Skills/main/in
 ```
 
 Clones into `~/.ai-skills`, symlinks every skill into `~/.claude/skills`, and turns on automatic
-updates. Needs `git` and Node 18+. Overrides: `AI_SKILLS_TARGET=all` for every tool,
+updates. Needs `git` and Node 22+. Overrides: `AI_SKILLS_TARGET=all` for every tool,
 `AI_SKILLS_HOME=<dir>` to keep the clone elsewhere, `AI_SKILLS_NO_AUTOUPDATE=1` to skip scheduling.
 
 ### Option B — `npx` (no clone needed, works everywhere)
 
-Requires [Node.js](https://nodejs.org) ≥ 18 (ships with `npx`). This runs the installer straight from
+Requires [Node.js](https://nodejs.org) ≥ 22 (ships with `npx`). This runs the installer straight from
 GitHub:
 
 ```bash
