@@ -41,7 +41,7 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
-import { identityStateHolds, unboundIdentity } from './engine-identity.mjs';
+import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -416,10 +416,11 @@ export async function init(ctx) {
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
-    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
-    // S-28a: trust on first use; a repoIdentity run is bound to a repository on github.com (no other host, no port), else refused (nothing written)
-    const unbound = pin && repoIdentityOn(dag) ? unboundIdentity(ctx.repoRoot, dag.config.pinnedBase.remote, pin.base) : null;
-    if (unbound) throw coded('identity_unbound', unbound);
+    // S-28a: trust on first use from ONE snapshot of the remote's URLs (engine-identity.mjs bindIdentity): remote_ambiguous, or
+    // identity_unbound when it names no repository on github.com (nothing written); the pin is then read by that snapshot only
+    const idBound = repoIdentityOn(dag) ? bindIdentity(ctx.repoRoot, dag.config.pinnedBase.remote) : null;
+    if (idBound && !idBound.ok) throw coded(idBound.code, idBound.reasons.join('; '));
+    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config, idBound?.record) : null; // before the declaration read: it reads at the base
     const testKinds = await bindTestKinds(ctx, dag.config, text, pin ? { base: pin.base, config: dag.config } : null);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));

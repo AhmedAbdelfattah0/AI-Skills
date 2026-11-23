@@ -25,14 +25,16 @@ const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
 const TIMEOUT_MS = 10 * 60 * 1000;
 
 const ID = 'ship-ticket/scripts/engine-identity.mjs', GATES = 'ship-ticket/scripts/engine-gates.mjs', ENGINE = 'ship-ticket/scripts/run-engine.mjs';
-const SAME = '    if (id.identity && githubUrl(url) && sameRepository(id.identity, { slug: B.identity })) return { ok: true, url };';
-const skipAt = (st) => `    if (stage === '${st}' || (id.identity && githubUrl(url) && sameRepository(id.identity, { slug: B.identity }))) return { ok: true, url };`;
-const VERIFY = '    const v = verifyFrozenBase(E, RECORDED[stage](E.S), id.url);';
+const SAME = '  if (r.record?.identity === B.identity) return { ok: true, record: r.record };';
+const skipAt = (st) => `  if (stage === '${st}' || r.record?.identity === B.identity) return { ok: true, record: r.record };`;
+const VERIFY = '    const v = verifyFrozenBase(E, RECORDED[stage](E.S), id.record);';
+const GH = 'ship-ticket/scripts/github-identity.mjs', BASE = 'ship-ticket/scripts/engine-base-read.mjs';
+const HTTPS = "  { re: /^https:\\/\\/([^/@:?#\\s\\\\%]+)\\/([^?#\\s\\\\%]+)$/, user: false },";
 
 /** One guard each: its tag and its exact-once edits ({ file relative to skills/, from, to }). */
 export const IDENTITY_MUTANTS = [
   { tag: 'I1', name: 'reassess: the identity comparison is omitted (a re-pointed origin reassesses)',
-    edits: [{ file: GATES, from: "  const idNo = identityRefusal(E, 'reassess');", to: '  const idNo = null;' }] },
+    edits: [{ file: GATES, from: "  const idNo = repoIdentityOn(S) ? checkedIdentity(E, 'reassess') : null;", to: '  const idNo = null;' }] },
   { tag: 'I2', name: 'review original: the identity comparison is omitted (V-review)', edits: [{ file: ID, from: SAME, to: skipAt('review') }] },
   { tag: 'I3', name: 'review confirmation: the identity comparison is omitted', edits: [{ file: ID, from: SAME, to: skipAt('confirmation') }] },
   { tag: 'I4', name: 'ship-ready: the identity comparison is omitted (V-ship-ready)', edits: [{ file: ID, from: SAME, to: skipAt('ship-ready') }] },
@@ -41,9 +43,9 @@ export const IDENTITY_MUTANTS = [
     edits: [{ file: 'ship-ticket/scripts/engine-attempts.mjs', from: ', ...(S.freeze?.base ? { base: S.freeze.base } : {}) };', to: ' };' },
       { file: ID, from: "  const frozen = S.freeze === null || (exact(S.freeze, 'base,candidate,seq') && wellFormedFreezeBase(S.freeze.base, S.base));", to: '  const frozen = true;' }] },
   { tag: 'I7', name: 'ship-ready verifies against the pin, not the freeze base (a rewind below the freeze passes)',
-    edits: [{ file: ID, from: VERIFY, to: "    const v = verifyFrozenBase(E, stage === 'ship-ready' ? E.S.base : RECORDED[stage](E.S), id.url);" }] },
-  { tag: 'I8', name: 'init: a null identity (no GitHub origin) is accepted',
-    edits: [{ file: ENGINE, from: "    if (unbound) throw coded('identity_unbound', unbound);\n", to: '' }] },
+    edits: [{ file: ID, from: VERIFY, to: "    const v = verifyFrozenBase(E, stage === 'ship-ready' ? E.S.base : RECORDED[stage](E.S), id.record);" }] },
+  { tag: 'I8', name: 'init: a remote naming no repository on github.com is accepted',
+    edits: [{ file: ENGINE, from: "    if (idBound && !idBound.ok) throw coded(idBound.code, idBound.reasons.join('; '));\n", to: '' }] },
   { tag: 'I9', name: 'load: the identity invariant is removed',
     edits: [{ file: ENGINE, from: '      if (repoIdentity !== repoIdentityOn(E.S) || (repoIdentity && !identityStateHolds(E.S)))\n', to: '      if (false)\n' }] },
   { tag: 'I10', name: 'load: any freeze or SHIP_READY base is well-formed', edits: [{ file: ID, from: 'export function wellFormedFreezeBase(B, pin) {\n', to: 'export function wellFormedFreezeBase(B, pin) {\n  return true;\n' }] },
@@ -51,25 +53,45 @@ export const IDENTITY_MUTANTS = [
   { tag: 'I11', name: 'init (HEAD mode): resolveBaseRef reads the local origin/HEAD symref', edits: [{ file: 'ship-ticket/scripts/remote-identity.mjs',
     from: "  const r = authGit(repoRoot, ['ls-remote', '--symref', '--', remote, 'HEAD']);",
     to: "  const l = authGit(repoRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD']); const r = { ...l, stdout: `ref: ${l.stdout.trim().replace('refs/remotes/origin/', 'refs/heads/')}\\tHEAD\\n` };" }] },
-  // ---- Round 1
+  // ---- Round 1 (attempt 1)
   { tag: 'I12', name: 'ship-ready: identity and base are not read again after the proof (a proof command re-points origin)',
     edits: [{ file: GATES, from: "    const idProof = idShip && identityStage(E, 'ship-ready');", to: '    const idProof = null;' }] },
-  { tag: 'I13', name: 'the base read re-reads the configured URL instead of the identity-checked one',
-    edits: [{ file: ID, from: '    const v = verifyBase(root, { ref: B.ref, remote: url, recorded });', to: '    const v = verifyBase(root, { ref: B.ref, remote: remoteIdentity(root, B.remote).identity?.url, recorded });' }] },
-  { tag: 'I14', name: 'init: another host or a port binds (repositoryOf alone decides)',
-    edits: [{ file: ID, from: '    if (id.ok && id.identity && githubUrl(url) && pinned.identity === id.identity.slug.toLowerCase()) return null;',
-      to: '    if (id.ok && id.identity && pinned.identity === id.identity.slug.toLowerCase()) return null;' }] },
-  { tag: 'I15', name: 'gates: a re-point to the same owner/repo on a port is the same repository',
-    edits: [{ file: ID, from: SAME, to: '    if (id.identity && sameRepository(id.identity, { slug: B.identity })) return { ok: true, url };' }] },
+  { tag: 'I13', name: 'the base read re-reads the configured URL instead of the snapshot',
+    edits: [{ file: ID, from: '    const v = verifyBase(root, { ref: B.ref, remote: record.url, recorded });', to: "    const v = verifyBase(root, { ref: B.ref, remote: authGit(root, ['config', '--get', `remote.${B.remote}.url`]).stdout.trim(), recorded });" }] },
+  { tag: 'I14', name: 'parser: another host passes (gitlab.com binds)', edits: [{ file: GH, from: "    if (host.toLowerCase() !== 'github.com') return null;\n", to: '' }] },
+  { tag: 'I15', name: 'parser: a port passes (github.com:8443 is the same repository)',
+    edits: [{ file: GH, from: HTTPS, to: "  { re: /^https:\\/\\/([^/@?#\\s\\\\%]+)\\/([^?#\\s\\\\%]+)$/, user: false }," },
+      { file: GH, from: "    if (host.toLowerCase() !== 'github.com') return null;", to: "    if (host.toLowerCase().replace(/:\\d+$/, '') !== 'github.com') return null;" }] },
   { tag: 'I16', name: 'gates: the base is read before the identity (an unreachable re-point reads as offline)',
-    edits: [{ file: ID, from: '    const id = checkedRemote(E, stage);\n    if (!id.ok) return id;\n',
-      to: '    const raw = remoteIdentity(E.ctx.repoRoot, E.S.base.remote).identity?.url, first = verifyFrozenBase(E, RECORDED[stage](E.S), raw);\n    if (raw && !first.ok) return first;\n    const id = checkedRemote(E, stage);\n    if (!id.ok) return id;\n' }] },
+    edits: [{ file: ID, from: '    const id = checkedIdentity(E, stage);\n    if (!id.ok) return id;\n',
+      to: '    const snap = readRepoIdentity(E.ctx.repoRoot, E.S.base.remote), first = snap.ok && snap.record ? verifyBase(E.ctx.repoRoot, { ref: E.S.base.ref, remote: snap.record.url, recorded: RECORDED[stage](E.S) }) : null;\n    if (first && !first.ok) return first;\n    const id = checkedIdentity(E, stage);\n    if (!id.ok) return id;\n' }] },
   { tag: 'I17', name: 'ship-ready: a RETRY re-freeze of the same candidate leaves SHIP_READY on the old base (the accepted deviation)',
     edits: [{ file: GATES, from: '  } else if (v.ok && idShip) S.ship_ready.base = idShip.base;', to: '  }' }] },
   { tag: 'I18', name: 'base check: a moved merge base (the branch merged the advanced base) is accepted',
     edits: [{ file: ID, from: '    if (v.base.merge_base !== B.merge_base) return moved(', to: '    if (false) return moved(' }] },
-  { tag: 'I19', name: 'verifyFrozenBase: no strict inputs (a missing freeze base skips the rewind check)',
-    edits: [{ file: ID, from: "  if (!recordOk || !githubUrl(url)) return no('base_unverified',", to: "  if (false) return no('base_unverified'," }] },
+  { tag: 'I19', name: 'verifyFrozenBase: no strict inputs (no freeze base or no valid snapshot skips the check)',
+    edits: [{ file: ID, from: "  if (!recordOk || !validIdentityRecord(record, B?.identity)) return no('base_unverified',", to: "  if (false) return no('base_unverified'," }] },
+  // ---- attempt 2
+  { tag: 'I20', name: 'reassess (flag on): S-12\'s base check re-reads the remote instead of taking the snapshot',
+    edits: [{ file: GATES, from: '  const baseNo = pinnedBaseRefusal(E, idNo?.record);', to: '  const baseNo = pinnedBaseRefusal(E);' }] },
+  { tag: 'I21', name: 'init: pinBaseRecord re-reads the URL despite the snapshot (good->evil->good pins evil under acme)',
+    edits: [{ file: BASE, from: '    const u = record !== undefined ? { ok: true, url: record.url } : remoteUrl(root, remote);', to: '    const u = remoteUrl(root, remote);' }] },
+  { tag: 'I22', name: 'the push URL is parsed loosely (a port or another form passes when the slug matches)',
+    edits: [{ file: GH, from: '  const a = strictGithub(url), b = push === null ? null : strictGithub(push);',
+      to: "  const a = strictGithub(url), b = push === null ? null : (strictGithub(push) ?? { slug: String(push).toLowerCase().replace(/^ssh:\\/\\/[^@]*@/, '').replace(/:\\d+\\//, '/').replace(/\\.git$/, '') });" }] },
+  { tag: 'I23', name: 'parser: plaintext http:// and git:// pass', edits: [{ file: GH, from: HTTPS, to: "  { re: /^(?:https?|git):\\/\\/([^/@:?#\\s\\\\%]+)\\/([^?#\\s\\\\%]+)$/, user: false }," }] },
+  { tag: 'I24', name: 'parser: an https userinfo part passes (evil.invalid#@github.com connects to evil.invalid)',
+    edits: [{ file: GH, from: HTTPS, to: "  { re: /^https:\\/\\/(?:[^/]*@)?([^/@:?#\\s\\\\%]+)\\/([^?#\\s\\\\%]+)$/, user: false }," }] },
+  { tag: 'I25', name: 'verifyFrozenBase: any object with a url is a snapshot (no frozen re-validated record of this run)',
+    edits: [{ file: ID, from: '!validIdentityRecord(record, B?.identity)) return no(', to: "!(typeof record?.url === 'string')) return no(" }] },
+  { tag: 'I26', name: 'the snapshot read falls back to two --get-all processes (url, then pushurl)',
+    edits: [{ file: ID, from: "    const r = authGit(root, ['config', '-z', '--get-regexp', `^remote\\\\.${reEscape(remote)}\\\\.(url|pushurl)$`]);",
+      to: "    const a = authGit(root, ['config', '--get-all', `remote.${remote}.url`]), p = authGit(root, ['config', '--get-all', `remote.${remote}.pushurl`]);\n    const r = { status: a.status === 0 ? 0 : a.status, stdout: [...a.stdout.split('\\n').filter(Boolean).map((v) => `remote.${remote}.url\\n${v}`), ...p.stdout.split('\\n').filter(Boolean).map((v) => `remote.${remote}.pushurl\\n${v}`)].join('\\0') };" }] },
+  { tag: 'I27', name: 'the remote name is not regex-escaped (up.stream also matches upXstream)', edits: [{ file: ID, from: '${reEscape(remote)}', to: '${remote}' }] },
+  { tag: 'I28', name: 'reassess (flag on): a base refusal is ignored and security work runs (the SCRUM-202 latch)', edits: [{ file: GATES, from: '  if (baseNo) return baseNo;\n', to: '' }] },
+  { tag: 'I29', name: 'reassess (flag on): S-12\'s base check by the snapshot skips the rewind check against the pin',
+    edits: [{ file: BASE, from: '    const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: B });', to: '    const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: record !== undefined ? null : B });' }] },
+  { tag: 'I30', name: 'the snapshot read takes a git failure for "no URL"', edits: [{ file: ID, from: '    if (r.error || (r.status !== 0 && r.status !== 1)) return fail(', to: '    if (false) return fail(' }] },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];

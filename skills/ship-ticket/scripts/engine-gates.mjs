@@ -17,7 +17,8 @@ import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs'
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry, baseRef } from './engine-dag.mjs';
 import { pinnedBaseRefusal, baseCandidate, baseCommit as baseCommit_, onBase } from './engine-base-read.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
-import { identityRefusal, identityStage } from './engine-identity.mjs';
+import { checkedIdentity, identityStage } from './engine-identity.mjs';
+import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 
@@ -796,9 +797,11 @@ export function designContract(nodes) {
  */
 async function reassessGate(E, input, candidate) {
   const S = E.S;
-  const idNo = identityRefusal(E, 'reassess'); // S-28a: the repository identity FIRST, so no ls-remote goes to a re-pointed URL
-  if (idNo) return idNo;
-  const baseNo = pinnedBaseRefusal(E); // S-12: a pinned base is verified first; its refusals never latch
+  // S-28a: the repository identity FIRST, from ONE snapshot (so no ls-remote goes to a re-pointed URL), then S-12's base check BY that
+  // snapshot: one base check for both modes; a flag-off run calls pinnedBaseRefusal(E) exactly as before
+  const idNo = repoIdentityOn(S) ? checkedIdentity(E, 'reassess') : null;
+  if (idNo && !idNo.ok) return idNo;
+  const baseNo = pinnedBaseRefusal(E, idNo?.record); // S-12: a pinned base is verified first; its refusals never latch
   if (baseNo) return baseNo;
   const sec = await securityContext(E, candidate);
   const refusal = securityRefusal(sec);

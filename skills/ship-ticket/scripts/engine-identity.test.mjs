@@ -5,7 +5,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { POSIX, fixture, withOrigin } from './engine-test-fixture.mjs';
-import { wellFormedFreezeBase, identityStateHolds, identityRefusal, identityStage, IDENTITY_CODES, githubUrl } from './engine-identity.mjs';
+import { wellFormedFreezeBase, identityStateHolds, identityRefusal, identityStage, IDENTITY_CODES } from './engine-identity.mjs';
+import { strictGithub, identityRecord, validIdentityRecord } from './github-identity.mjs';
 import { validateEngineDag, repoIdentityOn } from './engine-dag.mjs';
 import { POLICY_SEMANTICS, REPO_IDENTITY_VERSION_OF, repoIdentityVersion } from './engine-policy.mjs';
 
@@ -93,13 +94,17 @@ test('R14 an inherited GIT_DIR (or GIT_CONFIG*) never redirects the identity rea
   assert.equal(r.observed, 'github.com/evil/other');
 });
 
-test('githubUrl: a repository URL on github.com exactly (no other host, no port); remote-identity.mjs repositoryOf is unchanged for flag-off callers', async () => {
-  for (const u of ['https://github.com/acme/app.git', 'https://github.com/acme/app', 'http://github.com/a/b', 'ssh://git@github.com/acme/app.git', 'git://github.com/a/b',
-    'git@github.com:acme/app.git', 'github.com:acme/app', 'https://GitHub.com/acme/app', 'https://user@github.com/a/b']) assert.equal(githubUrl(u), true, u);
-  for (const u of ['https://gitlab.com/acme/app.git', 'https://github.com:8443/acme/app.git', 'ssh://git@github.com:22/acme/app.git', 'https://github.com.evil.io/a/b',
-    'https://evilgithub.com/a/b', '/tmp/origin.git', 'file:///tmp/origin.git', '-uhttps://github.com/a/b', ' https://github.com/a/b', null, undefined, 3])
-    assert.equal(githubUrl(u), false, String(u));
+test('github-identity: strictGithub is the one parser; repositoryOf (flag-off) is unchanged; a record is frozen, exact and re-validated', async () => {
+  assert.equal(strictGithub('git@github.com:acme/app.git')?.slug, 'github.com/acme/app');
+  for (const u of ['https://gitlab.com/acme/app.git', 'https://github.com:8443/acme/app.git', 'http://github.com/a/b', 'https://evil.invalid#@github.com/a/b'])
+    assert.equal(strictGithub(u), null, u);
   const { repositoryOf } = await import('./remote-identity.mjs');
   assert.equal(repositoryOf('https://gitlab.com/acme/app.git').slug, 'gitlab.com/acme/app', 'flag-off parsing is untouched');
   assert.equal(repositoryOf('https://github.com:8443/acme/app.git').slug, 'github.com/acme/app');
+  const r = identityRecord('https://github.com/acme/app.git', null);
+  assert.equal(validIdentityRecord(r, 'github.com/acme/app'), true);
+  assert.equal(validIdentityRecord(r, 'github.com/evil/other'), false, 'identity equality at consumption');
+  assert.equal(validIdentityRecord({ ...r }, 'github.com/acme/app'), false, 'an unfrozen copy');
+  assert.equal(validIdentityRecord(Object.freeze({ ...r, identity: 'github.com/evil/other' })), false, 'an identity field that is not the URL\'s');
+  assert.equal(validIdentityRecord(Object.freeze({ ...r, extra: 1 })), false, 'an extra key');
 });

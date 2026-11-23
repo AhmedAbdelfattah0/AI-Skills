@@ -13,16 +13,18 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, renameSync, readFileSync, writeFileSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, renameSync, readFileSync, writeFileSync, mkdtempSync, realpathSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { POSIX, fixture, withOrigin, passReview, failReview, confirmReview } from './engine-test-fixture.mjs';
+import { POSIX, fixture, withOrigin, withGitShim, passReview, failReview, confirmReview, BEGIN, END, narrativeDigest } from './engine-test-fixture.mjs';
 import * as SP from './security-plan.mjs';
 import { init, status, gate as gateCmd } from './run-engine.mjs';
 import { POLICY_SEMANTICS } from './engine-policy.mjs';
-import { verifyFrozenBase } from './engine-identity.mjs';
+import { verifyFrozenBase, readRepoIdentity } from './engine-identity.mjs';
+import { identityRecord, strictGithub } from './github-identity.mjs';
+import { pinnedBaseRefusal } from './engine-base-read.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`);
@@ -91,12 +93,12 @@ const CATALOG = SP.loadCatalog();
 const BOOLS = Object.entries(CATALOG.catalog.fact_vocabulary).filter(([, d]) => d.type === 'bool').map(([k]) => k);
 const EMPTY = SP.selectControls(CATALOG, { security_policy: 2, surfaces: [], facts: Object.fromEntries(BOOLS.map(k => [k, false])),
   evidence: Object.fromEntries(BOOLS.map(k => [k, 'src/impl.txt:1'])) });
-function secFx(t) {
+function secFx(t, { feature = true } = {}) {
   const fx = fixture(t, { commit: true, narrativeExtra: SP.renderSection3a(EMPTY) + '\n\n',
     config: { width: 1, base: 'main', securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: [], ...ID },
     nodes: [{ id: 'impl', writes: ['src'] }], behaviour: { impl: { write: { 'src/impl.txt': 'done' } } } });
   const o = withOrigin(fx, { github: 'acme/app' });
-  o.feature();
+  if (feature) o.feature();
   return { fx, o };
 }
 
@@ -468,18 +470,21 @@ test('[I13] the base is read by the identity-checked URL, never re-read from con
   ok(fx.cli('init', { dag: fx.dagFile }));
   const E = ctxOf(fx);
   o.repoint('evil/offline', { reachable: false }); // the configured URL now differs from the one the identity read returned
-  const v = verifyFrozenBase(E, E.S.base, o.ghUrl('acme/app'));
+  const v = verifyFrozenBase(E, E.S.base, identityRecord(o.ghUrl('acme/app'), null));
   assert.deepEqual([v.ok, v.base?.sha], [true, E.S.base.sha], JSON.stringify(v));
 });
 
-test('[I19] verifyFrozenBase has strict inputs: no freeze base, a copy of the pin or no identity-checked URL is base_unverified, never a skipped rewind check', { skip: WIN_SKIP }, (t) => {
+test('[I19] [I25] verifyFrozenBase has strict inputs: no freeze base, a copy of the pin, or no valid snapshot of THIS run is base_unverified, never a skipped check', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = idFx(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
-  const E = ctxOf(fx), url = o.ghUrl('acme/app');
-  for (const [name, recorded, u] of [['no record', undefined, url], ['null record', null, url], ['a copy of the pin', { ...E.S.base }, url],
-    ['no URL', E.S.base, undefined], ['a local path', E.S.base, o.origin], ['another host', E.S.base, 'https://gitlab.com/acme/app.git']])
-    assert.equal(verifyFrozenBase(E, recorded, u).code, 'base_unverified', name);
-  assert.equal(verifyFrozenBase(E, E.S.base, url).ok, true, 'the pin itself, by the checked URL');
+  o.evil('evil/other');
+  const E = ctxOf(fx), good = identityRecord(o.ghUrl('acme/app'), null);
+  for (const [name, recorded, rec] of [['no freeze base', undefined, good], ['null freeze base', null, good], ['a copy of the pin', { ...E.S.base }, good],
+    ['no snapshot', E.S.base, undefined], ['a bare URL string', E.S.base, o.ghUrl('acme/app')], ['an unfrozen look-alike', E.S.base, { ...good }],
+    ['a snapshot of another repository', E.S.base, identityRecord(o.ghUrl('evil/other'), null)],
+    ['a forged identity field', E.S.base, Object.freeze({ url: o.ghUrl('evil/other'), push: null, identity: 'github.com/acme/app' })]])
+    assert.equal(verifyFrozenBase(E, recorded, rec).code, 'base_unverified', name);
+  assert.equal(verifyFrozenBase(E, E.S.base, good).ok, true, 'the pin itself, by a valid snapshot of the run\'s repository');
 });
 
 // ------------------------------------------------------------------ R11 (Round 1): version 11 end to end
@@ -515,14 +520,15 @@ test('R11 a format-3 security block with repoIdentity records version 11 (7 + id
 // ------------------------------------------------------------------ R15 (Round 1): flag-off byte replay against origin/main's engine
 
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
-/** origin/main's skills/ extracted to a temp dir: the pre-S-28a engine; null in a checkout without origin/main (a shallow CI or a mutant copy). */
+/** The PR's merge base (merge-base HEAD origin/main) extracted to a temp dir: the engine before S-28a; null without origin/main (CI's shallow checkout, a mutant copy). */
 function mainEngine(t) {
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: SCRIPTS, encoding: 'utf8' });
   if (top.status !== 0) return null;
-  if (spawnSync('git', ['rev-parse', '--verify', '--quiet', 'origin/main^{commit}'], { cwd: top.stdout.trim() }).status !== 0) return null;
+  const mb = spawnSync('git', ['merge-base', 'HEAD', 'origin/main'], { cwd: top.stdout.trim(), encoding: 'utf8' });
+  if (mb.status !== 0) return null; // the PR's merge base: the engine this branch changes
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 's28a-main-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const ar = spawnSync('sh', ['-c', `git -C "${top.stdout.trim()}" archive origin/main skills | tar -x -C "${dir}"`], { encoding: 'utf8' });
+  const ar = spawnSync('sh', ['-c', `git -C "${top.stdout.trim()}" archive ${mb.stdout.trim()} skills | tar -x -C "${dir}"`], { encoding: 'utf8' });
   assert.equal(ar.status, 0, ar.stderr);
   return join(dir, 'skills', 'ship-ticket', 'scripts', 'run-engine.mjs');
 }
@@ -568,5 +574,286 @@ test('R15 flag off, byte replay: v1 and v5 (pinned, GitHub origin) runs give the
     assert.deepEqual(after.state, before.state, `state (pinned ${pinned})`);
     assert.deepEqual(after.log, before.log, `engine log (pinned ${pinned})`);
     assert.equal(after.state.policy_version, pinned ? 5 : 1);
+  }
+});
+
+// ================================================================== attempt 2: ONE snapshot per check, one strict parser
+
+const CONFIG_READ = /^\d+ --no-replace-objects config -z --get-regexp \^remote\\\.origin\\\.\(url\|pushurl\)\$$/;
+/** Exactly one counted remote-config process since the last reset, and it is THE snapshot read. */
+const oneRead = (shim, what) => { const r = shim.reads(); assert.equal(r.length, 1, `${what}: exactly one git config process per check: ${JSON.stringify(r)}`); assert.match(r[0], CONFIG_READ, what); };
+/** Every ls-remote since the last reset was given `url` (the snapshot's), and there was at least one. */
+const lsBy = (shim, url, what) => { const l = shim.lsRemotes(); assert.ok(l.length > 0 && l.every((x) => x.includes(url)), `${what}: ls-remote only by ${url}: ${JSON.stringify(l)}`); };
+
+test('[I26] A2-1 one git config process per check: init, review original, confirmation and ship-ready (two checks: before and after its proof)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  const shim = withGitShim(fx), url = o.ghUrl('acme/app');
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  oneRead(shim, 'init'); lsBy(shim, url, 'init');
+  ok(fx.cli('drive'));
+  shim.reset();
+  ok(fx.gate('review', failReview('rx-1', candidate(fx), 'src/a.txt', fx.prompt('fix'))));
+  oneRead(shim, 'review original'); lsBy(shim, url, 'review original');
+  ok(fx.cli('drive'));
+  shim.reset();
+  ok(fx.gate('review', confirmReview('rx-1', candidate(fx))));
+  oneRead(shim, 'confirmation'); lsBy(shim, url, 'confirmation');
+  shim.reset();
+  ok(fx.gate('ship-ready', {}));
+  const r = shim.reads();
+  assert.equal(r.length, 2, `ship-ready with a proof: two independent snapshots (before and after the proof): ${JSON.stringify(r)}`);
+  assert.ok(r.every((x) => CONFIG_READ.test(x)));
+  shim.reset();
+  ok(fx.gate('ship-ready', {}));
+  oneRead(shim, 'ship-ready with the proof already bound (no proof runs)');
+});
+
+test('[I20] [I26] A2-1 one git config process at gate reassess, and its base check is S-12\'s by that snapshot', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = secFx(t);
+  const shim = withGitShim(fx);
+  started(fx);
+  shim.reset();
+  const r = fx.gate('reassess', {});
+  ok(r);
+  assert.equal(r.out.code, 'reassessed');
+  oneRead(shim, 'reassess'); lsBy(shim, o.ghUrl('acme/app'), 'reassess');
+});
+
+test('[I21] A2-2 init: a URL flipped on the N-th remote-config process (restored or not) never pins one repository\'s SHA under the other\'s identity', { skip: WIN_SKIP }, (t) => {
+  for (const restore of [true, false]) for (const n of [1, 2, 3]) {
+    const { fx, o } = idFx(t);
+    const acme = o.sha('origin/main'), evil = o.evil('evil/other');
+    assert.notEqual(evil, acme, 'the second repository has its own tip');
+    const shim = withGitShim(fx).flip(n, { to: o.ghUrl('evil/other'), restore });
+    ok(fx.cli('init', { dag: fx.dagFile }), `init (flip ${n}, restore ${restore})`);
+    const S = fx.readState();
+    // the one read is the first: n = 1 binds the second repository with ITS tip (trust on first use); any other n is never seen
+    const want = n === 1 ? ['github.com/evil/other', evil, o.ghUrl('evil/other')] : ['github.com/acme/app', acme, o.ghUrl('acme/app')];
+    assert.deepEqual([S.base.identity, S.base.sha], want.slice(0, 2), `flip ${n}, restore ${restore}: identity and pinned SHA come from ONE snapshot`);
+    assert.equal(S.base.merge_base, acme, 'the shared ancestry: the merge base is the common commit');
+    oneRead(shim, `init (flip ${n})`); lsBy(shim, want[2], `init (flip ${n})`);
+  }
+});
+
+test('[I12] [I16] A2-3 gates: a flip on the one snapshot is identity_changed before any ls-remote (restored or kept); at ship-ready on either snapshot', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  o.evil('evil/other');
+  started(fx);
+  const shim = withGitShim(fx), cand = candidate(fx), evil = o.ghUrl('evil/other');
+  for (const restore of [true, false]) {
+    shim.reset().flip(1, { to: evil, restore });
+    const r = refused(fx.gate('review', passReview('rx-1', cand)), 'identity_changed');
+    assert.equal(r.out.observed, 'github.com/evil/other');
+    assert.deepEqual(shim.lsRemotes(), [], 'the identity refusal comes before any base read');
+    if (!restore) o.git('remote', 'set-url', 'origin', o.ghUrl('acme/app'));
+  }
+  shim.reset();
+  ok(fx.gate('review', passReview('rx-1', cand)));
+  shim.reset().flip(1, { to: evil });
+  refused(fx.gate('ship-ready', {}), 'identity_changed');
+  assert.equal(fx.readState().local_proof, undefined, 'a flip on the first snapshot: the proof never ran');
+  shim.reset().flip(2, { to: evil });
+  refused(fx.gate('ship-ready', {}), 'identity_changed');
+  assert.deepEqual([fx.readState().local_proof?.candidate_id, fx.readState().local_proof?.dropped], [null, ['identity_changed']], 'a flip on the post-proof snapshot drops the proof');
+  assert.equal(fx.readState().ship_ready, undefined);
+  shim.reset();
+  ok(fx.gate('ship-ready', {}));
+});
+
+test('[I22] A2-4 push values: a push URL that changes, names another repository, or the same repository on a port is remote_ambiguous', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  o.git('config', 'remote.origin.pushurl', 'ssh://git@github.com:8443/acme/app.git');
+  initFails(fx.cli('init', { dag: fx.dagFile }), 'remote_ambiguous');
+  noState(fx);
+  o.git('config', 'remote.origin.pushurl', 'git@github.com:acme/app.git');
+  ok(fx.cli('init', { dag: fx.dagFile }), 'the same repository in scp form is one identity');
+  ok(fx.cli('drive'));
+  const shim = withGitShim(fx).flip(1, { key: 'remote.origin.pushurl', to: o.ghUrl('evil/other') });
+  refused(fx.gate('review', passReview('rx-1', candidate(fx))), 'remote_ambiguous');
+  oneRead(shim, 'review with a flipped push value');
+  assert.deepEqual(shim.lsRemotes(), []);
+});
+
+test('[I14] [I15] [I23] [I24] A2-5 strictGithub: github.com only, no port, https/ssh/scp only, no userinfo tricks, one parse for owner and repo', () => {
+  const same = ['https://github.com/acme/app.git', 'https://github.com/acme/app', 'https://github.com/acme/app/', 'https://GitHub.com/Acme/App.git',
+    'ssh://git@github.com/acme/app.git', 'ssh://github.com/acme/app', 'git@github.com:acme/app.git', 'github.com:acme/app', 'git@GITHUB.COM:acme/app/'];
+  for (const u of same) assert.equal(strictGithub(u)?.slug, 'github.com/acme/app', u);
+  assert.equal(strictGithub('https://github.com/a.b/c_d-e.git')?.slug, 'github.com/a.b/c_d-e');
+  for (const u of ['https://gitlab.com/acme/app.git', 'https://github.com.evil.io/acme/app', 'https://evilgithub.com/acme/app', 'git@gitlab.com:acme/app.git',
+    'https://github.com:8443/acme/app.git', 'ssh://git@github.com:22/acme/app.git', 'github.com:8443/acme/app',
+    'http://github.com/acme/app.git', 'git://github.com/acme/app.git', 'HTTP://github.com/acme/app',
+    'https://evil.invalid#@github.com/acme/app.git', 'https://evil.invalid?@github.com/acme/app.git', 'https://user@github.com/acme/app.git',
+    'https://github.com/acme/app.git#frag', 'https://github.com/acme/app.git?x=1', 'ssh://-oProxyCommand=x@github.com/acme/app', '-x@github.com:acme/app',
+    'ssh://us er@github.com/acme/app', 'https://github.com/-acme/app', 'https://github.com/acme/-app', 'https://github.com/./app', 'https://github.com/acme/..',
+    'https://github.com/acme/app/extra', 'https://github.com/acme', ' https://github.com/acme/app', 'https://github.com/acme/app\n', 'https://github.com/ac%6de/app',
+    '/tmp/origin.git', 'file:///tmp/origin.git', '', null, undefined, 3])
+    assert.equal(strictGithub(u), null, String(u));
+  // the record: one parse, the push URL the same repository, frozen
+  const r = identityRecord('https://github.com/acme/app.git', 'git@github.com:Acme/App.git');
+  assert.deepEqual([Object.isFrozen(r), r.identity, r.push], [true, 'github.com/acme/app', 'git@github.com:Acme/App.git']);
+  assert.equal(identityRecord('https://github.com/acme/app.git', 'https://github.com/evil/app.git'), null);
+  assert.equal(identityRecord('https://github.com/acme/app.git', 'ssh://git@github.com:8443/acme/app.git'), null);
+});
+
+test('[I14] [I23] R1c plaintext http:// and git:// origins and an https userinfo trick are identity_unbound at init', { skip: WIN_SKIP }, (t) => {
+  for (const url of ['http://github.com/acme/app.git', 'git://github.com/acme/app.git', 'https://evil.invalid#@github.com/acme/app.git']) {
+    const { fx, o } = idFx(t, { github: null });
+    pointAt(o, url);
+    initFails(fx.cli('init', { dag: fx.dagFile }), 'identity_unbound');
+    noState(fx);
+  }
+});
+
+/** A plain repository with a GitHub-shaped origin, for the in-process snapshot reads. */
+function snapRepo(t) { const fx = fixture(t, { commit: true }); const o = withOrigin(fx, { github: 'acme/app' }); return { fx, o, read: (r = 'origin') => readRepoIdentity(fx.repo, r) }; }
+
+test('[I27] [I30] A2-6 the snapshot read: NUL-separated values, every scope, escaped remote names, and any git failure refused', { skip: WIN_SKIP }, (t) => {
+  const ok1 = (r, what) => assert.deepEqual([r.ok, r.record?.identity], [true, 'github.com/acme/app'], `${what}: ${JSON.stringify(r)}`);
+  const amb = (r, re, what) => { assert.deepEqual([r.ok, r.code], [false, 'remote_ambiguous'], `${what}: ${JSON.stringify(r)}`); if (re) assert.match(r.reasons[0], re, what); };
+  let { fx, o, read } = snapRepo(t);
+  ok1(read(), 'one URL');
+  // a quoted newline in a push value can never forge a second fetch URL line
+  o.git('config', 'remote.origin.pushurl', `${o.ghUrl('acme/app')}\nremote.origin.url ${o.ghUrl('evil/other')}`);
+  amb(read(), /pushes to/, 'an embedded newline');
+  o.git('config', '--unset', 'remote.origin.pushurl');
+  o.git('config', '--add', 'remote.origin.url', o.ghUrl('acme/app'));
+  amb(read(), /2 fetch URLs/, 'a duplicate fetch value');
+  ({ fx, o, read } = snapRepo(t));
+  o.git('config', '--add', 'remote.origin.pushurl', o.ghUrl('acme/app'));
+  o.git('config', '--add', 'remote.origin.pushurl', o.ghUrl('acme/app'));
+  amb(read(), /2 push URLs/, 'a duplicate push value');
+  // includeIf and worktree scopes contribute
+  ({ fx, o, read } = snapRepo(t));
+  const inc = join(fx.root, 'extra.cfg');
+  writeFileSync(inc, `[remote "origin"]\n\tpushurl = ${o.ghUrl('evil/other')}\n`);
+  o.git('config', `includeIf.gitdir:${fx.repo}/.git/.path`, inc);
+  amb(read(), /pushes to/, 'an includeIf contribution');
+  ({ fx, o, read } = snapRepo(t));
+  o.git('config', 'extensions.worktreeConfig', 'true');
+  o.git('config', '--worktree', 'remote.origin.pushurl', o.ghUrl('evil/other'));
+  amb(read(), /pushes to/, 'a worktree-scope contribution');
+  // the global scope contributes (HOME is kept by the hardened read)
+  ({ fx, o, read } = snapRepo(t));
+  const home = join(fx.root, 'home');
+  mkdirSync(home);
+  writeFileSync(join(home, '.gitconfig'), `[remote "origin"]\n\turl = ${o.ghUrl('evil/other')}\n`);
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  try { process.env.HOME = home; delete process.env.XDG_CONFIG_HOME; amb(read(), /2 fetch URLs/, 'a global-scope URL'); }
+  finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+  // a dotted remote name is matched literally (a '.' never matches another character)
+  ({ fx, o, read } = snapRepo(t));
+  o.git('remote', 'add', 'up.stream', o.ghUrl('acme/app'));
+  o.git('remote', 'add', 'upXstream', o.ghUrl('evil/other'));
+  ok1(read('up.stream'), 'a dotted remote with a look-alike sibling');
+  // no URL: a null record (the caller refuses); a git failure (exit not 0 or 1) is refused, never read as "no URL"
+  o.git('remote', 'remove', 'origin');
+  assert.deepEqual([read().ok, read().record], [true, null]);
+  writeFileSync(join(o.gitDir(), 'config'), `${readFileSync(join(o.gitDir(), 'config'), 'utf8')}\n[broken\n`);
+  amb(read('up.stream'), /git config failed/, 'an unreadable config');
+});
+
+// ------------------------------------------------------------------ reassess with the flag on: S-12's ONE base check, by the snapshot
+
+test('[I28] A2-7 flag-on reassess, SCRUM-202 topology: a stale local main is base_moved_local before any security work, never the REAPPROVAL latch', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = secFx(t, { feature: false });
+  const oldMain = o.sha('main');
+  const tip = o.upstream(26);
+  o.fetch();
+  o.git('checkout', '-q', '-b', 'feature', 'origin/main');
+  o.git('branch', '-q', '--set-upstream-to=origin/main', 'feature');
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('drive'));
+  const r = refused(fx.gate('reassess', {}), 'base_moved_local');
+  assert.deepEqual([r.out.expected, r.out.observed, r.out.judgment_point], [tip, oldMain, true]);
+  assert.equal(fx.readState().security?.reapproval, undefined, 'not latched');
+  o.git('branch', '-f', 'main', 'origin/main');
+  assert.equal(fx.gate('reassess', {}).out.code, 'reassessed', 'non-latching: the reset local base reassesses');
+});
+
+test('[I29] A2-8 flag-on reassess: a remote rewound below the pin is base_moved_remote; a merged advanced base is base_moved_local; both non-latching', { skip: WIN_SKIP }, (t) => {
+  const a = secFx(t, { feature: false });
+  const before = a.o.sha('main');
+  a.o.upstream(2); a.o.fetch(); a.o.feature(); a.o.git('branch', '-f', 'main', 'origin/main');
+  started(a.fx);
+  a.o.rewind(before);
+  refused(a.fx.gate('reassess', {}), 'base_moved_remote');
+  assert.equal(a.fx.readState().security?.reapproval, undefined);
+  const b = secFx(t);
+  started(b.fx);
+  const pinned = b.fx.readState().base.merge_base, now = b.o.upstream(2);
+  b.o.fetch(); b.o.git('merge', '-q', '--ff-only', 'origin/main');
+  const r = refused(b.fx.gate('reassess', {}), 'base_moved_local');
+  assert.deepEqual([r.out.expected, r.out.observed], [pinned, now]);
+});
+
+test('A2-9 flag-on reassess base check is hardened: an inherited GIT_DIR never redirects S-12\'s check by the snapshot', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t), other = idFx(t);
+  other.o.upstream(2);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const E = ctxOf(fx), rec = identityRecord(o.ghUrl('acme/app'), null);
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { GIT_DIR: other.o.gitDir(), GIT_WORK_TREE: other.fx.repo });
+    assert.equal(pinnedBaseRefusal(E, rec), null, 'the pinned base holds in the run\'s own repository');
+  } finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
+  assert.equal(pinnedBaseRefusal(E, identityRecord(o.ghUrl('evil/other'), null)).code, 'base_unverified', 'a snapshot of another repository is refused');
+  assert.equal(pinnedBaseRefusal(E, { url: o.ghUrl('acme/app'), push: null, identity: 'github.com/acme/app' }).code, 'base_unverified', 'an unfrozen record is refused');
+});
+
+// ------------------------------------------------------------------ versions 9-12: real init, and an S-12 engine refuses each
+
+const VITEST_ARGS = ['run', '--pool=forks', '--reporter=json', '--outputFile={report}'];
+const TK_ENTRY = { cmd: 'node_modules/.bin/vitest', args: [...VITEST_ARGS, '{files}'], format: 'vitest-json',
+  evidence: { report: 'fd', covers: ['test/**'], files: true, config_paths: ['vitest.config.ts'] } };
+const FLOOR = (base) => `risk-floor: floor=STANDARD; classes=none; claimed=STANDARD; ai=STANDARD; final=STANDARD; paths=1; matched=0; base=${base.slice(0, 12)}; head=worktree; declaration=none`;
+
+/**
+ * A repoIdentity run with test kinds (run-engine-test-kinds.test.mjs tkFx, init part only: the runner never runs, so it is
+ * portable): a stub vitest bin, a test-triggers line and the risk-floor line on the pinned base. `format3` adds a format-3 block.
+ */
+function tkIdFx(t, { format3 = false } = {}) {
+  const sel = format3 ? formatThree() : EMPTY, SPEC = 'spec/sec.test.mjs';
+  const cov = format3 ? sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] })) : [];
+  const fx = fixture(t, { commit: true, narrativeExtra: `${SP.renderSection3a(sel)}\n\ntest-triggers: input-path\nFLOOR_LINE\n`,
+    config: { width: 1, base: 'main', testCommands: { unit: TK_ENTRY }, securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: cov, testKinds: { policy: 1 }, ...ID },
+    nodes: format3 ? [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'a', deps: ['api'], writes: ['test', 'src'] }] : [{ id: 'a', writes: ['test', 'src'] }] });
+  mkdirSync(join(fx.repo, 'node_modules', '.bin'), { recursive: true });
+  mkdirSync(join(fx.repo, 'node_modules', 'vitest'), { recursive: true });
+  writeFileSync(join(fx.repo, 'node_modules', '.bin', 'vitest'), '#!/usr/bin/env node\nprocess.exit(3);\n');
+  chmodSync(join(fx.repo, 'node_modules', '.bin', 'vitest'), 0o755);
+  writeFileSync(join(fx.repo, 'node_modules', 'vitest', 'package.json'), '{"name":"vitest","version":"4.0.7"}\n');
+  writeFileSync(join(fx.repo, '.gitignore'), 'node_modules/\n');
+  const o = withOrigin(fx, { github: 'acme/app' });
+  const text = readFileSync(fx.planFile, 'utf8'), narrative = text.slice(0, text.indexOf(BEGIN)).replace('FLOOR_LINE', FLOOR(o.sha('HEAD')));
+  const start = { run_id: 'run-1', event: 'START', timestamp: '2026-11-05T00:00:00Z', approved_plan_digest: narrativeDigest(`${narrative}${BEGIN}\n${END}\n`) };
+  writeFileSync(fx.planFile, `${narrative}${BEGIN}\n${JSON.stringify(start)}\n${END}\n`);
+  o.feature();
+  return { fx, o };
+}
+function v11Fx(t) {
+  const sel = formatThree(), SPEC = 'spec/sec.test.mjs';
+  const cov = sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] }));
+  const fx = fixture(t, { commit: true, narrativeExtra: SP.renderSection3a(sel) + '\n\n',
+    config: { width: 1, base: 'main', securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: cov, ...ID,
+      testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } } },
+    nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }] });
+  const o = withOrigin(fx, { github: 'acme/app' });
+  o.feature();
+  return { fx, o };
+}
+
+test('R11b every version 9-12 by a REAL init; an S-12 engine (rows 1-8) refuses each at init and on load', { skip: WIN_SKIP }, async (t) => {
+  const s12 = { current: 1, semantics: Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8].map((v) => [v, POLICY_SEMANTICS[v]])) };
+  for (const [v, make] of [[9, () => idFx(t)], [10, () => tkIdFx(t)], [11, () => v11Fx(t)], [12, () => tkIdFx(t, { format3: true })]]) {
+    const { fx } = make();
+    await assert.rejects(init(fx.ctx({ policy: s12 })), (e) => e.code === 'policy_version_unsupported', `v${v}: the S-12 engine refuses at init`);
+    noState(fx);
+    await init(fx.ctx());
+    const S = fx.readState();
+    assert.equal(S.policy_version, v, `a real init records v${v}`);
+    assert.deepEqual(POLICY_SEMANTICS[v].repoIdentity, true);
+    assert.equal(S.base.identity, 'github.com/acme/app');
+    await assert.rejects(status(fx.ctx({ policy: s12 })), (e) => e.code === 'policy_version_unsupported', `v${v}: the S-12 engine refuses on load`);
+    await status(fx.ctx());
   }
 });
