@@ -90,7 +90,7 @@ export const MUTANTS = [
   ['M29', 'normalise listed names (NFC)', '    const present = new Set(names.map(hexKey));', "    const present = new Set(names.map((n) => Buffer.from(n.toString().normalize('NFC')).toString('hex')));", [], 'darwin'],
   ['M30', 'an exclusion matches as a string prefix', '(p.length > e.length && p.subarray(0, e.length + 1).equals(Buffer.concat([e, SLASH])))', '(p.length > e.length && p.subarray(0, e.length).equals(e))'],
   ['M31', 'drop the info/exclude copy', '  const exBytes = fx.lstatOrNull(ex) ? readBounded(fx, ex, MIB, op) : EMPTY;', '  const exBytes = EMPTY;'],
-  ['M32', 'ignore self-ignoring .gitignore files', "  const gitignoreUntracked = others.ignored.filter((p) => !excluded(p) && p.subarray(p.lastIndexOf(0x2f) + 1).equals(B('.gitignore')));", '  const gitignoreUntracked = [];'],
+  ['M32', 'ignore self-ignoring .gitignore files', "  const gitignoreUntracked = others.ignored.filter((p) => { fx.tick(); return !excluded(p) && p.subarray(p.lastIndexOf(0x2f) + 1).equals(B('.gitignore')); });", '  const gitignoreUntracked = [];'],
   ['M34', 'drop the file budget', "  const spendFiles = meter(st.maxFiles, 'worktree_budget_exceeded', op, fx);", "  const spendFiles = meter(Number.MAX_SAFE_INTEGER, 'worktree_budget_exceeded', op, fx);"],
   ['M35', 'drop the byte budget', "  const spendBytes = meter(st.maxBytes, 'worktree_budget_exceeded', op, fx);", "  const spendBytes = meter(Number.MAX_SAFE_INTEGER, 'worktree_budget_exceeded', op, fx);"],
   ['M36', 'enumeration not charged per entry', '    for (let e = d.read(); e !== null; e = d.read()) { spend(1); names.push(e.name); }', '    for (let e = d.read(); e !== null; e = d.read()) names.push(e.name);'],

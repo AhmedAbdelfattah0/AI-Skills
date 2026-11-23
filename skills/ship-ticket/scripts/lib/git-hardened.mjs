@@ -13,8 +13,14 @@
 // DEADLINES (owner-approved attempt 3, 2026-11-23): every filesystem call goes through one per-operation gateway `fsx`
 // that checks the operation's deadline before the call; CPU loops check every 1,024 units; each public success return is
 // preceded by a terminal check; recovery (quarantine, removal) runs on a derived grace deadline with lane_remove_failed.
-// LIMITATIONS of that guarantee (not hard-timeout protection): an fs call already in progress (a hung network syscall)
-// and a slow descriptor close are not interrupted; the concurrent-writer and walk race windows are unchanged. Outside
+// LIMITATIONS of that guarantee (not hard-timeout protection): an fs call already in progress (a hung network syscall,
+// or one copyFileSync of a pack of up to maxTotalObjectBytes) and a slow descriptor close are not interrupted; a native
+// call already in progress (decodeStrict, split, indexOf, a regex, a hash update over at most one 1 MiB chunk or one
+// output of at most 64 MiB) runs to its end; the clock is Date.now, so a wall-clock step backwards lengthens a window;
+// lib temp dirs (V, I, the exclude copy) live under R until dispose; an expiry between the exclusive mkdir of a store and
+// its lstat leaves that empty dir at its own name (never removed without a verified identity, never reused); a refused
+// createContext whose R identity is unknown, or whose cleanup window is spent, leaves R; the concurrent-writer and walk
+// race windows are unchanged. Outside
 // fsx (residual R-b, documented and tested for typed failure): git-exec's preflight statSync of the lib-owned cwd before
 // each spawn (its time is not deducted from that spawn's timeout; the next gateway check refuses with the operation code;
 // a failing stat is git_launch_failed) and the git probe in createContext (PATH stat/access/realpath and a --version spawn
