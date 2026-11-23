@@ -108,6 +108,7 @@ jobs:
           skills/ship-ticket/scripts/engine-test-kinds-io.test.mjs
           skills/ship-ticket/scripts/run-engine-test-kinds.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
+          skills/ship-ticket/scripts/eval-cycles.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
           skills/ship-ticket/scripts/brief-start-check.test.mjs
