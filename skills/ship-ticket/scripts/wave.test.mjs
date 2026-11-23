@@ -70,6 +70,9 @@ const S = {
     const bad = (over, code = 'wave_path_unsafe') => assert.deepEqual(codesOf(manifest([tk('T1', over)]), m), [code], JSON.stringify(over));
     for (const plan of ['../x.md', '/etc/x.md', '.specs/../x.md', '.specs\\x.md', 'a\0.md', '.specs/plans/x.txt', '-x.md', 'a//b.md', '']) bad({ plan });
     for (const worktree of ['work/T1', '/work/../etc', '/work/T1/', '/work//T1', '/work/./T1', 'a\0']) bad({ worktree });
+    for (const worktree of ['C:\\work\\..\\x', 'C:\\work\\T1\\', 'C:work', '\\\\srv\\x', 'C:\\work\\.\\T1']) bad({ worktree });
+    // Windows-style roots are valid on every OS (no path.normalize: it would rewrite '/' on win32)
+    assert.deepEqual(codesOf(manifest([tk('T1', { worktree: 'C:\\work\\T1' }), tk('T2', { worktree: 'D:/work/T2' })]), m), []);
     for (const owns of [['../x'], ['/abs'], ['a/../b'], ['-x']]) bad({ owns });
     for (const branch of ['--upload-pack=x', 'a..b', 'a b', 'x.lock', '/x', 'a//b']) bad({ branch }, 'wave_branch_invalid');
     bad({ resources: ['db'] }, 'wave_resource_invalid');

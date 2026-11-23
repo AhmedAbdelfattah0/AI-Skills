@@ -68,7 +68,13 @@ const hasDots = (p) => p.split('/').some((s) => s === '' || s === '.' || s === '
 const unsafeText = (p) => typeof p !== 'string' || p.length === 0 || p.length > 512 || p.includes('\0') || p.includes('\\') || /[\r\n]/.test(p);
 /** A repo-relative path: no absolute, no `.`/`..`/empty segment, no leading dash, no NUL, backslash or line break. */
 export const safeRelPath = (p) => !unsafeText(p) && !p.startsWith('/') && !/^[A-Za-z]:/.test(p) && !p.startsWith('-') && !hasDots(p);
-const safeWorktree = (p) => !unsafeText(p) && isAbsolute(p) && normalize(p) === p && !p.endsWith('/') && !p.split('/').includes('..');
+/** Platform-independent: a POSIX root or a drive root (`C:\\` / `C:/`), then non-empty segments with no `.`/`..`, no trailing separator. Never path.normalize (it rewrites `/` on win32). */
+const safeWorktree = (p) => {
+  if (typeof p !== 'string' || p.length > 512 || p.includes('\0') || /[\r\n]/.test(p)) return false;
+  const m = /^(?:\/|[A-Za-z]:[\\/])(.*)$/.exec(p);
+  if (!m || m[1] === '') return false;
+  return m[1].split(/[\\/]/).every((s) => s !== '' && s !== '.' && s !== '..');
+};
 const safeBranch = (b) => typeof b === 'string' && BRANCH.test(b) && !b.includes('..') && !b.includes('//') && !b.endsWith('/') && !b.endsWith('.') && !b.endsWith('.lock');
 const safeResource = (r) => typeof r === 'string' && RESOURCE_PREFIXES.some((p) => r.startsWith(p) && /^[A-Za-z0-9._/-]{1,100}$/.test(r.slice(p.length)));
 
@@ -112,7 +118,7 @@ export function validateManifest(m) {
     if (!SAFE_ID.test(tk)) add('wave_key_invalid', 'ticket key must be a safe id', String(tk));
     if (!SAFE_ID.test(t.run_id)) add('wave_run_id_invalid', 'run_id must be a safe id', tk);
     if (!safeRelPath(t.plan) || !t.plan.endsWith('.md')) add('wave_path_unsafe', `plan ${JSON.stringify(t.plan)} must be a safe repo-relative .md path`, tk);
-    if (!safeWorktree(t.worktree)) add('wave_path_unsafe', `worktree ${JSON.stringify(t.worktree)} must be a normalised absolute path with no .. segment`, tk);
+    if (!safeWorktree(t.worktree)) add('wave_path_unsafe', `worktree ${JSON.stringify(t.worktree)} must be an absolute POSIX or drive path with no empty, . or .. segment`, tk);
     if (!safeBranch(t.branch)) add('wave_branch_invalid', `branch ${JSON.stringify(t.branch)} is not a safe branch name`, tk);
     for (const o of t.owns ?? []) if (!safeRelPath(o)) add('wave_path_unsafe', `owns ${JSON.stringify(o)} must be a safe repo-relative path`, tk);
     for (const r of t.resources) if (!safeResource(r)) add('wave_resource_invalid', `resource ${JSON.stringify(r)} must be <prefix>:<name> with a prefix of ${RESOURCE_PREFIXES.join(' ')}`, tk);
