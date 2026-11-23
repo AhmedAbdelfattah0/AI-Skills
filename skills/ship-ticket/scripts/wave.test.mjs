@@ -378,7 +378,7 @@ const MUTANTS = [
 
 for (const [name, from, to, killers] of MUTANTS) {
   test(`wave mutant ${name} is killed by an assertion`, async () => {
-    const src = readFileSync(SRC, 'utf8');
+    const src = readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n'); // Windows checkouts are CRLF; the mutation sites are LF
     assert.equal(src.split(from).length - 1, 1, `mutation site for ${name} must match exactly once`);
     const file = join(HERE, `wave.mutant-${name}.${process.pid}.mjs`);
     writeFileSync(file, src.replace(from, to));
