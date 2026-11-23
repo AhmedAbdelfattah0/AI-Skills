@@ -266,8 +266,8 @@ recorded uncertainty.
 
 A structural path floor runs alongside your own judgement, only when the repository declares
 it. When `.ship-ticket/risk-paths.json` does not exist at the base commit and the plan does not
-opt into test kinds (a `test-triggers:` plan line, or a repository
-`.ship-ticket/test-triggers.json` at base), skip `risk-floor.mjs` and record the single plan line `risk_floor: not
+opt into test kinds (the plan's test-kinds tag line, or a repository
+test-kinds declaration file under `.ship-ticket/` at base; both are named in `references/test-kinds.md`), skip `risk-floor.mjs` and record the single plan line `risk_floor: not
 declared`; your assessment is then the only protection. An opted-in test-kinds plan still runs
 `check` and records its strict record line (`declaration=none`), because test kinds require it. The
 repository declares its
