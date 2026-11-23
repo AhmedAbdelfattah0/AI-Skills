@@ -17,6 +17,7 @@ import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs'
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry, baseRef } from './engine-dag.mjs';
 import { pinnedBaseRefusal, baseCandidate, baseCommit as baseCommit_, onBase } from './engine-base-read.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
+import { identityRefusal, identityStage } from './engine-identity.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 
@@ -191,6 +192,9 @@ async function reviewGate(E, input, candidate) {
   if (S.freeze && !retry && candidate !== S.freeze.candidate) {
     return gateNo('stale_candidate', [`the work tree is ${candidate}, frozen is ${S.freeze.candidate}: unexpected drift after the freeze`]);
   }
+  // S-28a: the repository identity, then the remote base (null unless config.repoIdentity); a refusal writes none of the protected fields
+  const idAt = identityStage(E, input.kind === 'original' ? 'review' : 'confirmation');
+  if (idAt && !idAt.ok) return idAt;
   const tk = await ensureEvidence(E, input.kind === 'confirmation' ? 'F4' : 'F1');
   if (tk && !tk.ok) return tk; // F1/F4 (S-01b2 P5r): before gateReview, so a refusal writes none of the protected fields
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
@@ -229,7 +233,8 @@ async function reviewGate(E, input, candidate) {
   }
   S.review_chain.push(v.record);
   recordDisputes(S, disputes, input.review_execution); // F12a: run-wide and add-only; disputedRefusal reads it
-  if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
+  if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0, ...(idAt ? { base: idAt.base } : {}) }; S.frozen_candidate = candidate; }
+  if (input.kind === 'original' && idAt) note(S, 'BASE_FROZEN', { review_execution: input.review_execution, ...idAt.base });
   if (tk) S.test_kinds.freeze_evidence = tk.evidence_id; // informational: no decision reads it (F4/S1/S2 bind through the record)
   if (v.repair) {
     S.repairs.push({ id: `repair-${v.repair.review_execution}`, kind: 'review', review_execution: v.repair.review_execution,
@@ -320,6 +325,9 @@ async function shipReadyGate(E, input, candidate) {
   const units = unitShipRefusal(E);
   if (units) return units;
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
+  // S-28a: identity and the freeze base, before anything is derived or run (null unless config.repoIdentity)
+  const idShip = identityStage(E, 'ship-ready');
+  if (idShip && !idShip.ok) return idShip;
   // Derived on every call (and again after the proof): red_accepted from the current RED gates (RED can
   // be invalidated between calls) and exists from the work tree (a git-ignored evidence file can go).
   const rebind = () => {
@@ -398,9 +406,9 @@ async function shipReadyGate(E, input, candidate) {
   }
   if (v.ok && S.ship_ready?.candidate_id !== candidate) {
     note(S, 'SHIP_READY', { candidate_id: candidate });
-    S.ship_ready = { candidate_id: candidate, seq: S.seq };
+    S.ship_ready = { candidate_id: candidate, seq: S.seq, ...(idShip ? { base: idShip.base } : {}) };
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
-  }
+  } else if (v.ok && idShip) S.ship_ready.base = idShip.base; // S-28a: a RETRY re-freeze of the same candidate moves the base of record
   return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
     matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
@@ -781,6 +789,8 @@ export function designContract(nodes) {
  */
 async function reassessGate(E, input, candidate) {
   const S = E.S;
+  const idNo = identityRefusal(E, 'reassess'); // S-28a: the repository identity FIRST, so no ls-remote goes to a re-pointed URL
+  if (idNo) return idNo;
   const baseNo = pinnedBaseRefusal(E); // S-12: a pinned base is verified first; its refusals never latch
   if (baseNo) return baseNo;
   const sec = await securityContext(E, candidate);

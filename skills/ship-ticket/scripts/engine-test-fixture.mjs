@@ -223,16 +223,26 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
  * (never init.defaultBranch), clones it bare to <root>/origin.git as remote `origin` and fetches it. `upstream(n, prefix)`
  * pushes `n` commits (one file each, `<prefix>/f<i>.txt`) to origin from a separate clone, as another developer would;
  * the fixture repo's own refs do not move until `fetch()`. `git(...args)` runs in the fixture repo.
+ *
+ * S-28a: `github: 'owner/repo'` makes origin GitHub-shaped: remote.origin.url is https://github.com/<owner/repo>.git and a
+ * repo-local `url.<bare>.insteadOf` maps it to the local bare, so no network is reached (the technique of commit a890b0d
+ * run-engine-r0s5.test.mjs lines 389-391). `repoint(slug, { reachable })` re-points origin at another GitHub URL, mapped to the
+ * same bare (reachable, the default: the identity is the only difference) or to a path that does not exist.
  */
-export function withOrigin(fx, { branch = 'main' } = {}) {
+export function withOrigin(fx, { branch = 'main', github } = {}) {
   const run = (cwd, ...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd, encoding: 'utf8' });
   const must = (cwd, ...a) => { const r = run(cwd, ...a); assert.equal(r.status, 0, `git ${a.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
   const origin = join(fx.root, 'origin.git'), up = join(fx.root, 'upstream');
+  const ghUrl = (slug) => `https://github.com/${slug}.git`;
   must(fx.repo, 'add', '-A');
   must(fx.repo, 'commit', '-q', '--allow-empty', '-m', 'base');
   must(fx.repo, 'branch', '-M', branch);
   must(fx.root, 'clone', '-q', '--bare', fx.repo, origin);
   must(fx.repo, 'remote', 'add', 'origin', origin);
+  if (github) {
+    must(fx.repo, 'config', '--add', `url.${origin}.insteadOf`, ghUrl(github));
+    must(fx.repo, 'remote', 'set-url', 'origin', ghUrl(github));
+  }
   must(fx.repo, 'fetch', '-q', 'origin');
   must(fx.repo, 'branch', '-q', `--set-upstream-to=origin/${branch}`, branch); // the base branch tracks origin, as a clone's does
   must(fx.root, 'clone', '-q', '--branch', branch, origin, up);
@@ -249,7 +259,13 @@ export function withOrigin(fx, { branch = 'main' } = {}) {
       return must(up, 'rev-parse', 'HEAD');
     },
     /** Rewind origin's branch to `sha` (a force-push below what was pinned). */
-    rewind: (sha) => { must(up, 'push', '-q', '--force', 'origin', `${sha}:refs/heads/${branch}`); } };
+    rewind: (sha) => { must(up, 'push', '-q', '--force', 'origin', `${sha}:refs/heads/${branch}`); },
+    /** S-28a: point remote.origin.url at https://github.com/<slug>.git, mapped to the bare (reachable) or to a missing path. */
+    repoint: (slug, { reachable = true } = {}) => {
+      must(fx.repo, 'config', '--add', `url.${reachable ? origin : join(fx.root, 'nowhere.git')}.insteadOf`, ghUrl(slug));
+      must(fx.repo, 'remote', 'set-url', 'origin', ghUrl(slug));
+    },
+    ghUrl };
 }
 
 export function spawnSpy() {

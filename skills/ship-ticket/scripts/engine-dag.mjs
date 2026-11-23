@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity'];
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -60,6 +60,11 @@ function pinnedMergeBase(S) {
   throw coded('base_state_missing', 'the run pins its base (config.pinnedBase) but S.base has no well-formed merge_base: a partial pin is never resumed');
 }
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/**
+ * S-28a (ASTF-5): `config.repoIdentity` (exactly true, opt-in, never defaulted, bound by the DAG digest, needs config.pinnedBase)
+ * binds the run to the repository its pinned remote names at init and re-verifies it at every gate (engine-identity.mjs).
+ */
+export const repoIdentityOn = (S) => S?.config?.repoIdentity === true;
 
 /**
  * `config.auditRecord` (W3-record, boolean, opt-in, never defaulted, so the DAG digest covers it only
@@ -253,6 +258,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
     && SAFE_REMOTE.test(c.pinnedBase.remote))) bad('config.pinnedBase must be exactly { remote: <remote name> }');
   if (c.pinnedBase !== undefined && c.base !== undefined && !(typeof c.base === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(c.base) && !c.base.includes('..')))
     bad('config.pinnedBase needs config.base to be absent, HEAD or a branch name');
+  if (c.repoIdentity !== undefined && !(c.repoIdentity === true && c.pinnedBase !== undefined)) bad('config.repoIdentity must be exactly true and needs config.pinnedBase');
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }
