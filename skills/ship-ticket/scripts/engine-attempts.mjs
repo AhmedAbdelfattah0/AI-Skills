@@ -193,7 +193,7 @@ function completeRepair(E, repair, a, paths) {
   S.review_chain.push({ review_execution: repair.review_execution, kind: 'repair', old_candidate: repair.old_candidate ?? null,
     new_candidate: c.candidate_id, write_set: [...repair.writes], attempt_id: a.attempt_id });
   note(S, 'REPAIR_RECORDED', { review_execution: repair.review_execution, new_candidate: c.candidate_id });
-  S.freeze = { candidate: c.candidate_id, seq: S.seq };
+  S.freeze = { candidate: c.candidate_id, seq: S.seq, ...(S.freeze?.base ? { base: S.freeze.base } : {}) }; // S-28a: the base of record is kept
   S.frozen_candidate = c.candidate_id;
 }
 

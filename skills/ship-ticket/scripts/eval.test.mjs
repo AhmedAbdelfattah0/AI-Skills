@@ -542,8 +542,9 @@ test('T-C1 legacy golden: eval, run-summary and run-log summary output for old l
   const got = await capture(dirname(fileURLToPath(import.meta.url)));
   // S-01b2 P5r (AMD-P5r-2): the ONE intended difference from the pinned base capture. Policy v2 makes the refusal of the
   // policy_version:99 fixture name both supported versions; the golden itself stays the pure origin/main capture.
-  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4, 5, 6, 7, 8;'; // F12a: versions 3 and 4 (format-3 security block) are supported too
+  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12;'; // F12a: versions 3 and 4 (format-3 security block) are supported too
   // S-12: versions 5-8 (1-4 with a pinned remote base) are supported too
+  // S-28a: versions 9-12 (5-8 with a repository identity) are supported too
   assert.equal(expected.policy_refusal.stderr.split(V1).length, 2, 'the base capture names version 1 exactly once');
   expected.policy_refusal.stderr = expected.policy_refusal.stderr.replace(V1, V12);
   assert.equal(JSON.stringify(got, null, 1), JSON.stringify(expected, null, 1));

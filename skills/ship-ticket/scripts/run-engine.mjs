@@ -39,6 +39,9 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion } from './engine-policy.mjs';
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
+import { repoIdentityOn } from './engine-dag.mjs';
+import { repoIdentityVersion } from './engine-policy.mjs';
+import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -127,6 +130,11 @@ function open(ctx) {
         throw coded('base_state_missing', `policy_version ${E.S.policy_version}, the pinned base state and config.pinnedBase disagree: a partial pin is never resumed`);
       if (Object.hasOwn(E.S, 'base') && !wellFormedBase(E.S.base))
         throw coded('base_state_missing', 'S.base is not a well-formed pin { remote, identity, ref, sha, merge_base, pinned_at_seq }: a partial pin is never resumed');
+      // S-28a: the repository-identity flag of the run's version and config.repoIdentity come together; under it S.base names a
+      // repository (not the converse: a v5-8 run on a GitHub origin records one too) and a freeze / SHIP_READY carries its exact base
+      const repoIdentity = E.policy.semantics.repoIdentity === true;
+      if (repoIdentity !== repoIdentityOn(E.S) || (repoIdentity && !identityStateHolds(E.S)))
+        throw coded('identity_state_missing', `policy_version ${E.S.policy_version}: the repository identity state (config.repoIdentity, S.base.identity, the freeze and SHIP_READY base records) is partial or malformed: it is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -352,12 +360,14 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
   // S-12: a pinned base adds its flag to the version of the other flags (engine-policy.mjs PINNED_BASE_VERSION_OF)
-  const recorded = pinned ? pinnedVersion(version) : version;
+  const pinnedOrNot = pinned ? pinnedVersion(version) : version;
+  // S-28a: repoIdentity adds its flag to the pinned version (engine-policy.mjs REPO_IDENTITY_VERSION_OF)
+  const recorded = identity ? repoIdentityVersion(pinnedOrNot) : pinnedOrNot;
   return { policy_version: runPolicy({ policy_version: recorded }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
@@ -406,7 +416,11 @@ export async function init(ctx) {
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
-    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
+    // S-28a: trust on first use from ONE snapshot of the remote's URLs (engine-identity.mjs bindIdentity): remote_ambiguous, or
+    // identity_unbound when it names no repository on github.com (nothing written); the pin is then read by that snapshot only
+    const idBound = repoIdentityOn(dag) ? bindIdentity(ctx.repoRoot, dag.config.pinnedBase.remote) : null;
+    if (idBound && !idBound.ok) throw coded(idBound.code, idBound.reasons.join('; '));
+    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config, idBound?.record) : null; // before the declaration read: it reads at the base
     const testKinds = await bindTestKinds(ctx, dag.config, text, pin ? { base: pin.base, config: dag.config } : null);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
@@ -422,10 +436,11 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null), ...(testKinds ? { test_kinds: testKinds } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
+      if (repoIdentityOn(dag)) note(E.S, 'IDENTITY_BOUND', { remote: pin.base.remote, identity: pin.base.identity });
       if (pin.local !== undefined && pin.local !== pin.base.merge_base)
         note(E.S, 'BASE_LOCAL_DIVERGED', { advisory: true, ref: dag.config.base, expected: pin.base.merge_base, observed: pin.local });
     }
@@ -642,7 +657,7 @@ export async function archive(ctx) {
   }, { load: false });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing']);
+const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
