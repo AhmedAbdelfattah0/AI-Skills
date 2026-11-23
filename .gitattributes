@@ -7,3 +7,6 @@ skills/ship-ticket/vendor/** -text
 # a core.autocrlf checkout (Windows) has the same bytes, hence the same digest, as every other OS (the file's bytes are unchanged).
 skills/vapt/controls.json text eol=lf
 skills/ship-ticket/scripts/security-plan-legacy.golden.json text eol=lf
+# S-28b b0: references/context-manifest.json records the sha256 of every reference's raw bytes, and a CI test checks the work tree
+# against it. Pin LF so a core.autocrlf checkout (Windows) has the same bytes, hence the same digests, as the committed blobs.
+skills/ship-ticket/references/** text eol=lf

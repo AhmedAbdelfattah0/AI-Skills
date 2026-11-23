@@ -94,6 +94,7 @@ function skillRepo(t) {
   cpSync(join(SKILL_DIR, 'references'), join(skill, 'references'), { recursive: true });
   assert.equal(spawnSync(process.execPath, [CLI, 'build', '--skill', skill]).status, 0);
   git(root, 'init', '-q');
+  git(root, 'config', 'core.autocrlf', 'false'); // the scratch repo keeps the bytes it is given, whatever the machine's git config
   git(root, 'add', '-A');
   git(root, 'commit', '-q', '-m', 'pin');
   return { root, skill, head: git(root, 'rev-parse', 'HEAD') };
@@ -155,4 +156,30 @@ test('a planted GIT_DIR / GIT_OBJECT_DIRECTORY / replace ref does not redirect g
   const r2 = gitReader(skill, head);
   assert.notEqual(r2.read('references/ship.md')?.toString('utf8'), 'REPLACED', 'replace refs are off');
   assert.equal(verifySkill(skill, r2).ok, true);
+});
+
+// ---- CRLF work tree (Windows core.autocrlf), found by CI on PR #121 ----
+
+test('CRLF work-tree bytes: the work-tree reader fails closed naming each file; the pinned-blob reader is unaffected', (t) => {
+  const { skill, head } = skillRepo(t);
+  const refs = join(skill, 'references');
+  for (const f of ['ship.md', 'brief.md']) writeFileSync(join(refs, f), readFileSync(join(refs, f), 'utf8').replace(/\n/g, '\r\n'));
+  const v = verifySkill(skill);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'reference_changed');
+  assert.deepEqual(v.reasons.sort(), ['references/brief.md differs from its manifest digest', 'references/ship.md differs from its manifest digest']);
+  const blob = verifySkill(skill, gitReader(skill, head));
+  assert.equal(blob.ok, true, `${blob.code}: ${blob.reasons?.join('; ')}`);
+  const d = deliverPhase('ship', skill, gitReader(skill, head));
+  assert.equal(d.ok, true);
+  assert.ok(!d.text.includes('\r\n'), 'the pinned LF bytes are delivered, not the CRLF work tree');
+});
+
+test('the repository pins LF for references/** so a Windows checkout matches the manifest digests', () => {
+  const r = spawnSync('git', ['-C', SKILL_DIR, 'check-attr', 'text', 'eol', '--', 'references/ship.md', 'references/context-manifest.json'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.equal(lines.length, 4);
+  for (const l of lines.filter(x => /: text:/.test(x))) assert.match(l, /: text: set$/);
+  for (const l of lines.filter(x => /: eol:/.test(x))) assert.match(l, /: eol: lf$/);
 });
