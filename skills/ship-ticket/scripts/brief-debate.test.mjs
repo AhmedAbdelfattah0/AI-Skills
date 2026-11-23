@@ -131,12 +131,23 @@ function round(bundle, n, o = {}) {
   if (o.omitIds) { delete result.exitCode; delete result.threadId; delete result.sessionId; delete rec.exit_code; delete rec.session_id; }
   if (o.startedAt) Object.assign(result, { startedAt: o.startedAt, finishedAt: o.finishedAt });
   if (o.resultOver) Object.assign(result, o.resultOver);
-  if (!o.noResult) put('result', 'result.json', JSON.stringify(result));
+  if (!o.noResult) put('result', 'result.json', o.resultDeep ? spliceDeep(JSON.stringify(result), o.resultDeep) : JSON.stringify(result));
   put('events', 'events.jsonl', o.events ?? '{"type":"thread.started"}\n');
   if (o.noResult) { delete rec.files.result; delete rec.sha256.result; }
   return rec;
 }
 
+/**
+ * Deep JSON is built as TEXT by string repetition and spliced in at a sentinel string value. A test never builds,
+ * stringifies or clones a deep value recursively, so a small stack (Linux CI) cannot overflow inside the test itself.
+ */
+const DEEP_MARK = '@@DEEP@@';
+const deepText = ({ n, leaf, arr = false }) => (arr ? '['.repeat(n) : '{"a":'.repeat(n)) + leaf + (arr ? ']' : '}').repeat(n);
+function spliceDeep(json, spec) {
+  const at = `"${DEEP_MARK}"`;
+  if (json.split(at).length !== 2) throw new Error('spliceDeep: exactly one sentinel expected');
+  return json.replace(at, () => deepText(spec));
+}
 const FIND = (over = {}) => ({ id: 'P1', severity: 'major', status: 'resolved', aliases: [], host_position: 'accepted: changed D', counterpart_position: 'confirmed', closed_by: 'counterpart', closed_round: 2, evidence: 'r2 confirms', ...over });
 function attestation(over = {}) {
   return {
@@ -803,9 +814,7 @@ const OTHER_MUTANTS = [
       const x = converged(t, { narr: base.replace(line, line.replace('"v":1', '"v":1e400')) });
       try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_attestation_invalid'); } catch { return false; } }],
   ['bounds gate: depth', 'if (d > JSON_BOUNDS.depth) return', 'if (false) return',
-    (mod, t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
-      const deep = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), dispositions: [{ id: 'P1', kind: 'accept_risk', resolution: DEEP(5000, 'x'), design_change: false }] })}`;
-      const x = converged(t, { narr: base.replace(line, deep) });
+    (mod, t) => { const x = converged(t, { over: { findings: [FIND({ host_position: DEEP(100, 'x') })] } });
       try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_attestation_invalid'); } catch { return false; } }],
   ['probe: fresh_result needs an explicit AGREE', "probeExpect(o.nonce)).obj?.verdict === 'AGREE' ?", 'probeExpect(o.nonce)).ok ?',
     (mod) => mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only',
@@ -1519,7 +1528,7 @@ const A10_ATTACKS = {
   eperm_false_key: { events: '{"type":"error","message":"usage limit reached (429)","EPERM":false}\n' },
   code_field: { events: '{"type":"error","message":"usage limit reached (429)","code":"EPERM"}\n' },
   item_error: { events: '{"type":"turn.failed","message":"usage limit reached (429)","item":{"type":"error","error":"EPERM"}}\n' },
-  deep_5000: { events: `${JSON.stringify({ type: 'error', nested: DEEP(5000, 'usage limit reached (429)') })}\n` },
+  deep_5000: { events: `${spliceDeep(JSON.stringify({ type: 'error', nested: DEEP_MARK }), { n: 5000, leaf: '"usage limit reached (429)"' })}\n` },
 };
 function incomplete(t, { roundOpts = {}, over = {} } = {}) {
   const narr = withResult(narrative(), 'UNRESOLVED');
@@ -1564,20 +1573,20 @@ test('[a10] the real fixtures (completed runs carrying Codex hook warnings) are 
 });
 test('[a10] untrusted JSON depth never overflows the stack: a 5,000-deep attestation, dispositions or response value is refused', (t) => {
   const x = converged(t);
-  const deepAtt = B.serializeAttestation.length >= 0 ? `<!-- debate-attestation-v1 ${JSON.stringify({ ...JSON.parse(x.line.slice(27, -4)), deep: DEEP(5000, 1) })} -->` : '';
+  const deepAtt = `<!-- debate-attestation-v1 ${spliceDeep(JSON.stringify({ ...JSON.parse(x.line.slice(27, -4)), deep: DEEP_MARK }), { n: 5000, leaf: '1' })} -->`;
   let r;
   assert.doesNotThrow(() => { r = pre(x, planText(x.narr, [deepAtt])); });
   assert.ok(codes(r).includes('debate_attestation_invalid'), JSON.stringify(r.errors).slice(0, 200));
   const base = withResult(narrative(), 'CONVERGED');
   const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
-  const deepLine = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), deep: DEEP(5000, 1) })}`;
+  const deepLine = `debate-dispositions-v1: ${spliceDeep(JSON.stringify({ ...JSON.parse(line.slice(24)), deep: DEEP_MARK }), { n: 5000, leaf: '1' })}`;
   assert.doesNotThrow(() => { r = pre(converged(t, { narr: base.replace(line, deepLine) })); });
   assert.ok(codes(r).includes('debate_attestation_invalid'));
-  assert.equal(B.parseResponse(JSON.stringify({ v: 1, request_id: 'r', plan_version: 'v1', plan_digest: R_D, verdict: 'AGREE', findings: [{ id: 'P1', status: 'confirmed', note: DEEP(5000, 'x') }] })).code, 'debate_response_invalid');
-  const inField = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), dispositions: [{ id: 'P1', kind: 'accept_risk', resolution: DEEP(5000, 'x'), design_change: false }] })}`;
+  assert.equal(B.parseResponse(spliceDeep(JSON.stringify({ v: 1, request_id: 'r', plan_version: 'v1', plan_digest: R_D, verdict: 'AGREE', findings: [{ id: 'P1', status: 'confirmed', note: DEEP_MARK }] }), { n: 5000, leaf: '"x"' })).code, 'debate_response_invalid');
+  const inField = `debate-dispositions-v1: ${spliceDeep(JSON.stringify({ ...JSON.parse(line.slice(24)), dispositions: [{ id: 'P1', kind: 'accept_risk', resolution: DEEP_MARK, design_change: false }] }), { n: 5000, leaf: '"x"' })}`;
   assert.doesNotThrow(() => { r = pre(converged(t, { narr: base.replace(line, inField) })); }, 'a deep value inside an allowed field reaches the serializer');
   assert.ok(codes(r).includes('debate_attestation_invalid'));
-  const attField = `<!-- debate-attestation-v1 ${JSON.stringify({ ...JSON.parse(x.line.slice(27, -4)), findings: [{ ...FIND(), host_position: DEEP(5000, 'x') }] })} -->`;
+  const attField = `<!-- debate-attestation-v1 ${spliceDeep(JSON.stringify({ ...JSON.parse(x.line.slice(27, -4)), findings: [{ ...FIND(), host_position: DEEP_MARK }] }), { n: 5000, leaf: '"x"' })} -->`;
   assert.doesNotThrow(() => { r = pre(x, planText(x.narr, [attField])); });
   assert.ok(codes(r).includes('debate_attestation_invalid'));
 });
@@ -1608,9 +1617,10 @@ test('[b1-incomplete] incomplete_review is derived from the retained results; a 
   assert.ok(codes(pre(converged(t, { over: { incomplete_review: true } }))).includes('debate_attestation_invalid'), 'a complete debate flagged incomplete');
 });
 test('[b1-relay-json] deep or mistyped result.json fields are refused before any coercion (no stack overflow)', (t) => {
-  for (const over of [{ status: DEEP_ARR(5000, 'completed') }, { workdir: DEEP_ARR(5000, 'x') }, { exitCode: '0' }, { threadId: { id: 'thread-1' } }, { finalMessage: DEEP_ARR(5000, 'x') }]) {
+  const deepArr = { n: 5000, leaf: '"x"', arr: true };
+  for (const [over, resultDeep] of [[{ status: DEEP_MARK }, deepArr], [{ workdir: DEEP_MARK }, deepArr], [{ exitCode: '0' }], [{ threadId: { id: 'thread-1' } }], [{ finalMessage: DEEP_MARK }, deepArr]]) {
     let r;
-    assert.doesNotThrow(() => { r = pre(converged(t, { r2: { resultOver: over } })); }, JSON.stringify(Object.keys(over)));
+    assert.doesNotThrow(() => { r = pre(converged(t, { r2: { resultOver: over, resultDeep } })); }, Object.keys(over).join());
     assert.ok(codes(r).includes('debate_evidence_mismatch'), `${Object.keys(over)}: ${JSON.stringify(r.errors).slice(0, 160)}`);
   }
   assert.doesNotThrow(() => B.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n', dispatch: { result: { status: DEEP_ARR(5000, 'x') } } }));
