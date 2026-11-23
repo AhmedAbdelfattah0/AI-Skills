@@ -23,6 +23,7 @@ import { coded, baseRef, pinnedBaseOn } from './engine-dag.mjs';
 import * as io from './engine-io.mjs';
 import { verifyBase, authGit } from './engine-base.mjs';
 import { remoteIdentity, remoteUrl, resolveBaseRef } from './remote-identity.mjs';
+import { validIdentityRecord } from './github-identity.mjs';
 
 const no = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: true, reasons, ...extra });
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -76,12 +77,15 @@ export function wellFormedBase(B) {
  * every base read of the run uses (baseRef). Throws coded refusals (nothing is written): remote_ambiguous; base_unverified (no
  * configured URL, a detached HEAD, a branch with no upstream, no shared history); base_remote_unavailable.
  */
-export function pinBaseRecord(root, config) {
+export function pinBaseRecord(root, config, record) {
   return underHardenedGit(() => {
     const remote = config.pinnedBase.remote;
-    const id = remoteIdentity(root, remote);
+    // S-28a: a repoIdentity run passes the ONE snapshot it bound (github-identity.mjs record); nothing is re-read from config
+    const snap = record === undefined ? undefined : validIdentityRecord(record); // the validated COPY is what is read
+    if (snap === null) throw coded('base_unverified', 'the identity snapshot is not a valid record');
+    const id = snap !== undefined ? { ok: true, identity: { slug: snap.identity } } : remoteIdentity(root, remote);
     if (!id.ok) throw coded(id.code, id.reasons.join('; '));
-    const u = remoteUrl(root, remote);
+    const u = snap !== undefined ? { ok: true, url: snap.url } : remoteUrl(root, remote);
     if (!u.ok) throw coded(u.code, u.reasons.join('; '));
     if (authGit(root, ['symbolic-ref', '-q', 'HEAD']).status !== 0)
       throw coded('base_unverified', 'HEAD is detached: a pinned base is recorded for a branch, so check out the ticket branch, then init');
@@ -115,14 +119,17 @@ export function localMergeBase(root, config) {
  * NEVER latches (no S.security write): base_state_missing (a malformed pin), remote_ambiguous / base_unverified (the remote's
  * URLs now), base_remote_unavailable, base_moved_remote, base_moved_local { expected, observed }.
  */
-export function pinnedBaseRefusal(E) {
+export function pinnedBaseRefusal(E, record) {
   if (!pinned(E.S)) return null;
   const B = E.S.base, root = E.ctx.repoRoot;
   if (!wellFormedBase(B)) return no('base_state_missing', ['the run pins its base but S.base is not a well-formed pin: a partial pin is never resumed']);
+  // S-28a: a repoIdentity run passes the ONE snapshot whose identity it just checked (the run's own); nothing is re-read from config
+  const snap = record === undefined ? undefined : validIdentityRecord(record, B.identity); // the validated COPY is what is read
+  if (snap === null) return no('base_unverified', ['the identity snapshot is not a valid record of this run']);
   return underHardenedGit(() => {
-    const id = remoteIdentity(root, B.remote);
+    const id = snap !== undefined ? { ok: true } : remoteIdentity(root, B.remote);
     if (!id.ok) return no(id.code, id.reasons);
-    const u = remoteUrl(root, B.remote);
+    const u = snap !== undefined ? { ok: true, url: snap.url } : remoteUrl(root, B.remote);
     if (!u.ok) return no(u.code, u.reasons);
     const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: B });
     if (!v.ok) return no(v.code, v.reasons);

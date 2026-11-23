@@ -26,7 +26,10 @@ export const ENGINE_POLICY_VERSION = 1;
 export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
   3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }),
   5: Object.freeze({ pinnedBase: true }), 6: Object.freeze({ testKinds: true, pinnedBase: true }),
-  7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }) });
+  7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }),
+  9: Object.freeze({ pinnedBase: true, repoIdentity: true }), 10: Object.freeze({ testKinds: true, pinnedBase: true, repoIdentity: true }),
+  11: Object.freeze({ securityObligations: true, pinnedBase: true, repoIdentity: true }),
+  12: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true }) });
 
 /** The version `init` records for a run that activates test kinds (design rev 5 section 5). */
 export const TEST_KINDS_POLICY_VERSION = 2;
@@ -52,6 +55,17 @@ export const PINNED_BASE_VERSION_OF = Object.freeze({ 1: 5, 2: 6, 3: 7, 4: 8 });
 /** The version a pinned-base run records for `version` (its other flags); a version with no pinned row is refused. */
 export const pinnedVersion = (version) => (Object.hasOwn(PINNED_BASE_VERSION_OF, String(version)) ? PINNED_BASE_VERSION_OF[version]
   : (() => { throw Object.assign(new Error(`policy_version_unsupported: no pinned-base policy version for policy_version ${JSON.stringify(version)}`), { code: 'policy_version_unsupported' }); })());
+
+/**
+ * S-28a (ASTF-5): a run with config.repoIdentity (which needs config.pinnedBase) is bound to one repository identity and
+ * re-verifies it with its base at every gate, so it records its pinned version plus repoIdentity: 5 -> 9, 6 -> 10, 7 -> 11,
+ * 8 -> 12 (hand-coded rows, as S-12's). An engine without S-28a supports none of 9-12 and refuses such a run
+ * (policy_version_unsupported) instead of re-reading it as a plain pinned run. Every run without the flag keeps 1-8, byte for byte.
+ */
+export const REPO_IDENTITY_VERSION_OF = Object.freeze({ 5: 9, 6: 10, 7: 11, 8: 12 });
+/** The version a repoIdentity run records for its pinned `version`; a version with no identity row is refused. */
+export const repoIdentityVersion = (version) => (Number.isInteger(version) && Object.hasOwn(REPO_IDENTITY_VERSION_OF, String(version)) ? REPO_IDENTITY_VERSION_OF[version]
+  : (() => { throw Object.assign(new Error(`policy_version_unsupported: no repository-identity policy version for policy_version ${JSON.stringify(version)}`), { code: 'policy_version_unsupported' }); })());
 
 /** The version a state without the key is read as: the oldest supported one. */
 export const LEGACY_POLICY_VERSION = 1;

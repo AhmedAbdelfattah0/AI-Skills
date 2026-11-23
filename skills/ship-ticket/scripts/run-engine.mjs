@@ -13,6 +13,7 @@
  *
  * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id>
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
+ *      run-engine.mjs archive ... [--retire true]; run-engine.mjs adopt ... --from <archive dir> (S-13a, engine-adopt.mjs)
  *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
@@ -39,6 +40,11 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion } from './engine-policy.mjs';
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
+import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve, archiveFinality, sourceState } from './engine-adopt.mjs';
+import { redChanges } from './engine-attempts.mjs';
+import { repoIdentityOn } from './engine-dag.mjs';
+import { repoIdentityVersion } from './engine-policy.mjs';
+import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -127,6 +133,11 @@ function open(ctx) {
         throw coded('base_state_missing', `policy_version ${E.S.policy_version}, the pinned base state and config.pinnedBase disagree: a partial pin is never resumed`);
       if (Object.hasOwn(E.S, 'base') && !wellFormedBase(E.S.base))
         throw coded('base_state_missing', 'S.base is not a well-formed pin { remote, identity, ref, sha, merge_base, pinned_at_seq }: a partial pin is never resumed');
+      // S-28a: the repository-identity flag of the run's version and config.repoIdentity come together; under it S.base names a
+      // repository (not the converse: a v5-8 run on a GitHub origin records one too) and a freeze / SHIP_READY carries its exact base
+      const repoIdentity = E.policy.semantics.repoIdentity === true;
+      if (repoIdentity !== repoIdentityOn(E.S) || (repoIdentity && !identityStateHolds(E.S)))
+        throw coded('identity_state_missing', `policy_version ${E.S.policy_version}: the repository identity state (config.repoIdentity, S.base.identity, the freeze and SHIP_READY base records) is partial or malformed: it is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -161,9 +172,9 @@ function open(ctx) {
  * again after it, so an owner line appended between commands is trusted at the next command and a
  * line appended while this command's attempts ran is not.
  */
-async function locked(ctx, fn, { load = true } = {}) {
+async function locked(ctx, fn, { load = true, waitMs } = {}) {
   const E = open(ctx);
-  const lock = await io.acquireLock(ctx);
+  const lock = await (waitMs === undefined ? io.acquireLock(ctx) : io.acquireLock(ctx, { waitMs }));
   const onSignal = () => { lock.release().finally(() => process.exit(130)); };
   const signals = ctx.handleSignals === false ? [] : ['SIGINT', 'SIGTERM'];
   for (const s of signals) process.on(s, onSignal);
@@ -352,12 +363,14 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
   // S-12: a pinned base adds its flag to the version of the other flags (engine-policy.mjs PINNED_BASE_VERSION_OF)
-  const recorded = pinned ? pinnedVersion(version) : version;
+  const pinnedOrNot = pinned ? pinnedVersion(version) : version;
+  // S-28a: repoIdentity adds its flag to the pinned version (engine-policy.mjs REPO_IDENTITY_VERSION_OF)
+  const recorded = identity ? repoIdentityVersion(pinnedOrNot) : pinnedOrNot;
   return { policy_version: runPolicy({ policy_version: recorded }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
@@ -406,7 +419,11 @@ export async function init(ctx) {
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
-    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
+    // S-28a: trust on first use from ONE snapshot of the remote's URLs (engine-identity.mjs bindIdentity): remote_ambiguous, or
+    // identity_unbound when it names no repository on github.com (nothing written); the pin is then read by that snapshot only
+    const idBound = repoIdentityOn(dag) ? bindIdentity(ctx.repoRoot, dag.config.pinnedBase.remote) : null;
+    if (idBound && !idBound.ok) throw coded(idBound.code, idBound.reasons.join('; '));
+    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config, idBound?.record) : null; // before the declaration read: it reads at the base
     const testKinds = await bindTestKinds(ctx, dag.config, text, pin ? { base: pin.base, config: dag.config } : null);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
@@ -422,10 +439,11 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null), ...(testKinds ? { test_kinds: testKinds } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
+      if (repoIdentityOn(dag)) note(E.S, 'IDENTITY_BOUND', { remote: pin.base.remote, identity: pin.base.identity });
       if (pin.local !== undefined && pin.local !== pin.base.merge_base)
         note(E.S, 'BASE_LOCAL_DIVERGED', { advisory: true, ref: dag.config.base, expected: pin.base.merge_base, observed: pin.local });
     }
@@ -612,15 +630,23 @@ export async function rebind(ctx) {
  * files: name -> sha256 }. Takes the lock but neither observes nor commits (engine state and RUN-STATE
  * observation are untouched, so the copy is the state as left behind); refuses another run's id
  * (`run_mismatch`); never overwrites an earlier archive.
+ * `retire: true` (S-13a, OD-1) then moves the live state, engine log and usage into <archive>/retired/ so a new run can `init`:
+ * refused while an attempt is live or unretired (`retire_live_attempts`) or when the live bytes differ from the copy
+ * (`retire_mismatch`); files are renamed, never deleted, the state last (engine-adopt.mjs retireLive).
  */
 export async function archive(ctx) {
-  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k));
-  if (extra.length) throw coded('archive_refused', `archive takes no fields (got ${extra})`);
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && k !== 'retire');
+  if (extra.length || ![undefined, true].includes(ctx.retire)) throw coded('archive_refused', `archive takes only retire: true (got ${extra.length ? extra : `retire ${ctx.retire}`})`);
   return locked(ctx, async (E) => {
     if (!existsSync(E.P.state)) throw coded('no_state', `no engine state for ${ctx.ticket}; run init`);
-    let runId;
-    try { runId = JSON.parse(readFileSync(E.P.state, 'utf8')).run_id; } catch { throw coded('state_unreadable', `${E.P.state} is not valid JSON`); }
+    let runId, raw;
+    try { raw = JSON.parse(readFileSync(E.P.state, 'utf8')); runId = raw.run_id; } catch { throw coded('state_unreadable', `${E.P.state} is not valid JSON`); }
     if (runId !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${runId}, not ${ctx.runId}`);
+    const busy = ctx.retire ? retireRefusal(raw) : null;
+    if (busy) throw coded('retire_live_attempts', busy);
+    // retire finishes the RUN-STATE observation first and persists it, so the archived (final) state has classified every line
+    const authorityPresent = ctx.retire ? retireObserve(raw, io.readIfExists(E.P.plan), E.alive) : null;
+    if (ctx.retire) await io.writeStateAtomic(E.P.state, raw, { hooks: ctx.hooks, fs: ctx.fs, platform: ctx.platform });
     const base = join(io.commonGitDir(ctx.repoRoot), 'ai-skills', 'ship-ticket', 'archive', ctx.ticket);
     mkdirSync(base, { recursive: true });
     let n = readdirSync(base).filter(d => d.startsWith(ctx.runId + '-') && /^\d+$/.test(d.slice(ctx.runId.length + 1))).length + 1, dir;
@@ -638,11 +664,43 @@ export async function archive(ctx) {
       writeFileSync(join(stage, 'manifest.json'), JSON.stringify({ ticket: ctx.ticket, run_id: ctx.runId, archived_at: new Date().toISOString(), files }, null, 2) + '\n');
       renameSync(stage, dir);
     } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
-    return { archive: dir, files };
+    if (!ctx.retire) return { archive: dir, files };
+    const retired = await retireLive({ dir, files, sources: { 'state.json': E.P.state, 'engine.jsonl': E.P.log, 'usage.jsonl': E.P.usage }, hooks: ctx.hooks,
+      record: { run_id: runId, final_seq: raw.seq, authority_present: authorityPresent } });
+    return { archive: dir, files, retired };
   }, { load: false });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing']);
+/** How long a second `adopt` waits for the ticket lock before lock_timeout (it then finds the window spent). */
+const ADOPT_LOCK_WAIT_MS = 30000;
+
+/**
+ * S-13a: adopt the still-valid done nodes and RED evidence of the archived run at `from` into this new run (engine-adopt.mjs).
+ * Attended and owner-invoked; no authority of its own (the new run's trusted START is the approval). A whole refusal throws
+ * (exit 1) and writes nothing; otherwise the one commit of `locked` persists every adopted node, the carried RED and one
+ * ADOPTED engine note. A RED that cannot be carried is the judgment adopt_red_unverified/adopt_red_missing (exit 2).
+ */
+export async function adopt(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && k !== 'from');
+  if (extra.length || typeof ctx.from !== 'string' || !ctx.from) throw coded('adopt_refused', `adopt takes --from <archive dir> and no other fields${extra.length ? ` (got ${extra})` : ''}`);
+  return locked(ctx, async (E) => {
+    const unbound = verifyBinding(E);
+    if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));
+    const closed = windowRefusal(E.S);
+    if (closed) throw coded('adoption_window_closed', `${closed}: adoption happens once, right after init`);
+    const src = readArchive(ctx.from, { root: archiveRoot(ctx.repoRoot, ctx.ticket), ticket: ctx.ticket, runId: ctx.runId });
+    const ss = sourceState(src, { planText: io.readIfExists(E.P.plan), isAlive: E.alive, final: archiveFinality(src) });
+    const no = sourceRefusal(ss, E.S, ctx.policy);
+    if (no) throw coded(no.code, no.reason);
+    const v = adoptable({ newS: E.S, oldS: ss.state, fingerprints: (paths) => io.fingerprints(ctx.repoRoot, paths), redChanges: (ev) => redChanges(E, ev) });
+    applyAdoption(E.S, src, v, ss.roster);
+    const out = view(E);
+    return { ...out, adoption: { from: src.dir, from_run: src.state.run_id, adopted: v.adopted, rejected: v.rejected, red_carried: Object.keys(v.red).sort() },
+      outcome: v.judgments.length ? 'judgment' : 'adopted' };
+  }, { waitMs: ADOPT_LOCK_WAIT_MS });
+}
+
+const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -722,16 +780,18 @@ async function main(argv) {
     if (extra.length || !flags.repo || !flags.ticket || !flags.dag) throw new Error('Usage: run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]');
     return preflight({ repoRoot: resolve(flags.repo), ticket: flags.ticket, dagFile: resolve(flags.dag), ...(flags.plan ? { planFile: resolve(flags.plan) } : {}) });
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
-    archive: () => archive({ ...ctx, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id'].includes(k)) ? { extra: 1 } : {}) }),
+    archive: () => archive({ ...ctx, ...(flags.retire !== undefined ? { retire: flags.retire === 'true' ? true : flags.retire } : {}),
+      ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id', 'retire'].includes(k)) ? { extra: 1 } : {}) }),
+    adopt: () => adopt({ ...ctx, from: flags.from, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id', 'from'].includes(k)) ? { extra: 1 } : {}) }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
       if (flags.unit !== undefined) { // gate unit-review only: --unit names (or must equal) the input's unit
         if (gateKind !== 'unit-review' || (input?.unit !== undefined && input.unit !== flags.unit)) throw new Error('--unit is for gate unit-review and must equal the input unit');
