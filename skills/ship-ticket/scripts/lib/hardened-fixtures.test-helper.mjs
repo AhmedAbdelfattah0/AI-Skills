@@ -27,7 +27,7 @@ export async function cellQualified() {
 
 /** The module under test (H) and ITS git-exec (X, whose GitError class it throws): the committed pair, or (unqualified cell) a copy with exactly the current cell added. */
 export async function loadHardened() {
-  const load = async (d) => ({ H: await import(pathToFileURL(join(d, 'git-hardened.mjs')).href), X: await import(pathToFileURL(join(d, 'git-exec.mjs')).href) });
+  const load = async (d) => ({ H: await import(pathToFileURL(join(d, 'git-hardened.mjs')).href), X: await import(pathToFileURL(join(d, 'git-exec.mjs')).href), libDir: d });
   if (process.platform === 'win32' || await cellQualified()) return { ...await load(here), copied: false };
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'git-hardened-copy-')));
   for (const f of ['git-hardened.mjs', 'git-exec.mjs', 'git-capability.mjs']) cpSync(join(here, f), join(dir, f));

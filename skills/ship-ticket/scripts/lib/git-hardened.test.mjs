@@ -18,7 +18,7 @@ import { cellQualified, commitAll, currentCell, fixtureEnv, loadHardened, makeRe
 const here = dirname(fileURLToPath(import.meta.url));
 const WIN = process.platform === 'win32';
 const POSIX = WIN ? 'POSIX only: win32 refuses (OC-4); the win32 refusal test runs instead' : false;
-const { H, X, copied } = await loadHardened();
+const { H, X, copied, libDir } = await loadHardened();
 const { GIT_CODES, GitError } = X;
 const REAL_GIT = WIN ? null : probeGit().path;
 const code = (c) => (e) => { assert.ok(e instanceof GitError, `GitError ${c}, got ${e?.name} ${e?.code} ${e?.message}`); assert.equal(e.code, c); return true; };
@@ -1117,19 +1117,32 @@ test('[M63] R2: the produced pack is capped on its own (incompressible data: pac
  * Open descriptors and open Dirs are counted so a leak on refusal is visible.
  */
 const FS_SYNC = Object.keys(fs).filter((k) => /Sync$/.test(k) && typeof fs[k] === 'function');
-function traced({ step = 0, slow = {} }, fn) {
+/**
+ * The fs trace harness: EVERY node:fs *Sync export (realpathSync.native included) and Dir#readSync / Dir#closeSync are
+ * wrapped (syncBuiltinESMExports, so the lib's own named imports and git-exec's see them). Each OUTERMOST call is logged
+ * with the fake time at which it BEGINS and its PHASE (recovery when the call stack is inside discard, or inside a
+ * removeTree that is not dispose's own removal), then advances the fake clock by `step` (+ `slow[name]`). Date.now
+ * returns the fake time. `fail[name]` makes that call throw. Open descriptors and Dirs are counted.
+ */
+function traced({ step = 0, slow = {}, failOn = {} }, fn) {
   const realNow = Date.now;
   let now = realNow();
   const log = [];
   const open = { fd: 0, dir: 0 };
   const saved = {};
-  // Only the OUTERMOST fs call is logged and timed: Node's own nested calls (writeFileSync -> openSync/writeSync) are one call.
   let depth = 0;
+  // helper: the probe (R-b, outside fsx, before any deadline exists); recovery: discard, or a removeTree that is not dispose's.
+  const phaseOf = () => {
+    const stack = new Error().stack;
+    if (/\b(?:probeGit|resolveGitBinary)\b/.test(stack)) return 'helper';
+    return /\bdiscard\b/.test(stack) || (/\bremoveTree\b/.test(stack) && !/\bdisposeContext\b/.test(stack)) ? 'recovery' : 'op';
+  };
   const wrap = (k, real) => function tracedFs(...a) {
     const p = a.length && (typeof a[0] === 'string' || Buffer.isBuffer(a[0])) ? Buffer.from(a[0]).toString('latin1') : '';
     if (depth === 0) {
-      log.push({ k, t: now, p });
+      log.push({ k, t: now, p, phase: phaseOf(), stack: new Error().stack });
       now += step + (typeof slow[k] === 'function' ? slow[k](p) : (slow[k] ?? 0));
+      if (failOn[k]?.(p)) throw Object.assign(new Error(`EIO ${k}`), { code: 'EIO' });
     }
     depth++;
     let r;
@@ -1147,7 +1160,12 @@ function traced({ step = 0, slow = {} }, fn) {
   const dirRead = Dir.prototype.readSync;
   const dirClose = Dir.prototype.closeSync;
   Dir.prototype.readSync = wrap('Dir#readSync', dirRead);
-  Dir.prototype.closeSync = function tracedClose(...a) { open.dir--; log.push({ k: 'Dir#closeSync', t: now, p: '' }); return dirClose.apply(this, a); };
+  Dir.prototype.closeSync = function tracedClose(...a) {
+    log.push({ k: 'Dir#closeSync', t: now, p: '', phase: 'exempt' });
+    if (failOn['Dir#closeSync']?.('')) { dirClose.apply(this, a); open.dir--; throw Object.assign(new Error('EIO close'), { code: 'EIO' }); }
+    open.dir--;
+    return dirClose.apply(this, a);
+  };
   syncBuiltinESMExports();
   Date.now = () => now;
   const start = now;
@@ -1156,15 +1174,24 @@ function traced({ step = 0, slow = {} }, fn) {
   }
 }
 const EXEMPT = new Set(['closeSync', 'Dir#closeSync']);
-/** The invariant on one traced run: no non-exempt fs call BEGINS after `bound`; descriptors and Dirs all closed. */
-function invariant(tr, bound, what) {
-  const late = tr.log.filter((c) => !EXEMPT.has(c.k) && c.t > bound);
-  assert.deepEqual(late.slice(0, 3).map((c) => `${c.k} ${c.p.slice(-40)}`), [], `${what}: ${late.length} fs call(s) began after the deadline`);
+/**
+ * The STRICT per-phase invariant (zero slack): every non-exempt operation-phase call began before the operation deadline D;
+ * every recovery call began before D + grace (the one shared window, approved formula); every descriptor and Dir closed;
+ * and an 'ok' means the operation returned before D.
+ */
+function invariant(tr, { D, grace = 0, got, what }) {
+  const lateOp = tr.log.filter((c) => !EXEMPT.has(c.k) && c.phase === 'op' && c.t >= D);
+  const lateRec = tr.log.filter((c) => !EXEMPT.has(c.k) && c.phase === 'recovery' && c.t >= D + grace);
+  assert.deepEqual(lateOp.slice(0, 2).map((c) => `${c.k} ${c.p.slice(-40)}`), [], `${what}: operation-phase fs call(s) at or after the deadline`);
+  assert.deepEqual(lateRec.slice(0, 2).map((c) => `${c.k} ${c.p.slice(-40)}`), [], `${what}: recovery fs call(s) at or after the grace deadline`);
+  if (grace === 0) assert.equal(tr.log.some((c) => c.phase === 'recovery'), false, `${what}: no recovery phase expected`);
   assert.deepEqual(tr.open, { fd: 0, dir: 0 }, `${what}: every descriptor and Dir was closed`);
+  if (got === 'ok') assert.ok(tr.now() < D, `${what}: an 'ok' returned at or after the deadline (${tr.now() - D} ms late)`);
 }
 
-test('[M65] INVARIANT: no public operation begins an fs call after its deadline, at any expiry position, and every refusal has its operation code', { skip: POSIX }, (t) => {
+test('[M65] STRICT INVARIANT: every public operation at every expiry position: zero fs calls after its phase deadline, exact outcomes, ok only before the deadline', { skip: POSIX }, (t) => {
   const { top: sub, head: subHead } = makeRepo(t, { s: 's' });
+  void sub;
   const { top, head } = makeRepo(t, { 'a.txt': 'a\n', 'c.txt': 'x\ny\n', 'd/b': 'b', l: { link: 'a.txt' } });
   sh(top, ['update-index', '--add', '--cacheinfo', `160000,${subHead},sub`]);
   sh(top, ['commit', '-q', '-m', 'g']);
@@ -1172,51 +1199,76 @@ test('[M65] INVARIANT: no public operation begins an fs call after its deadline,
   mkdirSync(join(top, 'sub'));
   writeFileSync(join(top, 'sub', 'f'), '');
   writeFileSync(join(top, 'c.txt'), 'x\r\ny\r\n');
-  for (let i = 0; i < 5; i++) mkdirSync(join(top, 'u', `e${i}`), { recursive: true });
-  void sub;
+  for (let i = 0; i < 3; i++) mkdirSync(join(top, 'u', `e${i}`), { recursive: true });
+  const lane = tmp(t);
+  sh(top, ['--work-tree', lane, 'checkout', h2, '--', 'a.txt', 'd']);
   const T = 1000;
-  const ctx = ctxOf(t, { timeoutMs: T });
+  const tmpRoot = tmp(t, 'gh-ctx-');
+  const ctx = withEnv({ TMPDIR: tmpRoot }, () => ctxOf(t, { timeoutMs: T }));
   const { store, source, dir } = storeOf(t, ctx, top, [h2, head]);
   const stores = tmp(t);
   let seq = 0;
+  const blob = out(top, ['rev-parse', `${h2}:a.txt`]);
+  const fresh = () => withEnv({ TMPDIR: tmpRoot }, () => H.createContext({ timeoutMs: T }));
+  const GT = ['git_timeout'];
+  const made = [];
+  t.after(() => { for (const c of made) { try { c.dispose(); } catch { /* tmp() removes the rest */ } } });
   const ops = {
-    openSource: { codes: ['git_timeout'], grace: 0, run: () => H.openSource(ctx, { toplevel: top }) },
-    openStore: { codes: ['git_timeout'], grace: 0, run: () => H.openStore(ctx, { dir }) },
-    'op tree.list': { codes: ['git_timeout'], grace: 0, run: () => H.op(store, 'tree.list', [h2]) },
-    'op blob.read': { codes: ['git_timeout'], grace: 0, run: () => H.op(store, 'blob.read', [out(top, ['rev-parse', `${h2}:a.txt`])]) },
-    // git_timeout here is a GENUINE subprocess timeout (a spawn given the few ms that remained), distinct from host expiry.
+    // lane_remove_failed: the refused context's cleanup of its own R ran out of its window (R left; LIMITATION).
+    createContext: { codes: ['git_timeout', 'lane_remove_failed'], grace: T, run: () => { made.push(fresh()); } },
+    dispose: { codes: ['lane_remove_failed'], grace: 0, prep: fresh, run: (c) => c.dispose() },
+    openSource: { codes: GT, grace: 0, run: () => H.openSource(ctx, { toplevel: top }) },
+    openStore: { codes: GT, grace: 0, run: () => H.openStore(ctx, { dir }) },
+    'op tree.list': { codes: GT, grace: 0, run: () => H.op(store, 'tree.list', [h2]) },
+    'op blob.read': { codes: GT, grace: 0, run: () => H.op(store, 'blob.read', [blob]) },
+    'op tree.diff': { codes: GT, grace: 0, run: () => H.op(store, 'tree.diff', [head, h2]) },
+    'op commit.resolve': { codes: GT, grace: 0, run: () => H.op(store, 'commit.resolve', [h2]) },
+    'op commit.tree': { codes: GT, grace: 0, run: () => H.op(store, 'commit.tree', [h2]) },
+    'op merge.base': { codes: GT, grace: 0, run: () => H.op(store, 'merge.base', [h2, head]) },
+    'op object.exists': { codes: GT, grace: 0, run: () => H.op(store, 'object.exists', [h2]) },
+    // git_timeout in verify is a GENUINE subprocess timeout (a spawn given the few ms that remained), distinct from host expiry.
     'verify source': { codes: ['worktree_budget_exceeded', 'lane_remove_failed', 'git_timeout'], grace: T, run: () => H.verifyWorktree(ctx, { source, store, oid: h2 }) },
-    initStore: { codes: ['git_timeout', 'lane_remove_failed'], grace: 2 * T, run: () => H.initStore(ctx, { dir: join(stores, `st${seq++}`), source, oids: [h2] }) },
+    'verify dir': { codes: ['worktree_budget_exceeded', 'lane_remove_failed', 'git_timeout'], grace: T, run: () => H.verifyWorktree(ctx, { dir: lane, store, oid: h2 }) },
+    initStore: { codes: ['git_timeout', 'lane_remove_failed'], grace: T, run: () => H.initStore(ctx, { dir: join(stores, `st${seq++}`), source, oids: [h2] }) },
+  };
+  // createContext's deadline starts after the probe (R-b): D = the time of its first own fs call + T.
+  const dOf = (name, tr) => {
+    if (name !== 'createContext') return tr.start + T;
+    const own = tr.log.find((c) => /\bcreateContext\b/.test(c.stack) && c.phase !== 'helper');
+    assert.ok(own, 'createContext made an fs call of its own');
+    return own.t + T;
   };
   let runs = 0;
   for (const [name, o] of Object.entries(ops)) {
-    const calls = traced({ step: 0 }, (tr) => { o.run(); return tr.log.filter((c) => !EXEMPT.has(c.k)).length; });
-    for (let k = 1; k <= calls + 1; k += name === 'initStore' ? 3 : 1) {
+    const prep0 = o.prep?.();
+    const calls = traced({}, (tr) => { o.run(prep0); return tr.log.filter((c) => !EXEMPT.has(c.k)).length; });
+    for (let k = 1; k <= calls + 1; k++) {
+      const arg = o.prep?.();
       traced({ step: Math.floor(T / k) + 1 }, (tr) => {
-        const got = outcome(o.run);
-        assert.ok(got === 'ok' || o.codes.includes(got), `${name} @${k}/${calls}: refused ${got}, expected one of ${o.codes} (never a tamper/invalid remap)`);
-        invariant(tr, tr.start + T + o.grace + 2 * (Math.floor(T / k) + 1), `${name} @${k}`);
+        const got = outcome(() => o.run(arg));
+        assert.ok(got === 'ok' || o.codes.includes(got), `${name} @${k}/${calls}: refused ${got}, expected ok or one of ${o.codes} (never a tamper/invalid remap)`);
+        invariant(tr, { D: dOf(name, tr), grace: o.grace, got, what: `${name} @${k}` });
         runs++;
       });
+      if (arg && name === 'dispose') { try { arg.dispose(); } catch { /* refused dispose: the run's own dir is cleaned by tmp() */ } }
     }
   }
-  t.diagnostic(`${runs} traced runs`);
+  t.diagnostic(`${runs} strict traced runs over ${Object.keys(ops).length} public paths`);
 });
-test('[M65] INVARIANT on wide and empty-directory trees with slow lstat, opendir, chmod, unlink and reads (dispose, verify, rollback)', { skip: POSIX }, (t) => {
+test('[M65] STRICT INVARIANT on wide and empty-directory trees with slow lstat, opendir, Dir reads, chmod, unlink and rmdir (dispose, verify)', { skip: POSIX }, (t) => {
   for (const slow of [{ lstatSync: 5 }, { opendirSync: 5 }, { 'Dir#readSync': 5 }, { chmodSync: 5 }, { unlinkSync: 5 }, { rmdirSync: 5 }]) {
     const what = Object.keys(slow)[0];
-    // dispose of an R holding 2,000 empty dirs (mode 0500, so each needs a chmod)
     const tmpRoot = tmp(t, 'gh-inv-');
     withEnv({ TMPDIR: tmpRoot }, () => {
       const c = H.createContext({ timeoutMs: 1000 });
       const [R] = readdirSync(tmpRoot).map((n) => join(tmpRoot, n));
       for (let i = 0; i < 1000; i++) { mkdirSync(join(R, 'home', `e${i}`)); writeFileSync(join(R, 'home', `e${i}`, 'f'), ''); chmodSync(join(R, 'home', `e${i}`), 0o500); }
       traced({ slow }, (tr) => {
-        assert.equal(outcome(() => c.dispose()), 'lane_remove_failed', `dispose, slow ${what}`);
-        invariant(tr, tr.start + 1000, `dispose, slow ${what}`);
+        const got = outcome(() => c.dispose());
+        assert.equal(got, 'lane_remove_failed', `dispose, slow ${what}`);
+        invariant(tr, { D: tr.start + 1000, got, what: `dispose, slow ${what}` });
       });
     });
-    // verify: 2,000 empty untracked dirs
     const { top, head } = makeRepo(t, { a: 'a' });
     for (let i = 0; i < 2000; i++) mkdirSync(join(top, 'u', `e${i}`), { recursive: true });
     const ctx = ctxOf(t, { timeoutMs: 1000 });
@@ -1224,30 +1276,112 @@ test('[M65] INVARIANT on wide and empty-directory trees with slow lstat, opendir
     traced({ slow }, (tr) => {
       const got = outcome(() => H.verifyWorktree(ctx, { source, store, oid: head }));
       assert.ok(['worktree_budget_exceeded', 'ok'].includes(got), `verify, slow ${what}: ${got}`);
-      invariant(tr, tr.start + 1000 + 1000, `verify, slow ${what}`);
+      invariant(tr, { D: tr.start + 1000, grace: 1000, got, what: `verify, slow ${what}` });
     });
   }
 });
-test('[M65] rollback after expiry: the derived grace gateway quarantines and removes (timeout outcome kept), or leaves the dir quarantined (lane_remove_failed); never past the grace deadline', { skip: POSIX }, (t) => {
+test('[M65] rollback after expiry: one shared grace window (deadline + timeoutMs); timeout outcome with full recovery, or lane_remove_failed and the dir quarantined or left (never reused)', { skip: POSIX }, (t) => {
   const { top, head } = makeRepo(t, { a: 'a', b: 'b' });
   const ctx = ctxOf(t, { timeoutMs: 1000 });
   const source = H.openSource(ctx, { toplevel: top });
   const n = traced({}, (tr) => { H.initStore(ctx, { dir: join(tmp(t), 'dry'), source, oids: [head] }); return tr.log.length; });
   const seen = new Set();
-  for (let k = 2; k <= n; k += 2) {
+  for (let k = 1; k <= n + 1; k++) {
     const parent = tmp(t);
     traced({ step: Math.floor(1000 / k) + 1 }, (tr) => {
       const got = outcome(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] }));
       assert.ok(['ok', 'git_timeout', 'lane_remove_failed'].includes(got), `@${k}/${n}: ${got}`);
-      // deadline + view-removal window + rollback window; a window opens at most one call (one step) after the previous closed.
-      invariant(tr, tr.start + 3000 + 2 * (Math.floor(1000 / k) + 1), `rollback @${k}`);
-      if (got !== 'ok') assert.equal(existsSync(join(parent, 'store')), false, `@${k}: never left at its own name`);
-      if (got === 'git_timeout') assert.deepEqual(existsSync(join(parent, '.quarantine')) ? readdirSync(join(parent, '.quarantine')) : [], [], `@${k}: quarantined, then removed within the grace deadline`);
-      if (got === 'lane_remove_failed') assert.equal(readdirSync(join(parent, '.quarantine')).length <= 1, true, `@${k}: at most one quarantined slot`);
+      invariant(tr, { D: tr.start + 1000, grace: 1000, got, what: `rollback @${k}` });
+      const q = join(parent, '.quarantine');
+      if (got === 'git_timeout' && tr.log.some((c) => c.phase === 'recovery')) {
+        assert.equal(existsSync(join(parent, 'store')), false, `@${k}: not left at its own name`);
+        assert.deepEqual(existsSync(q) ? readdirSync(q) : [], [], `@${k}: quarantined, then removed within the window`);
+      }
+      if (got !== 'ok') assert.throws(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] }), (e) => e instanceof GitError, `@${k}: never reused`);
       seen.add(got);
     });
   }
-  assert.ok(seen.has('git_timeout'), `the timeout outcome with full recovery occurs (${[...seen]})`);
+  assert.ok(seen.has('git_timeout'), `the timeout outcome with full recovery occurs (outcomes seen: ${[...seen]}; the dry run above is the ok case)`);
+});
+test('[M71] an expiry between the exclusive mkdir and its lstat leaves the empty dir untouched (no identity, nothing removed) and refuses git_timeout', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const source = H.openSource(ctx, { toplevel: top });
+  const parent = tmp(t);
+  traced({ slow: { mkdirSync: (p) => (p.endsWith('/store') ? 5000 : 0) } }, (tr) => {
+    assert.equal(outcome(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] })), 'git_timeout');
+    invariant(tr, { D: tr.start + 1000, grace: 1000, got: 'git_timeout', what: 'mkdir then expiry' });
+  });
+  assert.deepEqual(readdirSync(parent), ['store'], 'the empty dir stays where it is; nothing is quarantined or removed');
+});
+test('[M72] a close that fails never replaces the error in flight (expiry or refusal); on the success path it is a typed refusal', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const { store, source } = storeOf(t, ctx, top, [head]);
+  // An expiry while a Dir is open, then its close fails: the expiry code survives.
+  traced({ slow: { 'Dir#readSync': 2000 }, failOn: { 'Dir#closeSync': () => true } }, () => {
+    assert.equal(outcome(() => H.verifyWorktree(ctx, { source, store, oid: head })), 'worktree_budget_exceeded');
+  });
+  // Success path, every close fails: refused (typed), never a silent success.
+  traced({ failOn: { 'Dir#closeSync': () => true, closeSync: () => true } }, () => {
+    assert.equal(outcome(() => H.op(store, 'object.exists', [head])), 'worktree_entry_unsupported');
+  });
+});
+test('[M73] R/hooks holding many entries with slow Dir reads: live() reads nothing after the deadline and refuses with the operation code', { skip: POSIX }, (t) => {
+  const tmpRoot = tmp(t, 'gh-hooks-');
+  const { top } = makeRepo(t, { a: 'a' });
+  withEnv({ TMPDIR: tmpRoot }, () => {
+    const c = ctxOf(t, { timeoutMs: 1000 });
+    const [R] = readdirSync(tmpRoot).map((n) => join(tmpRoot, n));
+    for (let i = 0; i < 200; i++) writeFileSync(join(R, 'hooks', `h${i}`), '');
+    traced({ slow: { 'Dir#readSync': 10 } }, (tr) => {
+      const got = outcome(() => H.openSource(c, { toplevel: top }));
+      assert.equal(got, 'git_timeout', 'expiry, never reported as tampering');
+      invariant(tr, { D: tr.start + 1000, got, what: 'hooks listing' });
+    });
+  });
+});
+test('[M74] uid checks: a repository dir reported as owned by another uid refuses repo_owner_mismatch (faked lstat)', { skip: POSIX }, (t) => {
+  const { top } = makeRepo(t, { a: 'a' });
+  const ctx = ctxOf(t);
+  for (const target of [top, join(top, '.git'), join(top, '.git', 'objects')]) {
+    traced({}, () => {
+      const real = fs.lstatSync;
+      fs.lstatSync = (p, ...a) => { const st = real(p, ...a); return Buffer.from(p).toString('latin1') === target ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: st.uid + 1 }) : st; };
+      syncBuiltinESMExports();
+      assert.equal(outcome(() => H.openSource(ctx, { toplevel: top })), 'repo_owner_mismatch', target);
+    });
+  }
+});
+test('[M75] O_NONBLOCK: a FIFO posing as a regular gitfile (faked lstat) is refused at once, never blocks the open (child process with a watchdog)', { skip: POSIX }, (t) => {
+  const d = tmp(t);
+  const wt = join(d, 'wt');
+  mkdirSync(wt);
+  mkfifo(join(wt, '.git'));
+  const script = `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const H = await import(${JSON.stringify(pathToFileURL(join(libDir, 'git-hardened.mjs')).href)});
+const ctx = H.createContext();
+const real = fs.lstatSync;
+fs.lstatSync = (p, ...a) => { const st = real(p, ...a); if (!Buffer.from(p).toString('latin1').endsWith('/wt/.git')) return st; const fake = Object.create(Object.getPrototypeOf(st)); Object.assign(fake, st); fake.isFile = () => true; fake.isFIFO = () => false; fake.isDirectory = () => false; return fake; };
+syncBuiltinESMExports();
+try { H.openSource(ctx, { toplevel: ${JSON.stringify(wt)} }); console.log('ok'); } catch (e) { console.log(e.code); }
+fs.lstatSync = real; syncBuiltinESMExports(); ctx.dispose();`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'latin1', timeout: 15_000, killSignal: 'SIGKILL' });
+  assert.equal(r.signal, null, 'the open did not block (the watchdog did not fire)');
+  assert.equal(r.stdout.trim(), 'worktree_entry_unsupported', r.stderr.slice(-400));
+});
+test('[M76] CPU: exclusions are ticked (many exclusions x many entries refuse within the deadline, real clock)', { skip: POSIX }, (t) => {
+  const files = Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`d${i % 10}/f${i}`, '']));
+  const { top, head } = makeRepo(t, files);
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const { store, source } = storeOf(t, ctx, top, [head]);
+  const exclusions = Array.from({ length: 40_000 }, (_, i) => `x/${i}`);
+  const t0 = Date.now();
+  const got = outcome(() => H.verifyWorktree(ctx, { source, store, oid: head, exclusions }));
+  const ms = Date.now() - t0;
+  t.diagnostic(`40,000 exclusions x 3,000 entries: ${got} in ${ms} ms`);
+  assert.equal(got, 'worktree_budget_exceeded');
+  assert.ok(ms < 1000 + 1500, `refused close to the deadline: ${ms} ms`);
 });
 test('[M67][M68] expiry inside eolHint, checkStore and live is the operation code: never git_timeout for verify work, never context_tampered or owned_dir_invalid', { skip: POSIX }, (t) => {
   const { top, head } = makeRepo(t, Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`f${i}.txt`, 'a\nb\n'])));
@@ -1300,7 +1434,10 @@ test('[M69] CPU: the tree.list parse checks the clock every 1,024 records, and a
     H.op(store, 'tree.list', [head]);
     // Clock reads between the ls-tree spawn's end and the next spawn's start: the parse (>= 10,000 records / 1,024) + git()'s own.
     const between = marks[2][1] - marks[1][1];
-    assert.ok(between >= Math.floor(10_000 / 1024) + 2, `${between} clock reads while parsing 10,000 records`);
+    // One shared tick counter, a check every 1,024 ticks: the NUL splitter (N), the record parse (N), unsafePath (2 components
+    // each: 2N), the duplicate loop (N) and the parent loop (N) give about 6N/1,024 = 58 checks; dropping any one loop's
+    // ticks removes about 10.
+    assert.ok(between >= 55, `${between} clock reads while parsing 10,000 records`);
     jumpAfterSpawn = true;
     assert.equal(outcome(() => H.op(store, 'object.exists', [head])), 'git_timeout', 'the terminal check refuses a success after the deadline');
   } finally { Date.now = realNow; cp.spawnSync = realSpawn; syncBuiltinESMExports(); }
@@ -1336,6 +1473,16 @@ test('[M66] LINT (development guardrail, not a security boundary): git-hardened.
       if (!n || typeof n.type !== 'string') return;
       if (n.type === 'Identifier' && fsNames.has(n.name) && !inFactory(n) && !(parent?.type === 'ImportSpecifier')) off.push(`fs ${n.name} at line ${n.loc.start.line}`);
       if (n.type === 'MemberExpression' && !n.computed && ['readSync', 'closeSync'].includes(n.property.name) && !inFactory(n)) off.push(`Dir.${n.property.name} at line ${n.loc.start.line}`);
+      if (n.type === 'MemberExpression' && n.computed && n.property.type === 'Literal' && /Sync$/.test(String(n.property.value))) off.push(`computed .${n.property.value} at line ${n.loc.start.line}`);
+      if (n.type === 'Identifier' && n.name === 'getBuiltinModule') off.push(`getBuiltinModule at line ${n.loc.start.line}`);
+      // fx/gx must not escape into module state: no object literal property named fx or gx, no fx stored on a handle.
+      if (n.type === 'Property' && !inFactory(n) && ((n.value?.type === 'Identifier' && ['fx', 'gx'].includes(n.value.name)) || (!n.computed && ['fx', 'gx'].includes(n.key.name ?? n.key.value)))) off.push(`gateway escapes as a property at line ${n.loc.start.line}`);
+      // A finally body may only close (quiet by construction) or run a guarded rollback: nothing that could replace the error in flight unchecked.
+      if (n.type === 'TryStatement' && n.finalizer && !inFactory(n)) {
+        const body = src.slice(n.finalizer.start, n.finalizer.end).replace(/\s+/g, ' ');
+        const okFinally = /^\{ (?:d\.close\(\);|fx\.close\(fd\);|depth--;) \}$/.test(body) || /^\{ \/\/[^]*?if \((?:handle === null && created !== null|rst !== null && !fx\.ok\(\))\) (?:discard|removeTree)\(/.test(body) || /^\{ if \((?:handle === null && created !== null|rst !== null && !fx\.ok\(\))\) (?:discard|removeTree)\(/.test(body);
+        if (!okFinally) off.push(`finally at line ${n.loc.start.line} is not a close or a guarded rollback: ${body.slice(0, 80)}`);
+      }
       if (n.type === 'ImportExpression' || (n.type === 'Identifier' && ['require', 'createRequire'].includes(n.name))) off.push(`loader ${n.type} at line ${n.loc.start.line}`);
       if (n.type === 'CatchClause' && !inFactory(n)) {
         const first = n.body.body[0];
@@ -1357,6 +1504,9 @@ test('[M66] LINT (development guardrail, not a security boundary): git-hardened.
     assert.ok(lint(base + plant).some((o) => why.test(o)), plant);
   }
   assert.ok(lint("import * as fs from 'node:fs';\nfunction fsx() {}").some((o) => /namespace/.test(o)));
+  for (const [plant, why] of [["d['readSync']();", /computed/], ["process.getBuiltinModule('node:fs');", /getBuiltinModule/], ['HANDLES.set(h, { root: fx });', /escapes/],
+    ['const o = { fx };', /escapes/], ['try { x(); } finally { y(); }', /finally/]]) assert.ok(lint(base + plant).some((o) => why.test(o)), plant);
+  assert.deepEqual(lint(`${base}try { x(); } finally { d.close(); }`), [], 'control: a close-only finally');
   assert.deepEqual(lint(`${base}try { x(); } catch (e) { if (expired(e)) throw e; y(); }`), [], 'control: the sanctioned catch form');
 });
 
