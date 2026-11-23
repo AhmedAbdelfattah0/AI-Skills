@@ -226,7 +226,9 @@ test('P7m: test-kinds.md carries the verbatim L-ran claim, the declaration how-t
   assert.ok(tk.includes('**T0 (`fast-checks.mjs`) is not engine-enforced yet**'));
   assert.ok(!tk.includes('No engine step runs `check` at freeze yet'), 'the stale claim is gone');
   assert.ok(flat(ref('prove.md')).includes('The engine-enforced evidence option and its limits are in the same file.'));
-  assert.ok(tk.includes('a MISSING value is refused first as `security_policy_required`'));
-  assert.ok(tk.includes('`test_kinds_needs_security_policy` (`scripts/run-engine.mjs:372`) applies only after those pass.'));
+  assert.ok(flat(tk).includes('Once DAG validation has passed, a MISSING value on a current approval is refused as `security_policy_required`'));
+  assert.ok(flat(tk).includes('is refused as `dag_invalid` (`scripts/engine-dag.mjs:150` and `:152`'));
+  assert.ok(!tk.includes('refused first as `security_policy_required`'), 'the unqualified claim is gone');
+  assert.ok(tk.includes('`test_kinds_needs_security_policy` (`scripts/run-engine.mjs:382`) applies only after those pass.'));
   assert.ok(tk.includes('the Linux vector is moot while the evidence channel is darwin-only'));
 });

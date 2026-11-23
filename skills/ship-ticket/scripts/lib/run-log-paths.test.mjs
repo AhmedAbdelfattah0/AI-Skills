@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn as spawnAsync } from 'node:child_process';
 import { commonLogDir, legacyLogDirs, ownLogDir } from './run-log-paths.mjs';
@@ -226,6 +226,18 @@ test('cutover: run-log.mjs legacy prints the archive of the named worktree read-
   assert.deepEqual(summary(fx, fx.wt2).runs, [], 'never merged');
 });
 
+// Trace-path normaliser (F-104-1). Git prints forward-slash absolute paths on win32 while `join` yields backslashes, so
+// raw substring comparison could let a sibling access slip through. Every trace path is normalised BEFORE any comparison:
+// platform path rules (win32 collapses `/` and `\`), then every separator becomes `/`, then lower-case where the
+// platform file system is case-insensitive (win32, darwin).
+export const traceNorm = (p, platform = process.platform) => {
+  const n = (platform === 'win32' ? win32 : posix).normalize(p).replace(/\\/g, '/').replace(/(.)\/+$/, '$1');
+  return platform === 'win32' || platform === 'darwin' ? n.toLowerCase() : n;
+};
+const tracePath = (line) => line.slice(line.indexOf(' ') + 1);
+export const traceTouchesWorktrees = (p, platform) => `${traceNorm(p, platform)}/`.includes('/.git/worktrees/');
+export const traceIsOwnWorktree = (p, name, platform) => `${traceNorm(p, platform)}/`.includes(`/.git/worktrees/${traceNorm(name, platform)}/`);
+
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 // fs spy: a preloaded module records every path a child process touches through node:fs.
 const SPY = `data:text/javascript,${encodeURIComponent(`import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
@@ -253,11 +265,11 @@ test('cutover AC9-C (fs spy): no normal command opens a sibling legacy path; the
     // Paths are escaped as regex literals: on win32 `join` yields backslashes (`\s`, `\T` would be regex escapes).
     assert.match(trace, new RegExp(`(openSync|readFileSync) .*${escapeRe(join('ai-skills', 'ship-ticket', 'T1.jsonl'))}`), `${name}: the shared log was read`);
     if (name !== 'main') assert.match(trace, new RegExp(`lstatSync .*${escapeRe(join('.git', 'worktrees', name, 'ai-skills', 'ship-ticket', 'T1.jsonl'))}`), `${name}: legacy_present lstat seen`);
-    const touched = trace.split('\n').filter((l) => l.includes(`${join('.git', 'worktrees')}`));
+    const touched = trace.split('\n').filter((l) => l && traceTouchesWorktrees(tracePath(l)));
     for (const line of touched) {
-      const [op, path] = [line.slice(0, line.indexOf(' ')), line.slice(line.indexOf(' ') + 1)];
-      assert.ok(path.includes(join('.git', 'worktrees', name)), `${name} touched a sibling path: ${line}`);
-      if (path.endsWith(join('ai-skills', 'ship-ticket', 'T1.jsonl'))) assert.ok(['lstatSync', 'openSync'].includes(op), `${name}: the own legacy log only via lstat/open (bounded read): ${line}`);
+      const [op, path] = [line.slice(0, line.indexOf(' ')), tracePath(line)];
+      assert.ok(traceIsOwnWorktree(path, name), `${name} touched a sibling path: ${line}`);
+      if (traceNorm(path).endsWith(`/ai-skills/ship-ticket/${traceNorm('T1.jsonl')}`)) assert.ok(['lstatSync', 'openSync'].includes(op), `${name}: the own legacy log only via lstat/open (bounded read): ${line}`);
     }
   }
 });
@@ -488,4 +500,24 @@ test('repair 8 (2b) eval: an inaccessible shared log with readable engine state 
     assert.ok((out.degraded ?? []).some((d) => d.code === 'shared_log_unavailable'), `${mode}: ${JSON.stringify(out.degraded)}`);
     assert.deepEqual(out.runs, [], `${mode}: no empty synthetic run from the engine state`);
   }
+});
+
+test('trace-path normaliser (F-104-1): forward-slash, mixed and backslash forms compare equal; a forward-slash sibling is detected', () => {
+  // win32 rules are run explicitly through path.win32, so this holds on POSIX CI too.
+  const own = 'C:\\Repo\\.git\\worktrees\\wt2\\ai-skills\\ship-ticket\\T1.jsonl';
+  for (const form of [own, 'C:/Repo/.git/worktrees/wt2/ai-skills/ship-ticket/T1.jsonl', 'C:/Repo\\.git/worktrees\\wt2/ai-skills\\ship-ticket/T1.jsonl', 'c:/repo/./.git//worktrees/WT2/ai-skills/ship-ticket/t1.jsonl']) {
+    assert.equal(traceNorm(form, 'win32'), 'c:/repo/.git/worktrees/wt2/ai-skills/ship-ticket/t1.jsonl', form);
+    assert.ok(traceTouchesWorktrees(form, 'win32'), form);
+    assert.ok(traceIsOwnWorktree(form, 'wt2', 'win32'), form);
+  }
+  // case is significant on linux, folded on darwin and win32
+  assert.equal(traceNorm('/R/.git/worktrees/Wt2/x', 'linux'), '/R/.git/worktrees/Wt2/x');
+  assert.equal(traceNorm('/R/.git/worktrees/Wt2/x', 'darwin'), '/r/.git/worktrees/wt2/x');
+  // mutant-style negative control: a sibling reached through a raw git (forward-slash) path MUST be detected
+  for (const sibling of ['C:/Repo/.git/worktrees/wt3/ai-skills/ship-ticket/T1.jsonl', 'C:/Repo\\.git/worktrees\\wt3/ai-skills', 'c:/repo/.git/worktrees/wt20/x']) {
+    assert.ok(traceTouchesWorktrees(sibling, 'win32'), `${sibling} is a worktrees path`);
+    assert.equal(traceIsOwnWorktree(sibling, 'wt2', 'win32'), false, `${sibling} must be detected as a sibling of wt2`);
+  }
+  assert.equal(traceIsOwnWorktree('/r/.git/worktrees/wt3/x', 'wt2', 'linux'), false);
+  assert.equal(traceTouchesWorktrees('C:/Repo/src/main.js', 'win32'), false);
 });

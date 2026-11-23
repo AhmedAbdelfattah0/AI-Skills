@@ -4,11 +4,18 @@
 // The text between the BEGIN/END markers is copied verbatim (LF line ends) from that blob, from
 // `function rowsFromText` up to (not including) `function carrierBinding`. run-log.test.mjs proves an OLD
 // reader accepts rows carrying the S5 keys `timestamp_source` and `label`, and pins the verbatim text against
-// the blob whenever that git object is available. The header imports supply what the body references;
-// buildRun and the event constants are the current modules (they decide pairing only).
+// the blob whenever that git object is available. The header supplies what the body references:
+//   - SCHEMA and the event-name list are FROZEN here (values the pre-S5 reader had through
+//     measure/events.mjs at that commit: RUN_LOG_SCHEMA and EVENT_NAMES), so this reader never follows the
+//     current schema or event vocabulary. run-log.test.mjs fails if either drifts from the frozen value.
+//   - buildRun is the CURRENT run-summary module. It is used only after row acceptance, to derive pairing
+//     integrity warnings; it cannot change which rows are accepted or rejected.
 import { basename } from 'node:path';
 import { buildRun } from '../run-summary.mjs';
-import { RUN_LOG_SCHEMA as SCHEMA, isEventName } from '../measure/events.mjs';
+
+const SCHEMA = 'ship-ticket-run-log-v1';
+const FROZEN_EVENT_NAMES = new Set(['run_mode', 'review_lane', 'repair_batch', 'gate_run', 'owner_decision', 'host_sleep', 'milestone', 'finding', 'closure', 'log_loss']);
+const isEventName = (name) => typeof name === 'string' && FROZEN_EVENT_NAMES.has(name);
 
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
