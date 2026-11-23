@@ -135,6 +135,44 @@ jobs:
           skills/ship-ticket/scripts/engine-base.test.mjs
           skills/ship-ticket/scripts/run-engine-base.test.mjs
 
+  # S-02a0c qualification cells (v3.1 R9): the full store-backed git suite on each POSIX cell, with the
+  # 30k-file cost cell, logging the exact cell (full `git --version` x OS-arch x Node major); a cell is
+  # advertised only after a PR records it in lib/git-ops.golden.json. Windows is refusal-only (OC-4):
+  # every POSIX test skips and the platform_unsupported test asserts zero spawns and zero writes.
+  git-hardened:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['18', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Record the cell
+        run: node -e "const r=require('child_process').spawnSync('git',['--version'],{encoding:'utf8'});console.log(JSON.stringify({git:r.stdout.trim(),os:process.platform,arch:process.arch,node:process.versions.node}))"
+      - name: Test the store-backed hardened git library
+        env:
+          GIT_HARDENED_COST: '1'
+        run: node --test skills/ship-ticket/scripts/lib/git-hardened.test.mjs
+
+  # S-02a0c guard mutants (one test file, heavy): every lib/git-hardened.mjs guard patched out in a temp
+  # copy must turn its tagged tests red by an assertion.
+  git-hardened-mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: git-hardened guard mutation check
+        env:
+          GIT_HARDENED_MUTATION: '1'
+        run: node --test skills/ship-ticket/scripts/lib/git-hardened-mutation.test.mjs
+
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
   # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
   # (each engine guard patched out in a temp copy must fail the property harness), then the security

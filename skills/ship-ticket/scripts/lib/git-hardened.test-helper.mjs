@@ -68,6 +68,9 @@ export function makeRepo(t, files, { init = [], dir } = {}) {
   const top = dir ?? join(tmp(t), 'repo');
   mkdirSync(top, { recursive: true });
   sh(top, ['init', '-q', ...init]);
+  // No background auto-gc or maintenance in fixtures (it races with the test and with cleanup).
+  sh(top, ['config', 'gc.auto', '0']);
+  sh(top, ['config', 'maintenance.auto', 'false']);
   writeTree(top, files);
   sh(top, ['add', '-A']);
   sh(top, ['commit', '-q', '-m', 'c1', '--allow-empty']);

@@ -869,6 +869,23 @@ test('[M38] canaries: builder filters (direct, include, includeIf, config.worktr
   fired('hooks', ['commit', '-q', '--allow-empty', '-m', 'x'], /^hook pre-commit/m);
   fired('submodule config', ['status', '--porcelain'], /^sub-fsmonitor /m, join(top, 'sub'));
 });
+test('canaries (C1-b): a filter and attributes added to the builder mid-operation (between rows) never run; the result equals the clean run', { skip: POSIX }, (t) => {
+  const d = tmp(t);
+  const log = join(d, 'late.log');
+  const late = join(d, 'late');
+  writeFileSync(late, `#!/bin/sh\necho "late $*" >> ${JSON.stringify(log)}\nexec cat\n`);
+  chmodSync(late, 0o755);
+  const { top, head } = makeRepo(t, { 'a.txt': 'a\n', 'b.txt': 'b\n' });
+  writeFileSync(join(top, 'b.txt'), 'b2\n');
+  const clean = (() => { const ctx = ctxOf(t); const { store, source } = storeOf(t, ctx, top, [head]); return diffsOf(H.verifyWorktree(ctx, { source, store, oid: head })); })();
+  const arm = `printf '[filter "late"]\\n\\tclean = ${late}\\n\\tsmudge = ${late}\\n[core]\\n\\tfsmonitor = ${late}\\n' >> ${JSON.stringify(join(top, '.git', 'config'))}; echo '* filter=late' > ${JSON.stringify(join(top, '.git', 'info', 'attributes'))}`;
+  const bin = wrapper(t, `case " $* " in *" pack-objects "*|*" read-tree "*) ${arm};; esac`);
+  const v = onPath(bin, () => { const ctx = ctxOf(t); const { store, source } = storeOf(t, ctx, top, [head]); return H.verifyWorktree(ctx, { source, store, oid: head }); });
+  assert.deepEqual(diffsOf(v), clean, 'the result equals the clean run');
+  assert.equal(existsSync(log), false, 'the filter added mid-operation never ran');
+  sh(top, ['diff', '--quiet'], { allowFail: true });
+  assert.ok(existsSync(log), 'positive control: the armed filter fires through the hostile git');
+});
 test('canaries: no lib row spawns a child process (GIT_TRACE through a wrapper); a fetch is the positive control', { skip: POSIX }, (t) => {
   const traceLog = join(tmp(t), 'trace.log');
   const bin = wrapper(t, `GIT_TRACE=${JSON.stringify(traceLog)}; export GIT_TRACE`);

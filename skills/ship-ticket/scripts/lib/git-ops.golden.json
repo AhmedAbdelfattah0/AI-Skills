@@ -313,5 +313,30 @@
       "callers": []
     }
   ],
-  "cells": []
+  "cells": [
+    {
+      "git": "git version 2.50.1 (Apple Git-155)",
+      "os": "darwin",
+      "arch": "arm64",
+      "node": 18
+    },
+    {
+      "git": "git version 2.50.1 (Apple Git-155)",
+      "os": "darwin",
+      "arch": "arm64",
+      "node": 22
+    },
+    {
+      "git": "git version 2.55.0",
+      "os": "darwin",
+      "arch": "arm64",
+      "node": 18
+    },
+    {
+      "git": "git version 2.55.0",
+      "os": "darwin",
+      "arch": "arm64",
+      "node": 22
+    }
+  ]
 }

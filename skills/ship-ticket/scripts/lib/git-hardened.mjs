@@ -26,8 +26,14 @@ const RD_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOC
  * A cell is the full `git --version` line x OS x CPU arch x Node major. Only a cell whose full suite passed (start-up,
  * error, timeout and overflow paths, canary positive controls, the post-SIGKILL process check) is listed; it enters
  * through a PR that records that run. Everything else, newer gits included, refuses loudly (O-7).
+ * Local darwin cells recorded by the S-02a0c PR (full suite incl. the 30k cost cell, on the committed lib); the CI
+ * runner cells enter the same way once their logged strings have a green full-suite run.
  */
 export const QUALIFIED_CELLS = Object.freeze([
+  Object.freeze({ git: 'git version 2.50.1 (Apple Git-155)', os: 'darwin', arch: 'arm64', node: 18 }),
+  Object.freeze({ git: 'git version 2.50.1 (Apple Git-155)', os: 'darwin', arch: 'arm64', node: 22 }),
+  Object.freeze({ git: 'git version 2.55.0', os: 'darwin', arch: 'arm64', node: 18 }),
+  Object.freeze({ git: 'git version 2.55.0', os: 'darwin', arch: 'arm64', node: 22 }),
 ]);
 export class GitCellUnqualified extends GitCapabilityError {
   constructor(cell) {
@@ -110,7 +116,8 @@ const hexKey = (b) => b.toString('hex');
 /** The one exclusive directory create of the lib: non-recursive, mode 0700. */
 const mkdir0700 = (p) => mkdirSync(p, 0o700);
 const writeNew = (p, data) => writeFileSync(p, data, { flag: 'wx', mode: 0o600 });
-const tempDir = (parent, prefix) => mkdtempSync(Buffer.concat([parent, SLASH, B(prefix)]), { encoding: 'buffer' });
+// The prefix is passed as a (strict-decoded) string: Node 18.20.8 mkdtempSync throws a TypeError on a Buffer prefix (MEASURED).
+const tempDir = (parent, prefix) => mkdtempSync(`${str(parent)}/${prefix}`, { encoding: 'buffer' });
 
 /** A counter that throws `code` once its total passes `cap`. */
 const meter = (cap, code, op) => { let n = 0; return (k) => { n = n + k; if (n > cap) throw fail(code, op); return n; }; };
