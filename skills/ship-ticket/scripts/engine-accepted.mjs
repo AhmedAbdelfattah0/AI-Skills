@@ -288,17 +288,19 @@ export function nextStep(v) {
     if (r?.key) return stop(phase, 'no_progress', 'no_progress', `${gate} refused ${r.key.code} twice (seq ${r.seqs.join(', ')}) with no progress record between; only the gate's own acceptance clears this`, [], { key: r.key, at: r.at });
     return step;
   };
+  const red = v.phases.find(x => x.phase === 'RED');
+  // A drive cannot finish while RED is owed (the barrier holds the dependents), so an owed RED is what settles BUILD/PROVE then.
+  const redOwed = red?.code === 'red_pending' && v.facts.red_runners.length === 1 ? cmd('gate red', { node: red.nodes[0], command: v.facts.red_runners[0] }) : null;
   for (const p of v.phases) {
     if (['accepted', 'not_applicable'].includes(p.state)) continue;
     if (p.state === 'unknown') return stop(p.phase, 'acceptance_unknown', 'unknown', `${p.phase}: ${p.reason}`, p.evidence,
-      { settle_with: ['INIT', 'BUILD', 'RED', 'PROVE'].includes(p.phase) ? cmd('drive') : null });
+      { settle_with: ['BUILD', 'PROVE'].includes(p.phase) && redOwed ? redOwed : ['INIT', 'BUILD', 'RED', 'PROVE'].includes(p.phase) ? cmd('drive') : null });
     switch (p.phase) {
       case 'INIT': return stop('INIT', p.code ?? 'init_not_accepted', 'owner', p.reason, p.evidence);
       case 'BUILD': case 'PROVE': case 'RED': {
-        const red = v.phases.find(x => x.phase === 'RED');
         if (red.code === 'red_pending') {
-          if (v.facts.red_runners.length !== 1) return stop('RED', 'red_runner_ambiguous', 'unknown', `RED is owed for ${red.nodes[0]} but the DAG has ${v.facts.red_runners.length} RED runners`, red.evidence);
-          return gated('RED', 'red', go('RED', 'run', cmd('gate red', { node: red.nodes[0], command: v.facts.red_runners[0] }), null, `accepted RED is owed for ${red.nodes[0]} before its dependents run`, red.evidence));
+          if (!redOwed) return stop('RED', 'red_runner_ambiguous', 'unknown', `RED is owed for ${red.nodes[0]} but the DAG has ${v.facts.red_runners.length} RED runners`, red.evidence);
+          return gated('RED', 'red', go('RED', 'run', redOwed, null, `accepted RED is owed for ${red.nodes[0]} before its dependents run`, red.evidence));
         }
         return go(p.phase, 'run', cmd('drive'), 'builder', `${p.reason}: drive dispatches them through the carrier`, p.evidence);
       }
