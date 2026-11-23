@@ -13,13 +13,16 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, renameSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, renameSync, readFileSync, writeFileSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture, withOrigin, passReview, failReview, confirmReview } from './engine-test-fixture.mjs';
 import * as SP from './security-plan.mjs';
 import { init, status, gate as gateCmd } from './run-engine.mjs';
 import { POLICY_SEMANTICS } from './engine-policy.mjs';
+import { verifyFrozenBase } from './engine-identity.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`);
@@ -116,7 +119,7 @@ test('[I1] R2 reassess: a re-pointed origin is identity_changed (reachable or no
   assert.equal(again.out.code, 'reassessed');
 });
 
-test('[I2] R3 review original: a re-pointed origin is identity_changed before anything is frozen; restored, the original freezes the base', { skip: WIN_SKIP }, (t) => {
+test('[I2] [I16] R3 review original: a re-pointed origin is identity_changed before anything is frozen; restored, the original freezes the base', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = idFx(t);
   started(fx);
   const cand = candidate(fx);
@@ -127,6 +130,9 @@ test('[I2] R3 review original: a re-pointed origin is identity_changed before an
   onlyAudit(fx, before, 'review original');
   assert.equal(fx.readState().freeze, null);
   assert.deepEqual(fx.readState().review_chain, []);
+  // P3: re-pointed at an UNREACHABLE URL the code is still identity_changed: the identity is read before the base
+  o.repoint('evil/offline', { reachable: false });
+  refused(fx.gate('review', passReview('rx-1', cand)), 'identity_changed');
   // a remote re-pointed at a plain path names no repository at all: also identity_changed, never a pass
   o.git('remote', 'set-url', 'origin', o.origin);
   refused(fx.gate('review', passReview('rx-1', cand)), 'identity_changed');
@@ -145,18 +151,20 @@ function repaired(fx) {
   return candidate(fx);
 }
 
-test('[I3] R4 review confirmation: a re-pointed origin is identity_changed after a recorded repair; restored, the confirmation passes', { skip: WIN_SKIP }, (t) => {
+test('[I3] [I16] R4 review confirmation: a re-pointed origin is identity_changed after a recorded repair; restored, the confirmation passes', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = idFx(t);
   const c2 = repaired(fx);
   o.repoint('evil/other');
   const before = fx.readState();
   refused(fx.gate('review', confirmReview('rx-1', c2)), 'identity_changed');
   onlyAudit(fx, before, 'review confirmation');
+  o.repoint('evil/offline', { reachable: false }); // P3: identity before base
+  refused(fx.gate('review', confirmReview('rx-1', c2)), 'identity_changed');
   o.git('remote', 'set-url', 'origin', o.ghUrl('acme/app'));
   ok(fx.gate('review', confirmReview('rx-1', c2)), 'restored');
 });
 
-test('[I4] R5 ship-ready: a re-pointed origin is identity_changed before the proof runs; restored, the run is SHIP_READY', { skip: WIN_SKIP }, (t) => {
+test('[I4] [I16] R5 ship-ready: a re-pointed origin is identity_changed before the proof runs; restored, the run is SHIP_READY', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = idFx(t);
   started(fx);
   ok(fx.gate('review', passReview('rx-1', candidate(fx))));
@@ -166,6 +174,8 @@ test('[I4] R5 ship-ready: a re-pointed origin is identity_changed before the pro
   onlyAudit(fx, before, 'ship-ready');
   assert.equal(fx.readState().ship_ready, undefined);
   assert.equal(fx.readState().local_proof, undefined, 'the proof never ran');
+  o.repoint('evil/offline', { reachable: false }); // P3: identity before base
+  refused(fx.gate('ship-ready', {}), 'identity_changed');
   o.git('remote', 'set-url', 'origin', o.ghUrl('acme/app'));
   const r = fx.gate('ship-ready', {});
   ok(r, 'restored');
@@ -355,4 +365,202 @@ test('R15 flag off on a GitHub-shaped origin (v5, S.base.identity non-null) runs
   S = fx.readState();
   assert.deepEqual(Object.keys(S.freeze).sort(), ['candidate', 'seq']);
   assert.deepEqual(Object.keys(S.ship_ready).sort(), ['candidate_id', 'seq']);
+});
+
+// ------------------------------------------------------------------ Round 1 repairs
+
+/** Point remote.origin.url at `url`, mapped by insteadOf to the bare (so only its identity differs). */
+const pointAt = (o, url) => { o.git('config', '--add', `url.${o.origin}.insteadOf`, url); o.git('remote', 'set-url', 'origin', url); };
+
+test('[I14] R1b only a repository ON github.com binds: another host (gitlab.com) or a github.com port is identity_unbound; the scp form binds', { skip: WIN_SKIP }, (t) => {
+  for (const url of ['https://gitlab.com/acme/app.git', 'https://github.com:8443/acme/app.git', 'ssh://git@github.com:22/acme/app.git']) {
+    const { fx, o } = idFx(t, { github: null });
+    pointAt(o, url);
+    const r = fx.cli('init', { dag: fx.dagFile });
+    initFails(r, 'identity_unbound');
+    noState(fx);
+  }
+  const { fx, o } = idFx(t, { github: null });
+  pointAt(o, 'git@github.com:acme/app.git');
+  ok(fx.cli('init', { dag: fx.dagFile }), 'the scp form of a github.com URL binds');
+  assert.equal(fx.readState().base.identity, 'github.com/acme/app');
+});
+
+test('[I15] a mid-run re-point to the same owner/repo on a github.com port (or another host) is identity_changed at review', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  started(fx);
+  const cand = candidate(fx);
+  for (const url of ['https://github.com:8443/acme/app.git', 'https://gitlab.com/acme/app.git']) {
+    pointAt(o, url);
+    const r = refused(fx.gate('review', passReview('rx-1', cand)), 'identity_changed');
+    assert.equal(r.out.observed, null, url);
+  }
+  o.git('remote', 'set-url', 'origin', o.ghUrl('acme/app'));
+  ok(fx.gate('review', passReview('rx-1', cand)));
+});
+
+/** A run whose ship-ready proof command is `args` (git), with the evil URL mapped to the bare. */
+function proofFx(t, args) {
+  const r = idFx(t, { config: { testCommands: { proof: { cmd: 'git', args } } } });
+  r.o.git('config', '--add', `url.${r.o.origin}.insteadOf`, r.o.ghUrl('evil/other'));
+  return r;
+}
+
+test('[I12] P1 a proof command that re-points origin is identity_changed at ship-ready: the proof is dropped, nothing is SHIP_READY', { skip: WIN_SKIP }, (t) => {
+  const { fx } = proofFx(t, ['remote', 'set-url', 'origin', 'https://github.com/evil/other.git']);
+  started(fx);
+  ok(fx.gate('review', passReview('rx-1', candidate(fx))));
+  const r = refused(fx.gate('ship-ready', {}), 'identity_changed');
+  assert.equal(r.out.observed, 'github.com/evil/other');
+  const S = fx.readState();
+  assert.equal(S.ship_ready, undefined);
+  assert.deepEqual([S.local_proof?.candidate_id, S.local_proof?.dropped], [null, ['identity_changed']], 'the proof is bound to no candidate');
+});
+
+test('[I12] P1 a proof command that moves the local base branch is base_moved_local at ship-ready: the proof is dropped', { skip: WIN_SKIP }, (t) => {
+  const { fx } = proofFx(t, ['branch', '-f', 'main', 'main~1']);
+  started(fx);
+  ok(fx.gate('review', passReview('rx-1', candidate(fx))));
+  refused(fx.gate('ship-ready', {}), 'base_moved_local');
+  const S = fx.readState();
+  assert.equal(S.ship_ready, undefined);
+  assert.deepEqual([S.local_proof?.candidate_id, S.local_proof?.dropped], [null, ['base_moved_local']]);
+});
+
+test('[I17] P2 after SHIP_READY, a rewind and an owner RETRY of the same candidate move SHIP_READY\'s base to the new freeze base', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  started(fx);
+  const x1 = o.upstream(1);
+  const x2 = o.upstream(1);
+  o.fetch();
+  const cand = candidate(fx);
+  ok(fx.gate('review', passReview('rx-1', cand)));
+  ok(fx.gate('ship-ready', {}));
+  assert.equal(fx.readState().ship_ready.base.sha, x2);
+  o.rewind(x1);
+  refused(fx.gate('ship-ready', {}), 'base_moved_remote');
+  fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' });
+  ok(fx.gate('review', passReview('rx-2', cand)));
+  ok(fx.gate('ship-ready', {}));
+  const S = fx.readState();
+  assert.equal(S.ship_ready.candidate_id, cand, 'the same candidate');
+  assert.deepEqual(S.ship_ready.base, S.freeze.base, 'SHIP_READY binds the new freeze base');
+  assert.equal(S.ship_ready.base.sha, x1);
+});
+
+test('[I18] a branch that merges the advanced base before the review is base_moved_local at the original (expected the pin, observed the new merge base)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  started(fx);
+  const pinned = fx.readState().base.merge_base;
+  const now = o.upstream(2);
+  o.fetch();
+  o.git('merge', '-q', '--ff-only', 'origin/main');
+  const r = refused(fx.gate('review', passReview('rx-1', candidate(fx))), 'base_moved_local');
+  assert.deepEqual([r.out.expected, r.out.observed], [pinned, now]);
+  assert.equal(fx.readState().freeze, null);
+});
+
+/** An in-process engine context of an initialised run (the exports S-28b/S-14 call). */
+const ctxOf = (fx) => ({ S: fx.readState(), ctx: { repoRoot: fx.repo } });
+
+test('[I13] the base is read by the identity-checked URL, never re-read from config (a URL changed between the reads is not the one verified)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const E = ctxOf(fx);
+  o.repoint('evil/offline', { reachable: false }); // the configured URL now differs from the one the identity read returned
+  const v = verifyFrozenBase(E, E.S.base, o.ghUrl('acme/app'));
+  assert.deepEqual([v.ok, v.base?.sha], [true, E.S.base.sha], JSON.stringify(v));
+});
+
+test('[I19] verifyFrozenBase has strict inputs: no freeze base, a copy of the pin or no identity-checked URL is base_unverified, never a skipped rewind check', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const E = ctxOf(fx), url = o.ghUrl('acme/app');
+  for (const [name, recorded, u] of [['no record', undefined, url], ['null record', null, url], ['a copy of the pin', { ...E.S.base }, url],
+    ['no URL', E.S.base, undefined], ['a local path', E.S.base, o.origin], ['another host', E.S.base, 'https://gitlab.com/acme/app.git']])
+    assert.equal(verifyFrozenBase(E, recorded, u).code, 'base_unverified', name);
+  assert.equal(verifyFrozenBase(E, E.S.base, url).ok, true, 'the pin itself, by the checked URL');
+});
+
+// ------------------------------------------------------------------ R11 (Round 1): version 11 end to end
+
+/** A format-3 selection over the REAL catalog (security-obligations.test.mjs realSelection): one request handler lowers session_context. */
+function formatThree() {
+  const facts = { ...Object.fromEntries(BOOLS.map((b) => [b, false])), session_context: true };
+  const surfaces = [{ boundary_id: 'orders', kind: 'request-handler', path: 'src/orders.ts', principals: ['staff'], facts: { session_context: false }, evidence: { session_context: 'src/orders.ts:bearerOnly' } },
+    { boundary_id: 'forms', kind: 'server-input', path: 'src/forms.ts', principals: ['staff'] }];
+  const r = SP.selectControls(CATALOG, { security_policy: 2, surfaces, facts, evidence: Object.fromEntries(BOOLS.map((b) => [b, 'src/orders.ts:handler'])) });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  return r;
+}
+
+test('R11 a format-3 security block with repoIdentity records version 11 (7 + identity); the composition holds for every pinned version', { skip: WIN_SKIP }, async (t) => {
+  const { pinnedVersion, repoIdentityVersion, recordedVersion } = await import('./engine-policy.mjs');
+  for (const testKinds of [false, true]) for (const obligations of [false, true]) {
+    const w = repoIdentityVersion(pinnedVersion(recordedVersion({ testKinds, obligations })));
+    assert.deepEqual(POLICY_SEMANTICS[w], { ...(testKinds ? { testKinds: true } : {}), ...(obligations ? { securityObligations: true } : {}), pinnedBase: true, repoIdentity: true }, `v${w}`);
+  }
+  const sel = formatThree(), SPEC = 'spec/sec.test.mjs';
+  const cov = sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] }));
+  const fx = fixture(t, { commit: true, narrativeExtra: SP.renderSection3a(sel) + '\n\n',
+    config: { width: 1, base: 'main', securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: cov, ...ID },
+    nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }] });
+  const o = withOrigin(fx, { github: 'acme/app' });
+  o.feature();
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  assert.equal(fx.readState().policy_version, 11);
+});
+
+// ------------------------------------------------------------------ R15 (Round 1): flag-off byte replay against origin/main's engine
+
+const SCRIPTS = dirname(fileURLToPath(import.meta.url));
+/** origin/main's skills/ extracted to a temp dir: the pre-S-28a engine; null in a checkout without origin/main (a shallow CI or a mutant copy). */
+function mainEngine(t) {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: SCRIPTS, encoding: 'utf8' });
+  if (top.status !== 0) return null;
+  if (spawnSync('git', ['rev-parse', '--verify', '--quiet', 'origin/main^{commit}'], { cwd: top.stdout.trim() }).status !== 0) return null;
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 's28a-main-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ar = spawnSync('sh', ['-c', `git -C "${top.stdout.trim()}" archive origin/main skills | tar -x -C "${dir}"`], { encoding: 'utf8' });
+  assert.equal(ar.status, 0, ar.stderr);
+  return join(dir, 'skills', 'ship-ticket', 'scripts', 'run-engine.mjs');
+}
+const VOLATILE = new Set(['dag_digest', 'plan_digest', 'approved_plan_digest', 'dag_file', 'created_at', 'timestamp', 'started_at', 'ended_at', 'pid', 'pgid', 'leader_start', 'skill_commit', 'at', 'duration_ms', 'event_id']);
+function normal(v, root) {
+  if (Array.isArray(v)) return v.map(x => normal(x, root));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, VOLATILE.has(k) ? '<v>' : normal(x, root)]));
+  return typeof v === 'string' ? v.split(root).join('<root>').replace(/sha256:[0-9a-f]{64}/g, '<sha256>').replace(/att-[0-9a-f-]{36}/g, '<att>').replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, '<ts>') : v;
+}
+
+test('R15 flag off, byte replay: v1 and v5 (pinned, GitHub origin) runs give the same state, events, outputs and engine log on origin/main\'s engine and this one', { skip: WIN_SKIP }, (t) => {
+  const mainCli = mainEngine(t);
+  if (mainCli === null) { t.skip('origin/main is not in this checkout: the replay needs the pre-S-28a engine and runs locally'); return; }
+  for (const pinned of [false, true]) {
+    const scenario = (cli) => {
+      const fx = fixture(t, { commit: true, config: { width: 1, base: 'main', testCommands: PROOF, ...(pinned ? { pinnedBase: { remote: 'origin' } } : {}) },
+        behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+      const o = withOrigin(fx, { github: 'acme/app' });
+      o.feature();
+      const run = (cmd, flags = {}) => spawnSync(process.execPath, [cli, ...cmd.split(' '), '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1',
+        ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { encoding: 'utf8', env: fx.env, timeout: 60000 });
+      let n = 0;
+      const gate = (kind, input) => { const f = join(fx.root, `in-${++n}.json`); writeFileSync(f, JSON.stringify(input)); return run(`gate ${kind}`, { input: f }); };
+      const outs = [];
+      const step = (r) => { assert.ok([0, 2].includes(r.status), r.stdout + r.stderr); outs.push(JSON.parse(r.stdout)); };
+      step(run('init', { dag: fx.dagFile }));
+      step(run('drive'));
+      step(gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
+      step(run('drive'));
+      step(gate('review', confirmReview('rx-1', fx.candidate())));
+      step(gate('ship-ready', {}));
+      step(run('status'));
+      return { outs: normal(outs, fx.root), state: normal(fx.readState(), fx.root), log: normal(readFileSync(fx.engineLog(), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)), fx.root) };
+    };
+    const before = scenario(mainCli), after = scenario(join(SCRIPTS, 'run-engine.mjs'));
+    assert.equal(after.outs.at(-2).code, 'ship_ready', `the replay reaches SHIP_READY (pinned ${pinned})`);
+    assert.deepEqual(after.outs, before.outs, `command outputs, status included (pinned ${pinned})`);
+    assert.deepEqual(after.state, before.state, `state (pinned ${pinned})`);
+    assert.deepEqual(after.log, before.log, `engine log (pinned ${pinned})`);
+    assert.equal(after.state.policy_version, pinned ? 5 : 1);
+  }
 });

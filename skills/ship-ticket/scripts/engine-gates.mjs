@@ -377,6 +377,13 @@ async function shipReadyGate(E, input, candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
     }
+    // S-28a Round 1: ...and the identity and the base must still hold: a proof command can re-point the remote or move the local
+    // base, and no gate follows ship-ready, so they are read again before SHIP_READY binds them
+    const idProof = idShip && identityStage(E, 'ship-ready');
+    if (idProof && !idProof.ok) {
+      S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [idProof.code] };
+      return idProof;
+    }
     // ...and the security decision must still hold: a proof command can rewrite the installed catalog or append
     // RUN-STATE lines, so the security context is re-derived and shipSecurityRefusal plus the obligation-matrix check
     // rerun before anything binds.

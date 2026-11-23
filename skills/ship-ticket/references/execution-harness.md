@@ -404,25 +404,27 @@ Limits:
 defaulted, bound by the DAG digest) requires `config.pinnedBase`. It binds the run to ONE GitHub
 repository, trust on first use at `init`. The identity of record is `S.base.{ remote, identity }`,
 and no other key holds it. `init` refuses `identity_unbound`, writing nothing, when the remote names
-no GitHub repository (a local path or another host). Otherwise it records an `IDENTITY_BOUND` event
+no repository on github.com: a local path, another host (`gitlab.com`), or a port (`github.com:8443`). The
+check is S-28a's own (`githubUrl` in `engine-identity.mjs`); `repositoryOf`, which flag-off runs use, is unchanged. Otherwise it records an `IDENTITY_BOUND` event
 and policy version 9 to 12, which is the pinned version 5 to 8 plus `repoIdentity`. An engine without
 S-28a refuses 9 to 12 with `policy_version_unsupported`, and never reads such a run as a plain pinned
 run.
 
-Each gate re-reads the remote, read-only and hardened, and checks in this order:
+Each gate re-reads the remote, read-only and hardened, and checks in this order. The remote's URL is
+read once: the base is read by the URL whose identity was just checked, never re-read from config.
 
 | Gate | Check, in order | On a pass |
 |---|---|---|
 | `gate reassess` | the identity, first (so nothing is sent to a re-pointed URL), then S-12's base check | as before |
 | `gate review` (original) | the identity, then the remote base against `S.base` (the pin), the merge base, and the local base branch | `S.freeze.base` = the remote head now; `BASE_FROZEN` event |
 | `gate review` (confirmation) | the identity, then the remote base against `S.freeze.base` | nothing new |
-| `gate ship-ready` | the identity, then the remote base against `S.freeze.base`, before the proof runs | `S.ship_ready.base` = the freeze base |
+| `gate ship-ready` | the identity, then the remote base against `S.freeze.base`, before the proof runs and again after it (a proof command can re-point the remote or move the local base; the proof is then dropped) | `S.ship_ready.base` = the freeze base |
 
 The freeze base is exactly `{ remote, identity, ref, sha, merge_base }`. A repair re-freeze keeps
 it. SHIP_READY binds it and does not adopt a head that advanced after the freeze. A RETRY re-freeze
 of the same candidate moves it.
 
-New codes: `identity_changed` (the remote names another repository, or none), `identity_unbound`
+New codes: `identity_changed` (the remote names another repository, another host or a port, or none), `identity_unbound`
 (`init` only) and `identity_state_missing`. The base checks reuse `remote_ambiguous`,
 `base_unverified`, `base_remote_unavailable`, `base_moved_remote` (a rewind below the freeze sha)
 and `base_moved_local`. Every refusal is a judgment point and none latches. The gate records only
@@ -443,6 +445,7 @@ S-28a limits:
   resolved, and the `ls-remote` answer is not attested.
 - A same-user rewrite of `state.json` together with the URL is not caught.
 - Nothing is re-read between two gates, so a change made between gates is caught at the next one.
+  Ship-ready, which no gate follows, reads both again after its proof.
 - Not in S-28a: enrollment, review freshness, the publication/PR half, and a `status` advisory.
   These belong to S-28b and S-14.
 

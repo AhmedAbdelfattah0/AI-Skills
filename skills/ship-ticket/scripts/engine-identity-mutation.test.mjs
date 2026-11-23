@@ -25,24 +25,25 @@ const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
 const TIMEOUT_MS = 10 * 60 * 1000;
 
 const ID = 'ship-ticket/scripts/engine-identity.mjs', GATES = 'ship-ticket/scripts/engine-gates.mjs', ENGINE = 'ship-ticket/scripts/run-engine.mjs';
-const STAGE = '  return underHardenedGit(() => identityRefusal(E, stage) ?? frozenBase(E, stage, RECORDED[stage](E.S)));';
-const skipAt = (s) => `  return underHardenedGit(() => (stage === '${s}' ? null : identityRefusal(E, stage)) ?? frozenBase(E, stage, RECORDED[stage](E.S)));`;
+const SAME = '    if (id.identity && githubUrl(url) && sameRepository(id.identity, { slug: B.identity })) return { ok: true, url };';
+const skipAt = (st) => `    if (stage === '${st}' || (id.identity && githubUrl(url) && sameRepository(id.identity, { slug: B.identity }))) return { ok: true, url };`;
+const VERIFY = '    const v = verifyFrozenBase(E, RECORDED[stage](E.S), id.url);';
 
 /** One guard each: its tag and its exact-once edits ({ file relative to skills/, from, to }). */
 export const IDENTITY_MUTANTS = [
   { tag: 'I1', name: 'reassess: the identity comparison is omitted (a re-pointed origin reassesses)',
     edits: [{ file: GATES, from: "  const idNo = identityRefusal(E, 'reassess');", to: '  const idNo = null;' }] },
-  { tag: 'I2', name: 'review original: the identity comparison is omitted (V-review)', edits: [{ file: ID, from: STAGE, to: skipAt('review') }] },
-  { tag: 'I3', name: 'review confirmation: the identity comparison is omitted', edits: [{ file: ID, from: STAGE, to: skipAt('confirmation') }] },
-  { tag: 'I4', name: 'ship-ready: the identity comparison is omitted (V-ship-ready)', edits: [{ file: ID, from: STAGE, to: skipAt('ship-ready') }] },
+  { tag: 'I2', name: 'review original: the identity comparison is omitted (V-review)', edits: [{ file: ID, from: SAME, to: skipAt('review') }] },
+  { tag: 'I3', name: 'review confirmation: the identity comparison is omitted', edits: [{ file: ID, from: SAME, to: skipAt('confirmation') }] },
+  { tag: 'I4', name: 'ship-ready: the identity comparison is omitted (V-ship-ready)', edits: [{ file: ID, from: SAME, to: skipAt('ship-ready') }] },
   { tag: 'I5', name: 'review original: the freeze base is not recorded', edits: [{ file: GATES, from: '...(idAt ? { base: idAt.base } : {})', to: '' }] },
   { tag: 'I6', name: 'repair re-freeze drops the base, and load accepts a freeze without one',
     edits: [{ file: 'ship-ticket/scripts/engine-attempts.mjs', from: ', ...(S.freeze?.base ? { base: S.freeze.base } : {}) };', to: ' };' },
       { file: ID, from: "  const frozen = S.freeze === null || (exact(S.freeze, 'base,candidate,seq') && wellFormedFreezeBase(S.freeze.base, S.base));", to: '  const frozen = true;' }] },
   { tag: 'I7', name: 'ship-ready verifies against the pin, not the freeze base (a rewind below the freeze passes)',
-    edits: [{ file: ID, from: '  const v = verifyFrozenBase(E, recorded);', to: "  const v = verifyFrozenBase(E, stage === 'ship-ready' ? E.S.base : recorded);" }] },
+    edits: [{ file: ID, from: VERIFY, to: "    const v = verifyFrozenBase(E, stage === 'ship-ready' ? E.S.base : RECORDED[stage](E.S), id.url);" }] },
   { tag: 'I8', name: 'init: a null identity (no GitHub origin) is accepted',
-    edits: [{ file: ENGINE, from: '    if (pin && repoIdentityOn(dag) && pin.base.identity === null)\n', to: '    if (false)\n' }] },
+    edits: [{ file: ENGINE, from: "    if (unbound) throw coded('identity_unbound', unbound);\n", to: '' }] },
   { tag: 'I9', name: 'load: the identity invariant is removed',
     edits: [{ file: ENGINE, from: '      if (repoIdentity !== repoIdentityOn(E.S) || (repoIdentity && !identityStateHolds(E.S)))\n', to: '      if (false)\n' }] },
   { tag: 'I10', name: 'load: any freeze or SHIP_READY base is well-formed', edits: [{ file: ID, from: 'export function wellFormedFreezeBase(B, pin) {\n', to: 'export function wellFormedFreezeBase(B, pin) {\n  return true;\n' }] },
@@ -50,6 +51,25 @@ export const IDENTITY_MUTANTS = [
   { tag: 'I11', name: 'init (HEAD mode): resolveBaseRef reads the local origin/HEAD symref', edits: [{ file: 'ship-ticket/scripts/remote-identity.mjs',
     from: "  const r = authGit(repoRoot, ['ls-remote', '--symref', '--', remote, 'HEAD']);",
     to: "  const l = authGit(repoRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD']); const r = { ...l, stdout: `ref: ${l.stdout.trim().replace('refs/remotes/origin/', 'refs/heads/')}\\tHEAD\\n` };" }] },
+  // ---- Round 1
+  { tag: 'I12', name: 'ship-ready: identity and base are not read again after the proof (a proof command re-points origin)',
+    edits: [{ file: GATES, from: "    const idProof = idShip && identityStage(E, 'ship-ready');", to: '    const idProof = null;' }] },
+  { tag: 'I13', name: 'the base read re-reads the configured URL instead of the identity-checked one',
+    edits: [{ file: ID, from: '    const v = verifyBase(root, { ref: B.ref, remote: url, recorded });', to: '    const v = verifyBase(root, { ref: B.ref, remote: remoteIdentity(root, B.remote).identity?.url, recorded });' }] },
+  { tag: 'I14', name: 'init: another host or a port binds (repositoryOf alone decides)',
+    edits: [{ file: ID, from: '    if (id.ok && id.identity && githubUrl(url) && pinned.identity === id.identity.slug.toLowerCase()) return null;',
+      to: '    if (id.ok && id.identity && pinned.identity === id.identity.slug.toLowerCase()) return null;' }] },
+  { tag: 'I15', name: 'gates: a re-point to the same owner/repo on a port is the same repository',
+    edits: [{ file: ID, from: SAME, to: '    if (id.identity && sameRepository(id.identity, { slug: B.identity })) return { ok: true, url };' }] },
+  { tag: 'I16', name: 'gates: the base is read before the identity (an unreachable re-point reads as offline)',
+    edits: [{ file: ID, from: '    const id = checkedRemote(E, stage);\n    if (!id.ok) return id;\n',
+      to: '    const raw = remoteIdentity(E.ctx.repoRoot, E.S.base.remote).identity?.url, first = verifyFrozenBase(E, RECORDED[stage](E.S), raw);\n    if (raw && !first.ok) return first;\n    const id = checkedRemote(E, stage);\n    if (!id.ok) return id;\n' }] },
+  { tag: 'I17', name: 'ship-ready: a RETRY re-freeze of the same candidate leaves SHIP_READY on the old base (the accepted deviation)',
+    edits: [{ file: GATES, from: '  } else if (v.ok && idShip) S.ship_ready.base = idShip.base;', to: '  }' }] },
+  { tag: 'I18', name: 'base check: a moved merge base (the branch merged the advanced base) is accepted',
+    edits: [{ file: ID, from: '    if (v.base.merge_base !== B.merge_base) return moved(', to: '    if (false) return moved(' }] },
+  { tag: 'I19', name: 'verifyFrozenBase: no strict inputs (a missing freeze base skips the rewind check)',
+    edits: [{ file: ID, from: "  if (!recordOk || !githubUrl(url)) return no('base_unverified',", to: "  if (false) return no('base_unverified'," }] },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];

@@ -41,7 +41,7 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
-import { identityStateHolds } from './engine-identity.mjs';
+import { identityStateHolds, unboundIdentity } from './engine-identity.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -417,9 +417,9 @@ export async function init(ctx) {
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
     const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
-    // S-28a: trust on first use; a repoIdentity run is bound to a GitHub repository, so a remote naming none is refused (nothing written)
-    if (pin && repoIdentityOn(dag) && pin.base.identity === null)
-      throw coded('identity_unbound', `config.repoIdentity binds the run to the GitHub repository its remote ${dag.config.pinnedBase.remote} names, but that remote names none (a local path or another host): configure a GitHub URL, or drop config.repoIdentity`);
+    // S-28a: trust on first use; a repoIdentity run is bound to a repository on github.com (no other host, no port), else refused (nothing written)
+    const unbound = pin && repoIdentityOn(dag) ? unboundIdentity(ctx.repoRoot, dag.config.pinnedBase.remote, pin.base) : null;
+    if (unbound) throw coded('identity_unbound', unbound);
     const testKinds = await bindTestKinds(ctx, dag.config, text, pin ? { base: pin.base, config: dag.config } : null);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
