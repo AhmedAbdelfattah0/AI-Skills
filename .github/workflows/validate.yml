@@ -134,6 +134,8 @@ jobs:
           skills/ship-ticket/scripts/check-pr-scope.test.mjs
           skills/ship-ticket/scripts/engine-base.test.mjs
           skills/ship-ticket/scripts/run-engine-base.test.mjs
+          skills/ship-ticket/scripts/engine-next.test.mjs
+          skills/ship-ticket/scripts/run-engine-next.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
   # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
@@ -179,6 +181,12 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           skills/ship-ticket/scripts/engine-base-mutation.test.mjs
+      - name: Derived next_action guard mutation check (S-14a)
+        env:
+          ENGINE_NEXT_MUTATION: '1'
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/engine-next-mutation.test.mjs
       - name: Measurement event mutation check
         env:
           EVENTS_MUTATION: '1'

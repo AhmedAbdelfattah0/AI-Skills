@@ -31,7 +31,7 @@ import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
   BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, evidenceEntries, flatEntry, baseRef, pinnedBaseOn } from './engine-dag.mjs';
-import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
+import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent, readyNodes, redHolds } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract, testKindsModules, testKindsOn, testKindsStatus } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired, LIVE } from './engine-quiesce.mjs';
@@ -443,7 +443,36 @@ export async function status(ctx) {
   const out = view(E, drift(E, { mutate: false }));
   if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
   if (E.S.base) out.base = baseStatus(E); // S-12: advisory only (never a judgment), and only for a pinned run
-  return out;
+  return Object.assign(out, await nextFacts(E, out)); // S-14a: additive keys, derived after every existing one
+}
+
+/**
+ * S-14a (advisory; engine-next.mjs): next_action, stages, unconsumed_results, unconsumed_complete, ready_work,
+ * ready_work_capacity and liveness, derived on a copy of the state (nothing is written, no existing key changes).
+ * A throw while deriving never fails a working status: it becomes a human stop.
+ */
+async function nextFacts(E, out) {
+  const N = await import('./engine-next.mjs');
+  try {
+    const C = { ...E, S: structuredClone(E.S) };
+    const budget = budgetVerdict(C), c = baseCandidate(C.ctx.repoRoot, C.S, C.S.pinned_exclusions);
+    const ext = { unbound: verifyBinding(C), blockers: out.judgments, redPending: out.red_pending, unitReviewsPending: out.unit_reviews_pending ?? [],
+      work: Object.values(C.S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || C.S.repairs.some(r => r.state === 'pending' && r.kind !== 'review') || unitWork(C),
+      budgetStop: Boolean(budget && !budget.dispatch_allowed), ready: readyNodes(C, { red: (n) => redHolds(C, n) }),
+      candidate: { id: c.candidate_id ?? null, reason: c.reason ?? null } };
+    const g = await N.gather(C, ext);
+    return { ...N.derive(C.S, g.f), unconsumed_results: g.unconsumed_results, unconsumed_complete: g.unconsumed_complete, ...N.readyWork(C.S, ext), liveness: g.liveness };
+  } catch (e) {
+    return { next_action: N.underivedNext(e), stages: {}, unconsumed_results: [], unconsumed_complete: false, ready_work: [], ready_work_capacity: 'unknown', liveness: [] };
+  }
+}
+
+/** S-14a: the stdout answer when `status` cannot load the state (the CLI still exits 1 with its stderr line). */
+export async function statusFailure(ctx, e) {
+  const N = await import('./engine-next.mjs');
+  let raw = null;
+  try { raw = JSON.parse(readFileSync(locate(ctx).state, 'utf8')); } catch { /* corrupt or absent: no run semantics */ }
+  return { schema: STATUS_SCHEMA, ticket: ctx.ticket, run_id: ctx.runId, next_action: N.failedNext(e, raw) };
 }
 
 
@@ -727,7 +756,8 @@ async function main(argv) {
   if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
-  const commands = { init, status, drive, resume,
+  const commands = { init, drive, resume,
+    status: () => status(ctx).catch(async (e) => { e.statusFailure = await statusFailure(ctx, e).catch(() => null); throw e; }),
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
@@ -746,5 +776,8 @@ if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true))) process.exitCode = 2;
-  }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
+  }).catch(e => {
+    if (e?.statusFailure) process.stdout.write(JSON.stringify(e.statusFailure, null, 2) + '\n'); // S-14a: FAIL JSON, exit 1 kept
+    process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1;
+  });
 }

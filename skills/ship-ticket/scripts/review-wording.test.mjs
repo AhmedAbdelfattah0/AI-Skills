@@ -232,3 +232,20 @@ test('P7m: test-kinds.md carries the verbatim L-ran claim, the declaration how-t
   assert.ok(tk.includes('`test_kinds_needs_security_policy` (`scripts/run-engine.mjs:382`) applies only after those pass.'));
   assert.ok(tk.includes('the Linux vector is moot while the evidence channel is darwin-only'));
 });
+
+test('S-14a: the advisory next_action and the FR-1b failure classes are pinned in execution-harness.md', () => {
+  const exh = ref('execution-harness.md').replace(/\s+/g, ' ');
+  for (const pinned of [
+    'No gate, carrier or command reads it: the gates stay the enforcement, and a gate refusal always wins over it.',
+    'Progress never yields: an orchestrator- or engine-owned BLOCKED is owed work.',
+    'A human-owned action is never READY.',
+    'after SHIP_READY the answer is WAIT_FOR_USER `owner_publish`.',
+    'Any other load refusal, or malformed JSON, is FAILED, `turn_end` FAIL, never COMPLETE.',
+    'never a second dispatch',
+    'It is never bypassed, and no fallback is offered.',
+    'An unavailable verification is never skipped.',
+    'This is the only class whose fallback is offered, and only through the owner, never as CONTINUE.',
+    'The engine never derives FALSE_POSITIVE',
+    'A fallback never fabricates Engine-bound evidence. The ELEVATED rule above takes precedence',
+  ]) assert.ok(exh.includes(pinned), pinned);
+});

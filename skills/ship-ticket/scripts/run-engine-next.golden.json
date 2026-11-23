@@ -1,0 +1,148 @@
+{
+  "after_init": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+      "a": {
+        "state": "pending",
+        "attempts": 0,
+        "retries": 0
+      },
+      "b": {
+        "state": "pending",
+        "attempts": 0,
+        "retries": 0
+      }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+      "prove_repair_batches": 0,
+      "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+  },
+  "after_drive": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+      "a": {
+        "state": "done",
+        "attempts": 1,
+        "retries": 0
+      },
+      "b": {
+        "state": "done",
+        "attempts": 1,
+        "retries": 0
+      }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+      "prove_repair_batches": 0,
+      "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+  },
+  "node_failed": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+      "a": {
+        "state": "failed",
+        "attempts": 2,
+        "retries": 1
+      },
+      "b": {
+        "state": "pending",
+        "attempts": 0,
+        "retries": 0
+      }
+    },
+    "repairs": [],
+    "judgments": [
+      {
+        "code": "node_failed",
+        "node": "a",
+        "reason": "provider error (exit 3)"
+      }
+    ],
+    "rounds": {
+      "prove_repair_batches": 0,
+      "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+  },
+  "red_spec_changed": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+      "a": {
+        "state": "done",
+        "attempts": 0,
+        "retries": 0
+      },
+      "b": {
+        "state": "pending",
+        "attempts": 0,
+        "retries": 0
+      }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+      "prove_repair_batches": 0,
+      "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+  },
+  "after_review_pass": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+      "a": {
+        "state": "done",
+        "attempts": 1,
+        "retries": 0
+      },
+      "b": {
+        "state": "done",
+        "attempts": 1,
+        "retries": 0
+      }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+      "prove_repair_batches": 0,
+      "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+  }
+}

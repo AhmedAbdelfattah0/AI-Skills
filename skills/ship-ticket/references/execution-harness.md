@@ -275,6 +275,59 @@ are refused, never dropped.
 `status` prints the compact `ship-ticket-engine-status-v1` view, including
 `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `truncated_outputs` only when an attempt's output passed the capture cap (below).
 
+**Next action (S-14a; advisory).** `status` also derives, after every key above and on a copy of
+the state (it writes nothing, takes no lock and adds no state, event, policy row or flag), one
+`next_action` `{schema: ship-ticket-engine-next-v1, stage, disposition, turn_end, action, owner, executor,
+code, reasons, rule, failure_class, fallback, detail}` (`scripts/engine-next.mjs`). No gate, carrier or
+command reads it: the gates stay the enforcement, and a gate refusal always wins over it.
+- **Stages, in order:** APPROVAL, BUILD, FREEZE, REVIEW, RECONCILE, REPAIR, CONFIRMATION, SHIP_READY,
+  PUBLISH, CI, ELIGIBILITY, MERGE, POST_MERGE. The first stage that is not COMPLETED is current, and
+  every later one is BLOCKED `prerequisite_open` (`stages` lists one disposition per stage). FREEZE is
+  COMPLETED `freeze_at_review_gate` until the original `gate review` takes the freeze with its record,
+  so the first review's dispatch and gate stay under REVIEW. PUBLISH to POST_MERGE belong to the owner:
+  after SHIP_READY the answer is WAIT_FOR_USER `owner_publish`.
+- **Dispositions:** READY, RUNNING, WAITING, BLOCKED, NEEDS_APPROVAL, COMPLETED, FAILED.
+  `turn_end` is WAIT_FOR_USER for NEEDS_APPROVAL and for a BLOCKED the human owns, FAIL for FAILED,
+  COMPLETE for COMPLETED, and CONTINUE otherwise. Progress never yields: an orchestrator- or
+  engine-owned BLOCKED is owed work. The action fixes the owner (`human`, `orchestrator` or `engine`). A human-owned action
+  is never READY. `executor` is reserved (null).
+- **No usable state:** `no_state` is READY `init`. Any other load refusal, or malformed JSON, is
+  FAILED, `turn_end` FAIL, never COMPLETE. The CLI still exits 1 with its `run-engine: ...` line and
+  prints `{schema, ticket, run_id, next_action}` on stdout.
+- **C1 facts:** `unconsumed_results` lists an attempt envelope on disk whose attempt is still live
+  (action `resume`) and a review result bound at dispatch (`run-log.mjs start --carrier-result`) that is
+  on disk with no `review_chain` record of its execution and kind (action `gate_review`, with its path,
+  never a second dispatch). `unconsumed_complete` is false when the run log is unreadable, too large or
+  damaged. `ready_work` lists the nodes `drive` could start (`fits: false` when a resource is held), pending
+  repairs, `red_pending` and pending unit reviews; it is empty under a budget stop
+  (`ready_work_capacity: budget_stop`). `liveness` is verified, never asserted: `alive` only when the
+  recorded pid answers with the recorded start time; a gone process or a different start time
+  (`pid_reused`) is `dead`. Anything unprovable is `unknown`, including an orchestrator-dispatched
+  reviewer (`no_pid_recorded`). An alive process may still be hung.
+
+**Failure classes (FR-1b).** A `next_action` caused by an engine-check refusal or judgment carries
+`failure_class`. Work outcomes such as `node_failed`, a review FAIL verdict or an input the
+orchestrator corrects carry null. The orchestrator corrects such an input once; the same refusal
+again for the same candidate is the owner's.
+- **SECURITY_GATE_FAILURE** (assurance and integrity gates: security policy and obligations, RED,
+  test kinds including their parser refusals, a stale candidate, post-freeze drift, quiescence, the
+  pinned base and repository identity): the owner decides. It is never bypassed, and no fallback is offered.
+- **APPROVAL_OR_OWNERSHIP_FAILURE** (the approval binding, RETRY and waiver authority, write ownership,
+  repair and round limits, budget, billing): WAIT_FOR_USER to reapprove, retry or decide. No fallback is offered.
+- **ENGINE_FAILURE**, verification unavailable (the remote base, the candidate, git): recover, then run
+  the gate again. Refused twice in a row at the same gate, it is the owner's. An unavailable
+  verification is never skipped.
+- **ENGINE_FAILURE**, install or lock (`policy_version_unsupported`, `legacy_state`, `lock_malformed`,
+  `lock_foreign_host`, a launcher spawn failure): recover (reinstall the recorded `skill_commit`, recover
+  the lock), else WAIT_FOR_USER `authorize_fallback` with `fallback.missing_guarantees`. This is the only
+  class whose fallback is offered, and only through the owner, never as CONTINUE.
+- **UNKNOWN_FAILURE**: every unlisted code and every uncoded throw. WAIT_FOR_USER `owner_decide`.
+- The engine never derives FALSE_POSITIVE: it cannot tell its own misreading from a real refusal, so
+  that is an owner determination, and a parser refusal stays in its gate class. A fallback never
+  fabricates Engine-bound evidence. The ELEVATED rule above takes precedence: on an ELEVATED or
+  security-sensitive run, falling back is WAIT_FOR_USER at fallback time. Recording a fallback and
+  executing the alternative (FR-1c) belong to S-23.
+
 **Approval binding.** `init` recomputes the plan narrative digest (the plan
 file with the text between the RUN-STATE markers removed) and requires it to
 equal `approved_plan_digest` of this run's START event. The DAG file's digest

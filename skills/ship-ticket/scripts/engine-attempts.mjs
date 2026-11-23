@@ -378,6 +378,20 @@ function fits(E, n, running) {
 }
 
 /**
+ * The readiness test of `dispatchNodes`, extracted unchanged (S-14a): pending or stale, not running, in the --until scope,
+ * every dependency done (a dependency of another unit verified) and `red(n)`. Dispatch passes the RED barrier `redReady`
+ * (which invalidates RED that no longer binds); `status` passes the read-only `redHolds`. Budget and resource fit stay the caller's.
+ */
+export function readyNodes(E, { running = new Set(), limit = scope(E.S, E.ctx.until), red }) {
+  const states = stateMemo(E);
+  return Object.values(E.S.nodes).filter(n => ['pending', 'stale'].includes(n.state) && !running.has(n.id)
+    && (!limit || limit.has(n.id)) && n.deps.every(d => depDone(E, n, d, states)) && red(n));
+}
+
+/** Read-only RED barrier (S-14a status): every RED-bearing dependency has accepted RED that still binds; nothing is invalidated. */
+export const redHolds = (E, n) => n.deps.every(d => !E.S.nodes[d].redSpecs.length || (Boolean(E.S.gates.red[d]) && !redChanges(E, E.S.gates.red[d])));
+
+/**
  * Continuous dispatch of ready nodes (deps done, a dependency of another unit verified, valid RED
  * for RED-bearing deps, budget admitted) until nothing more can start. While `hold()` (unit checks
  * are ready) no new node starts; once nothing runs, `onIdle` (the unit checks) runs, and when it
@@ -393,9 +407,7 @@ export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
   try {
     for (;;) {
       if (!failure && !stop && !S.judgments.length && !hold?.()) {
-        const states = stateMemo(E);
-        const ready = Object.values(S.nodes).filter(n => ['pending', 'stale'].includes(n.state) && !running.has(n.id)
-          && (!limit || limit.has(n.id)) && n.deps.every(d => depDone(E, n, d, states)) && redReady(E, n, transient));
+        const ready = readyNodes(E, { running, limit, red: (n) => redReady(E, n, transient) });
         for (const n of ready) {
           if (!budgetOk(E, transient, n.phase)) { stop = true; break; }
           if (!fits(E, n, running.keys())) continue;

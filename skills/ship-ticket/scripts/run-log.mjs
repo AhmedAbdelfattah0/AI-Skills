@@ -13,7 +13,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
-import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
+import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, REVIEW_ROLE_OF, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
 import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents, readLog } from './measure/events.mjs';
 import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
 import { AUTH_SUBDIR, appendPreflight, commonLogDir, dirPreflight, isReservedTicket, labelLegacyRun, legacyLogDirs, legacyPresent, ownLogDir,
@@ -925,6 +925,45 @@ export function integritySummary(repo, ticket) {
       loss_records: read.lost.loss_records, future_history: futureRuns([rows]),
       abandoned_runs: runs.filter((r) => r.abandoned).length, partial_legacy_runs: runs.filter((r) => r.partial_legacy).length, legacy_present: legacy };
   } catch (error) { return { unavailable: error.message.split('\n')[0] }; }
+}
+
+/** S-14a: the most shared-log bytes `reviewStarts` reads; a larger log is reported incomplete, never truncated silently. */
+export const REVIEW_STARTS_MAX_BYTES = 16 * 1024 * 1024;
+const REVIEW_STARTS_ROLES = new Set(['primary', 'second_opinion', 'confirmation']);
+
+/**
+ * S-14a (read-only; run-engine.mjs status through engine-next.mjs): the review activity starts of run `runId` in the shared
+ * log, each `{ event_id, name, role, review_execution, candidate_id, started_at, result_path, ended, ended_at }`, plus
+ * `ceilings` (each REVIEW phase start's metrics by review_execution). `result_path` is the S5 carrier binding, kept only when
+ * it binds the start's own candidate_id and review_execution (else null: an unbound file is never a result). Reads through the
+ * same validating row parser as `summary`; `complete` is false when the log is unreadable, over REVIEW_STARTS_MAX_BYTES, or has
+ * a line or pairing warning that could belong to this run (never "nothing owed" from a damaged log). Never throws, writes nothing.
+ */
+export function reviewStarts(repo, ticket, runId, { maxBytes = REVIEW_STARTS_MAX_BYTES } = {}) {
+  const none = (complete) => ({ complete, starts: [], ceilings: {} });
+  let path, bytes;
+  try {
+    if (typeof ticket !== 'string' || !SAFE_ID.test(ticket)) return none(false);
+    path = logPath(commonLogDir(repo), ticket);
+    if (!existsSync(path)) return none(true);
+    bytes = readFileSync(path);
+  } catch { return none(false); }
+  if (bytes.length > maxBytes) return none(false);
+  const { rows, warnings } = rowsFromText(bytes.toString('utf8'), path);
+  const mine = rows.filter((r) => r.run_id === runId);
+  const ceilings = {};
+  for (const r of mine) if (r.event === 'start' && r.kind === 'phase' && r.name === 'REVIEW' && typeof r.metrics.review_execution === 'string') ceilings[r.metrics.review_execution] = r.metrics;
+  const ends = new Map(mine.filter((r) => r.event === 'end').map((r) => [r.event_id, r]));
+  const starts = [];
+  for (const r of mine) {
+    const role = r.kind === 'activity' && r.event === 'start' ? REVIEW_ROLE_OF[r.name] : undefined;
+    if (!REVIEW_STARTS_ROLES.has(role) || typeof r.metrics.review_execution !== 'string') continue;
+    const b = r.carrier_binding;
+    const bound = b && typeof b.result_path === 'string' && b.candidate_id === r.metrics.candidate_id && b.review_execution === r.metrics.review_execution;
+    starts.push({ event_id: r.event_id, name: r.name, role, review_execution: r.metrics.review_execution, candidate_id: r.metrics.candidate_id ?? null,
+      started_at: r.timestamp, result_path: bound ? b.result_path : null, ended: ends.has(r.event_id), ended_at: ends.get(r.event_id)?.timestamp ?? null });
+  }
+  return { complete: !warnings.some((w) => w.run_id === undefined || w.run_id === runId), starts, ceilings };
 }
 
 /**
