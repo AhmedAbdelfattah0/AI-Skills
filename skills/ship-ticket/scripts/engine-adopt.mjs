@@ -15,7 +15,8 @@
  * the RED node's own writes: an edited spec is a RED question, not a re-build.
  *
  * Not adopted (R5): review chain, freeze, repairs, security state, test-kinds records, unit evidence and usage rows. Runs with
- * units are refused (`adopt_units_unsupported`). Cross-plan adoption is refused. 13b (RED on a moved base) is not here.
+ * units are refused (`adopt_units_unsupported`). Cross-plan adoption is refused. Under config.repoIdentity (S-28a) adoption from
+ * a run bound to another repository is refused (`adopt_identity_mismatch`, R14); S.base is never adopted. 13b (RED on a moved base) is not here.
  */
 import { lstatSync, readFileSync, realpathSync, mkdirSync, renameSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, isAbsolute, sep } from 'node:path';
@@ -167,6 +168,11 @@ export function sourceRefusal(ss, newS, engine = null) {
   if (oldS.plan_digest !== newS.plan_digest) return { code: 'adopt_plan_mismatch', reason: `archived plan digest ${oldS.plan_digest} is not this run's ${newS.plan_digest} (cross-plan adoption is refused)` };
   if (semanticsKey(oldP.semantics) !== semanticsKey(newP.semantics))
     return { code: 'adopt_policy_mismatch', reason: `archived policy_version ${oldP.version} and this run's ${newP.version} differ in semantics other than ${OWN_FLAGS.join(', ')}` };
+  // R14 (S-28a): a run bound to a repository identity adopts only work of that repository. The adopting run's flag decides (a
+  // flag-off run is unchanged, even when its S.base names a repository); an archive that names no identity is not refused (R3).
+  const oldId = oldS.base?.identity;
+  if (newP.semantics.repoIdentity === true && typeof oldId === 'string' && oldId !== newS.base?.identity)
+    return { code: 'adopt_identity_mismatch', reason: `the archived run is bound to repository ${oldId}, this run to ${newS.base?.identity ?? 'none'}: adoption across repositories is refused` };
   if (withUnits(oldS) || withUnits(newS)) return { code: 'adopt_units_unsupported', reason: 'adoption does not cover runs with units (their evidence bindings are not adopted)' };
   // the independence class: records the old run derived from its execution history that a fresh run would not re-derive
   if (ss.latch) return { code: 'adopt_reapproval_pending', reason: 'the archived run is latched on a security REAPPROVAL: re-plan and re-approve; its work is not adopted' };

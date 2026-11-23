@@ -562,8 +562,10 @@ untrusted even when its own observation never finished; a source without a compl
 `adopt_source_unobserved`. Whole refusals (exit 1, nothing written): `--from` not a run archive directly under `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/` after resolving symlinks (`adopt_source_outside`); a
 manifest or file that does not verify (`adopt_archive_invalid`); a live or unretired archived attempt (`adopt_source_live`); a
 different plan digest (`adopt_plan_mismatch`: cross-plan adoption is refused); policy semantics that differ other than the
-pinned base and the repository identity flag (`adopt_policy_mismatch`; the identity-equality check itself arrives with S-28a,
-R14); units on either side (`adopt_units_unsupported`); a latched security REAPPROVAL (`adopt_reapproval_pending`); an
+pinned base and the repository identity flag (`adopt_policy_mismatch`); under `config.repoIdentity`, an archived run whose
+`S.base` names another repository than this run's (`adopt_identity_mismatch`, R14; an archive naming none is adopted, and a
+flag-off run never gets this refusal). Adoption never touches `S.base`, the `IDENTITY_BOUND` note or a freeze base, so every
+later identity check of the adopting run is unchanged; units on either side (`adopt_units_unsupported`); a latched security REAPPROVAL (`adopt_reapproval_pending`); an
 outstanding archived judgment as `status` would compute it: stored judgments, failed nodes and repairs, refused RED re-runs and
 security judgments (`adopt_source_judged`); a RUN-STATE line this run trusts that the archived run saw appear while
 its work could run (`adopt_authority_untrusted`). The binding of the new run (narrative, START and DAG bytes) is re-verified

@@ -1,5 +1,5 @@
 /**
- * S-13a (ASTF-7): every adoption guard has a named mutant (PLAN-S13 §5, D1-D12; Round 1 repair D13-D17; attempt 2 D18-D22), on the ONE shared harness
+ * S-13a (ASTF-7): every adoption guard has a named mutant (PLAN-S13 §5, D1-D12; Round 1 repair D13-D17; attempt 2 D18-D22; R14 D23), on the ONE shared harness
  * (lib/mutation.test-helper.mjs: CRLF-safe anchors, a kill only when every failure is an assertion). Each mutant copies skills/
  * with ONE exact-once replacement and runs only the tests of its target file tagged with its own tag; the unpatched copy (the
  * control) must pass every tagged test of both files, or the verdicts would say nothing. Runs with ENGINE_MUTATION=1 or
@@ -69,7 +69,9 @@ export const ADOPT_MUTANTS = [
   { tag: 'D21', test: PURE, name: 'latest-state check dropped (a superseded retire archive is final)', file: ADOPT,
     from: '    if (isObj(st) && st.run_id === src.state.run_id && Number(st.seq ?? 0) > Number(src.state.seq ?? 0)) return no(', to: '    if (false) return no(' },
   { tag: 'D22', test: PURE, name: 'stored judgments only (failed nodes, failed repairs, invalid RED, security judgments ignored)', file: ADOPT,
-    from: 'export function computedJudgments(S) {\n  return [...(S.judgments ?? []),', to: 'export function computedJudgments(S) {\n  return [...(S.judgments ?? [])];\n  return [...(S.judgments ?? []),' },
+    from: 'export function computedJudgments(S) {\n  return [...(S.judgments ?? []),', to: 'export function computedJudgments(S) {\n  return [...(S.judgments ?? [])];\n  return [...(S.judgments ?? []),' },  // Merge with S-28a (R14): repository identity equality
+  { tag: 'D23', test: PURE, name: 'repository identity check dropped (a repoIdentity run adopts work of another repository)', file: ADOPT,
+    from: "oldId !== newS.base?.identity)", to: "false)" },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];

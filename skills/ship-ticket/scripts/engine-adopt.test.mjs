@@ -182,6 +182,21 @@ test('[D3] [D10] source refusals: plan digest, live attempts, semantics, units, 
   assert.throws(() => refusal(archived(GRAPH(), { policy_version: 99 }), fresh()), (e) => e.code === 'policy_version_unsupported');
 });
 
+test('[D23] R14 repository identity: a repoIdentity run refuses an archive bound to another repository; the flag off is unchanged', () => {
+  const base = (identity) => ({ base: { remote: 'origin', identity, ref: 'main', sha: 'b'.repeat(40), merge_base: 'b'.repeat(40) } });
+  const A = 'github.com/acme/app', B = 'github.com/evil/other';
+  const r = refusal(archived(GRAPH(), { policy_version: 9, ...base(A) }), fresh(GRAPH(), { policy_version: 9, ...base(B) }));
+  assert.equal(r?.code, 'adopt_identity_mismatch');
+  assert.match(r.reason, /github\.com\/acme\/app.*github\.com\/evil\/other/);
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 9, ...base(A) }), fresh(GRAPH(), { policy_version: 9, ...base(A) })), null, 'same repository adopts');
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 5, ...base(A) }), fresh(GRAPH(), { policy_version: 9, ...base(A) })), null, 'a flag-off archive of the same repository adopts (R3)');
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 5, ...base(B) }), fresh(GRAPH(), { policy_version: 9, ...base(A) }))?.code, 'adopt_identity_mismatch',
+    'a flag-off archive that names another repository is refused by a run that binds one');
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 5, ...base(null) }), fresh(GRAPH(), { policy_version: 9, ...base(A) })), null, 'an archive naming no repository is not refused');
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 9, ...base(B) }), fresh(GRAPH(), { policy_version: 5, ...base(A) })), null,
+    'flag off on the adopting run: unchanged (no identity refusal), even when both S.base name repositories');
+});
+
 test('applyAdoption: adopted nodes done with archived fps and provenance, RED carried verbatim, one ADOPTED note, judgments recorded', () => {
   const s = fresh(), old = archived();
   const v = run(old, s, world({ changedFps: ['src/web-ui.txt'] }));

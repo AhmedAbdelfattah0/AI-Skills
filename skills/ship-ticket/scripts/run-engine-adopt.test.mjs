@@ -7,7 +7,7 @@
  * fingerprints, RED evidence carried verbatim, an ADOPTED engine note) or nothing (a whole refusal throws, exit 1). A RED that
  * cannot be carried is the human-owned judgment `adopt_red_unverified` (exit 2), and `drive` then dispatches nothing.
  * Refusals: adopt_refused, adoption_window_closed, adopt_source_outside, adopt_archive_invalid, adopt_source_live,
- * adopt_plan_mismatch, adopt_policy_mismatch, adopt_units_unsupported; archive --retire: retire_live_attempts, retire_mismatch.
+ * adopt_plan_mismatch, adopt_policy_mismatch, adopt_identity_mismatch (R14), adopt_units_unsupported; archive --retire: retire_live_attempts, retire_mismatch.
  * Tags [D#] name the mutant of engine-adopt-mutation.test.mjs each test kills.
  */
 import test from 'node:test';
@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { POSIX, fixture, narrativeDigest, passReview, primaryReview } from './engine-test-fixture.mjs';
+import { POSIX, fixture, withOrigin, narrativeDigest, passReview, primaryReview } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 import { archive, gate } from './run-engine.mjs';
 
@@ -376,6 +376,78 @@ test('[D19] retire finishes the observation a crash left unfinished: a planted f
     const a = adoptCli(fx, r.out.archive);
     if (plant) refused(a, 'adopt_authority_untrusted'); else ok(a, 'the owner START appended after retire is trusted by the archive too');
   }
+});
+
+// ------------------------------------------------------------------ R14: S-28a repository identity (config.repoIdentity)
+
+/** Run 1 to completion on a GitHub-shaped origin (acme/app), bound to it at init (S-28a), on a ticket branch made from it. */
+function identityRun(t) {
+  const fx = fixture(t, { commit: true, nodes: ARC_NODES, behaviour: ARC_BEHAVIOUR,
+    config: { base: 'main', testCommands: { unit: TAP }, timeoutMs: WORKER_FAILURE_BOUND_MS, pinnedBase: { remote: 'origin' }, repoIdentity: true } });
+  const o = withOrigin(fx, { github: 'acme/app' });
+  o.feature();
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  fx.cli('drive');
+  ok(fx.gate('red', { node: 'api-red', command: 'unit' }));
+  const d = fx.cli('drive');
+  ok(d);
+  assert.equal(d.out.outcome, 'done', JSON.stringify(d.out.judgments));
+  assert.equal(fx.readState().base.identity, 'github.com/acme/app');
+  return { fx, o };
+}
+const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.url));
+/** The candidate measured from the run's pinned merge base (what the engine computes under a pinned base). */
+function pinnedCandidate(fx) {
+  const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', fx.repo, '--base', fx.readState().base.merge_base,
+    '--exclude', '.specs/plans/T-1.md', '--exclude', 'session-log.md'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout).candidate_id;
+}
+
+test('[R14] an adopted repoIdentity run keeps its own identity records, and its review still refuses a re-pointed origin', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = identityRun(t);
+  const dir = retireAndStart(fx);
+  const pre = fx.readState();
+  assert.equal(pre.policy_version, 9);
+  const a = adoptCli(fx, dir);
+  ok(a);
+  assert.equal(a.out.outcome, 'adopted');
+  assert.deepEqual(a.out.adoption.adopted, ['api-impl', 'api-red', 'web-red', 'web-state', 'web-ui']);
+  const S = fx.readState();
+  assert.deepEqual(S.base, pre.base, 'adoption never touches the run\'s base of record');
+  assert.equal(S.base.identity, 'github.com/acme/app');
+  assert.equal(S.policy_version, 9);
+  assert.deepEqual(S.events.filter(e => e.type === 'IDENTITY_BOUND').map(({ remote, identity }) => ({ remote, identity })), [{ remote: 'origin', identity: 'github.com/acme/app' }]);
+  assert.equal(S.freeze, null, 'no freeze (nor its base) is adopted');
+  const before = fx.runs().length;
+  const d = fx.cli('drive', {}, R2);
+  ok(d, 'the identity load invariant holds after adoption');
+  assert.equal(d.out.outcome, 'done');
+  assert.equal(fx.runs().length, before, 'no builder re-dispatched');
+  const cand = pinnedCandidate(fx);
+  const review = () => fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { reviewer_identity: 'gemini:pro' }) }), R2);
+  o.repoint('evil/other');
+  const r = review();
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(r.out?.code, 'identity_changed', r.stdout);
+  assert.equal(fx.readState().freeze, null, 'nothing frozen under a re-pointed origin');
+  o.git('remote', 'set-url', 'origin', o.ghUrl('acme/app'));
+  const back = review();
+  assert.equal(back.out?.code, 'review_accepted', back.stdout + back.stderr);
+  assert.equal(fx.readState().freeze?.base?.identity, 'github.com/acme/app', 'restored, the original freezes the bound base');
+});
+
+test('[R14] a repoIdentity run refuses to adopt the archive of a run bound to another repository (adopt_identity_mismatch), nothing written', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = identityRun(t);
+  const r = fx.cli('archive', { retire: 'true' });
+  ok(r);
+  o.repoint('acme/fork'); // the same bytes served under another repository: run 2 binds github.com/acme/fork at init
+  newStart(fx);
+  ok(fx.cli('init', { dag: fx.dagFile }, R2));
+  assert.equal(fx.readState().base.identity, 'github.com/acme/fork');
+  const before = digest(fx.stateFile());
+  refused(adoptCli(fx, r.out.archive), 'adopt_identity_mismatch');
+  assert.equal(digest(fx.stateFile()), before);
 });
 
 /**
