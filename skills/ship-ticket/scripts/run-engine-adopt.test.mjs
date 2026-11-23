@@ -12,7 +12,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, cpSync, appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, cpSync, appendFileSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { POSIX, fixture, narrativeDigest, passReview, primaryReview } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
-import { archive } from './run-engine.mjs';
+import { archive, gate } from './run-engine.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups';
 const ENGINE = pathToFileURL(fileURLToPath(new URL('./run-engine.mjs', import.meta.url))).href;
@@ -223,7 +223,7 @@ test('crash: a kill before the atomic rename leaves nothing; a kill after it lea
   refused(adoptCli(fx, dir), 'adoption_window_closed'); // the stale lock of the killed process is recovered first
 });
 
-test('[D10] [D11] source refusals through the CLI: a LIVE archived attempt, a path outside the archive root, a missing --from', { skip: WIN_SKIP }, (t) => {
+test('[D11] source refusals through the CLI: a doctored LIVE copy, a path outside the archive root, a missing --from', { skip: WIN_SKIP }, (t) => {
   const fx = completedRun(t);
   const dir = retireAndStart(fx);
   const live = join(dir, '..', 'run-1-8');
@@ -235,7 +235,7 @@ test('[D10] [D11] source refusals through the CLI: a LIVE archived attempt, a pa
   const m = JSON.parse(readFileSync(join(live, 'manifest.json'), 'utf8'));
   m.files['state.json'] = sha(bytes);
   writeFileSync(join(live, 'manifest.json'), JSON.stringify(m));
-  refused(adoptCli(fx, live), 'adopt_source_live');
+  refused(adoptCli(fx, live), 'adopt_source_not_final'); // a doctored copy is no retire archive (adopt_source_live is pinned by the pure D10 test)
   const outside = mkdtempSync(join(tmpdir(), 'adopt-outside-'));
   t.after(() => rmSync(outside, { recursive: true, force: true }));
   cpSync(dir, outside, { recursive: true });
@@ -345,4 +345,86 @@ test('[D13] [AC2] the approval leg: a narrative or DAG changed after init refuse
   assert.equal(digest(fx.stateFile()), before);
   writeFileSync(fx.planFile, plan);
   ok(adoptCli(fx, dir), 'restored bytes adopt');
+});
+
+// ------------------------------------------------------------------ Attempt 2 (Codex R2 MAJOR, Opus R2 minors): final and observed sources only
+
+const startLine = (fx, runId, timestamp) => ({ run_id: runId, event: 'START', timestamp, approved_plan_digest: narrativeDigest(readFileSync(fx.planFile, 'utf8')) });
+
+test('[D20] only the final retire archive is a source: an earlier plain archive of the same run is adopt_source_not_final', { skip: WIN_SKIP }, (t) => {
+  const fx = completedRun(t);
+  const early = fx.cli('archive');
+  ok(early);
+  const dir = retireAndStart(fx);
+  refused(adoptCli(fx, early.out.archive), 'adopt_source_not_final');
+  ok(adoptCli(fx, dir));
+});
+
+test('[D19] retire finishes the observation a crash left unfinished: a planted future START is untrusted in the archive and refuses adoption; an honest run adopts', { skip: WIN_SKIP }, (t) => {
+  for (const plant of [true, false]) {
+    const fx = completedRun(t);
+    // a crash after a quiescent commit and before the final observe(): attempts recorded, `through` not advanced
+    fx.editState((s) => { s.authority.through = 0; });
+    if (plant) fx.appendRunState(startLine(fx, 'run-2', '2026-11-05T00:00:01Z')); // dispatched code wrote it; no observation has seen it
+    const r = fx.cli('archive', { retire: 'true' });
+    ok(r);
+    const A = archivedState(r.out.archive).authority;
+    assert.equal(A.through, archivedState(r.out.archive).attempts.length, 'retire observed before archiving');
+    assert.equal(A.untrusted.some(u => JSON.parse(u.line).run_id === 'run-2'), plant);
+    fx.appendRunState(startLine(fx, 'run-2', '2026-11-05T00:00:02Z')); // the owner's START, after quiescence
+    ok(fx.cli('init', { dag: fx.dagFile }, R2));
+    const a = adoptCli(fx, r.out.archive);
+    if (plant) refused(a, 'adopt_authority_untrusted'); else ok(a, 'the owner START appended after retire is trusted by the archive too');
+  }
+});
+
+/**
+ * A RED spec that, when the runner imports it, plants a START of run 2 inside RUN-STATE (once) and fails on an assertion: dispatched
+ * repository code that no ownership check attributes, the same class as the proof runner of gate ship-ready.
+ */
+const PLANTING_SPEC = (plan, line) => `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFileSync, writeFileSync } from 'node:fs';
+const t = readFileSync(${JSON.stringify(plan)}, 'utf8');
+if (!t.includes('2026-11-05T00:00:01Z')) writeFileSync(${JSON.stringify(plan)}, t.replace('<!-- RUN-STATE:END -->', ${JSON.stringify(line)} + '\\n<!-- RUN-STATE:END -->'));
+test('fails on assertion', () => { assert.equal(1, 2); });\n`;
+
+test('[PROPERTY] kill at every engine boundary of gate red whose runner plants a future START: after recovery adoption is always refused', { skip: WIN_SKIP, timeout: 20 * 60 * 1000 }, async (t) => {
+  const world = () => {
+    const fx = fixture(t, { commit: true, config: { testCommands: { unit: { ...TAP, args: ['--test', '--test-reporter=tap', 'spec/plant.test.mjs'] } }, timeoutMs: WORKER_FAILURE_BOUND_MS },
+      nodes: [{ id: 'r', writes: ['src/r.txt'], redSpecs: [{ file: 'spec/plant.test.mjs', name: 'fails on assertion' }] }], behaviour: { r: { write: { 'src/r.txt': 'r1' } } } });
+    mkdirSync(join(fx.repo, 'spec'), { recursive: true });
+    writeFileSync(join(fx.repo, 'spec', 'plant.test.mjs'), PLANTING_SPEC(fx.planFile, JSON.stringify(startLine(fx, 'run-2', '2026-11-05T00:00:01Z'))));
+    ok(fx.cli('init', { dag: fx.dagFile }));
+    ok(fx.cli('drive'));
+    return fx;
+  };
+  // reference: every boundary hit of an uncrashed gate red, by name and ordinal
+  const ref = world(), points = [], seen = {};
+  const v = await gate(ref.ctx({ gate: 'red', input: { node: 'r', command: 'unit' }, hooks: { boundary: async (name) => { seen[name] = (seen[name] ?? 0) + 1; points.push([name, seen[name]]); } } }));
+  assert.equal(v.code, 'red_accepted', JSON.stringify(v));
+  assert.ok(points.length >= 4, JSON.stringify(points));
+  const rows = [];
+  for (const [name, nth] of points) {
+    const fx = world();
+    const code = `const job = JSON.parse(process.argv.at(-1));
+const { writeFileSync } = await import('node:fs');
+const { gate } = await import(job.engine);
+let n = 0;
+const hooks = { boundary: async (name) => { if (name !== job.name || ++n !== job.nth) return; writeFileSync(job.marker, name); process.kill(process.pid, 'SIGKILL'); await new Promise(() => {}); } };
+await gate({ repoRoot: job.repo, ticket: 'T-1', runId: 'run-1', env: process.env, handleSignals: false, hooks, gate: 'red', input: { node: 'r', command: 'unit' } });`;
+    const k = spawnSync(process.execPath, ['--input-type=module', '-e', code, JSON.stringify({ engine: ENGINE, repo: fx.repo, name, nth, marker: join(fx.root, 'killed') })], { env: fx.env, encoding: 'utf8' });
+    assert.equal(k.signal, 'SIGKILL', `${name}[${nth}]: ${k.stderr}`);
+    // recovery as an orchestrator does it: retire; when an attempt is still unsettled, resume first
+    let r = fx.cli('archive', { retire: 'true' });
+    if (r.status !== 0) { assert.match(r.stderr, /retire_live_attempts/, `${name}[${nth}] ${r.stderr}`); fx.cli('resume'); r = fx.cli('archive', { retire: 'true' }); }
+    ok(r, `${name}[${nth}]`);
+    const planted = readFileSync(fx.planFile, 'utf8').includes('2026-11-05T00:00:01Z');
+    fx.appendRunState(startLine(fx, 'run-2', '2026-11-05T00:00:02Z'));
+    ok(fx.cli('init', { dag: fx.dagFile }, R2));
+    const a = adoptCli(fx, r.out.archive);
+    rows.push({ at: `${name}[${nth}]`, planted, status: a.status, code: /run-engine: (\w+)/.exec(a.stderr)?.[1] ?? null });
+    if (planted) assert.equal(a.status, 1, `${name}[${nth}]: adoption with a planted START must be refused: ${a.stdout}${a.stderr}`);
+    if (planted) assert.match(a.stderr, /adopt_authority_untrusted|adopt_source_judged/, `${name}[${nth}]`);
+  }
+  t.diagnostic(JSON.stringify(rows));
+  assert.ok(rows.some(r => r.planted && r.code === 'adopt_authority_untrusted'), `the untrusted path is exercised: ${JSON.stringify(rows)}`);
 });

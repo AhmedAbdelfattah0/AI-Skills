@@ -40,7 +40,7 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion } from './engine-policy.mjs';
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
-import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive } from './engine-adopt.mjs';
+import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
@@ -629,6 +629,9 @@ export async function archive(ctx) {
     if (runId !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${runId}, not ${ctx.runId}`);
     const busy = ctx.retire ? retireRefusal(raw) : null;
     if (busy) throw coded('retire_live_attempts', busy);
+    // retire finishes the RUN-STATE observation first and persists it, so the archived (final) state has classified every line
+    const authorityPresent = ctx.retire ? retireObserve(raw, io.readIfExists(E.P.plan), E.alive) : null;
+    if (ctx.retire) await io.writeStateAtomic(E.P.state, raw, { hooks: ctx.hooks, fs: ctx.fs, platform: ctx.platform });
     const base = join(io.commonGitDir(ctx.repoRoot), 'ai-skills', 'ship-ticket', 'archive', ctx.ticket);
     mkdirSync(base, { recursive: true });
     let n = readdirSync(base).filter(d => d.startsWith(ctx.runId + '-') && /^\d+$/.test(d.slice(ctx.runId.length + 1))).length + 1, dir;
@@ -647,7 +650,8 @@ export async function archive(ctx) {
       renameSync(stage, dir);
     } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
     if (!ctx.retire) return { archive: dir, files };
-    const retired = await retireLive({ dir, files, sources: { 'state.json': E.P.state, 'engine.jsonl': E.P.log, 'usage.jsonl': E.P.usage }, hooks: ctx.hooks });
+    const retired = await retireLive({ dir, files, sources: { 'state.json': E.P.state, 'engine.jsonl': E.P.log, 'usage.jsonl': E.P.usage }, hooks: ctx.hooks,
+      record: { run_id: runId, final_seq: raw.seq, authority_present: authorityPresent } });
     return { archive: dir, files, retired };
   }, { load: false });
 }
@@ -670,10 +674,11 @@ export async function adopt(ctx) {
     const closed = windowRefusal(E.S);
     if (closed) throw coded('adoption_window_closed', `${closed}: adoption happens once, right after init`);
     const src = readArchive(ctx.from, { root: archiveRoot(ctx.repoRoot, ctx.ticket), ticket: ctx.ticket, runId: ctx.runId });
-    const no = sourceRefusal(src.state, E.S, ctx.policy);
+    const ss = sourceState(src, { planText: io.readIfExists(E.P.plan), isAlive: E.alive, final: archiveFinality(src) });
+    const no = sourceRefusal(ss, E.S, ctx.policy);
     if (no) throw coded(no.code, no.reason);
-    const v = adoptable({ newS: E.S, oldS: src.state, fingerprints: (paths) => io.fingerprints(ctx.repoRoot, paths), redChanges: (ev) => redChanges(E, ev) });
-    applyAdoption(E.S, src, v);
+    const v = adoptable({ newS: E.S, oldS: ss.state, fingerprints: (paths) => io.fingerprints(ctx.repoRoot, paths), redChanges: (ev) => redChanges(E, ev) });
+    applyAdoption(E.S, src, v, ss.roster);
     const out = view(E);
     return { ...out, adoption: { from: src.dir, from_run: src.state.run_id, adopted: v.adopted, rejected: v.rejected, red_carried: Object.keys(v.red).sort() },
       outcome: v.judgments.length ? 'judgment' : 'adopted' };

@@ -15,7 +15,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { adoptable, sourceRefusal, windowRefusal, readArchive, applyAdoption, retireRefusal, ADOPT_NODE_FIELDS } from './engine-adopt.mjs';
+import { adoptable, sourceRefusal, sourceState, archiveFinality, computedJudgments, windowRefusal, readArchive, applyAdoption, retireRefusal, ADOPT_NODE_FIELDS } from './engine-adopt.mjs';
+import { BEGIN, END } from './engine-test-fixture.mjs';
 
 const LINK_SKIP = process.platform === 'win32' ? 'symlinks need a privilege on Windows' : false;
 const sha = (b) => 'sha256:' + createHash('sha256').update(b).digest('hex');
@@ -32,7 +33,7 @@ const EV = { node: 'api-red', attempt_id: 'gr-1', seq: 7, format: 'tap', baselin
 function archived(nodes = GRAPH(), over = {}) {
   return { schema: 'ship-ticket-engine-state-v1', ticket: 'T-1', run_id: 'run-1', plan_digest: 'sha256:plan', config: { testCommands: RUNNER },
     nodes: Object.fromEntries(nodes.map(n => [n.id, { ...n, state: 'done', attempts: 1, retries: 0, fps: fpsOf(n) }])),
-    attempts: [{ attempt_id: 'w1', status: 'exited', quiesced: true }], gates: { red: { 'api-red': structuredClone(EV) } }, events: [], judgments: [], usage: [], ...over };
+    attempts: [{ attempt_id: 'w1', status: 'exited', quiesced: true }], authority: { through: 1, trusted: [], untrusted: [] }, gates: { red: { 'api-red': structuredClone(EV) } }, events: [], judgments: [], usage: [], ...over };
 }
 function fresh(nodes = GRAPH(), over = {}) {
   return { schema: 'ship-ticket-engine-state-v1', ticket: 'T-1', run_id: 'run-2', plan_digest: 'sha256:plan', config: { testCommands: RUNNER }, seq: 0,
@@ -43,6 +44,10 @@ function fresh(nodes = GRAPH(), over = {}) {
 const world = ({ changedFps = [], red = () => null } = {}) => ({
   fingerprints: (paths) => Object.fromEntries(paths.map(p => [p, changedFps.includes(p) ? 'fp:edited' : `fp:${p}`])), redChanges: red });
 const run = (oldS, newS, w = world()) => adoptable({ oldS, newS, ...w });
+/** A source that is a final retire archive whose observation was complete (archive --retire true), unless `final` says otherwise. */
+const FINAL = { ok: true, authority_present: true };
+const ss = (old, { final = FINAL, planText = '' } = {}) => sourceState({ state: old }, { planText, isAlive: () => false, final });
+const refusal = (old, newS, opts) => sourceRefusal(ss(old, opts), newS);
 const codeOf = (v, id) => v.rejected.find(r => r.node === id)?.code;
 
 test('[AC1] unchanged ARC-shaped run: every node adopted, api-red RED carried verbatim', () => {
@@ -164,17 +169,17 @@ test('[D7] the adoption window: only a run with no attempts, every node pending,
 });
 
 test('[D3] [D10] source refusals: plan digest, live attempts, semantics, units, unsupported policy', () => {
-  assert.equal(sourceRefusal(archived(), fresh()), null);
-  assert.equal(sourceRefusal(archived(), fresh(GRAPH(), { plan_digest: 'sha256:other' }))?.code, 'adopt_plan_mismatch');
+  assert.equal(refusal(archived(), fresh()), null);
+  assert.equal(refusal(archived(), fresh(GRAPH(), { plan_digest: 'sha256:other' }))?.code, 'adopt_plan_mismatch');
   for (const status of ['intent', 'launched', 'running', 'unknown'])
-    assert.equal(sourceRefusal(archived(GRAPH(), { attempts: [{ attempt_id: 'w', status }] }), fresh())?.code, 'adopt_source_live', status);
-  assert.equal(sourceRefusal(archived(GRAPH(), { attempts: [{ attempt_id: 'w', status: 'exited' }] }), fresh())?.code, 'adopt_source_live', 'unretired (no quiesced) counts as live');
-  assert.equal(sourceRefusal(archived(GRAPH(), { policy_version: 2 }), fresh())?.code, 'adopt_policy_mismatch', 'test kinds on one side only');
-  assert.equal(sourceRefusal(archived(), fresh(GRAPH(), { policy_version: 5 })), null, 'pinnedBase alone is not a semantics mismatch (R3)');
-  assert.equal(sourceRefusal(archived(GRAPH(), { policy_version: 7 }), fresh(GRAPH(), { policy_version: 3 })), null);
-  assert.equal(sourceRefusal(archived(GRAPH(), { unit_checks: {} }), fresh())?.code, 'adopt_units_unsupported');
-  assert.equal(sourceRefusal(archived(GRAPH().map(n => ({ ...n, unit: 'u' }))), fresh())?.code, 'adopt_units_unsupported');
-  assert.throws(() => sourceRefusal(archived(GRAPH(), { policy_version: 99 }), fresh()), (e) => e.code === 'policy_version_unsupported');
+    assert.equal(refusal(archived(GRAPH(), { attempts: [{ attempt_id: 'w', status }] }), fresh())?.code, 'adopt_source_live', status);
+  assert.equal(refusal(archived(GRAPH(), { attempts: [{ attempt_id: 'w', status: 'exited' }] }), fresh())?.code, 'adopt_source_live', 'unretired (no quiesced) counts as live');
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 2 }), fresh())?.code, 'adopt_policy_mismatch', 'test kinds on one side only');
+  assert.equal(refusal(archived(), fresh(GRAPH(), { policy_version: 5 })), null, 'pinnedBase alone is not a semantics mismatch (R3)');
+  assert.equal(refusal(archived(GRAPH(), { policy_version: 7 }), fresh(GRAPH(), { policy_version: 3 })), null);
+  assert.equal(refusal(archived(GRAPH(), { unit_checks: {} }), fresh())?.code, 'adopt_units_unsupported');
+  assert.equal(refusal(archived(GRAPH().map(n => ({ ...n, unit: 'u' }))), fresh())?.code, 'adopt_units_unsupported');
+  assert.throws(() => refusal(archived(GRAPH(), { policy_version: 99 }), fresh()), (e) => e.code === 'policy_version_unsupported');
 });
 
 test('applyAdoption: adopted nodes done with archived fps and provenance, RED carried verbatim, one ADOPTED note, judgments recorded', () => {
@@ -294,13 +299,13 @@ test('[D14] applyAdoption carries the archived builder roster (every builder, re
 });
 
 test('[D15] [D16] [D17] source refusals of the independence class: a latched REAPPROVAL, an outstanding judgment, a trusted line the archive found untrusted', () => {
-  assert.equal(sourceRefusal(archived(GRAPH(), { security: { reapproval: { candidate_id: 'c' } } }), fresh())?.code, 'adopt_reapproval_pending');
-  assert.equal(sourceRefusal(archived(GRAPH(), { security: { reapproval: null } }), fresh()), null);
-  assert.equal(sourceRefusal(archived(GRAPH(), { judgments: [{ code: 'ownership_violation', node: 'web-ui', reason: 'x' }] }), fresh())?.code, 'adopt_source_judged');
+  assert.equal(refusal(archived(GRAPH(), { security: { reapproval: { candidate_id: 'c' } } }), fresh())?.code, 'adopt_reapproval_pending');
+  assert.equal(refusal(archived(GRAPH(), { security: { reapproval: null } }), fresh()), null);
+  assert.equal(refusal(archived(GRAPH(), { judgments: [{ code: 'ownership_violation', node: 'web-ui', reason: 'x' }] }), fresh())?.code, 'adopt_source_judged');
   const line = JSON.stringify({ run_id: 'run-2', event: 'START', approved_plan_digest: 'sha256:plan' });
   const planted = archived(GRAPH(), { authority: { through: 1, trusted: [], untrusted: [{ line, seq: 4 }] } });
-  assert.equal(sourceRefusal(planted, fresh(GRAPH(), { authority: { through: 0, trusted: [line], untrusted: [] } }))?.code, 'adopt_authority_untrusted');
-  assert.equal(sourceRefusal(planted, fresh(GRAPH(), { authority: { through: 0, trusted: ['{"event":"START","run_id":"run-2","x":1}'], untrusted: [] } })), null);
+  assert.equal(refusal(planted, fresh(GRAPH(), { authority: { through: 0, trusted: [line], untrusted: [] } }))?.code, 'adopt_authority_untrusted');
+  assert.equal(refusal(planted, fresh(GRAPH(), { authority: { through: 0, trusted: ['{"event":"START","run_id":"run-2","x":1}'], untrusted: [] } })), null);
 });
 
 test('node definition compare also covers acceptance and checks (the builder brief and unit checks)', () => {
@@ -312,4 +317,81 @@ test('the RED judgment names a fresh run as the clearing path (a second adopt is
   const v = run(archived(), fresh(), world({ red: () => ({ changed: ['spec/api.test.mjs'], moved: false }) }));
   assert.match(v.judgments[0].reason, /start a fresh run/);
   assert.doesNotMatch(v.judgments[0].reason, /adopt again/);
+});
+
+// ------------------------------------------------------------------ Attempt 2: final, observed sources; computed judgments
+
+const PLANTED = JSON.stringify({ run_id: 'run-2', event: 'START', timestamp: '2026-11-05T00:00:01Z', approved_plan_digest: 'sha256:plan' });
+const OWNER = JSON.stringify({ run_id: 'run-2', event: 'START', timestamp: '2026-11-05T00:00:02Z', approved_plan_digest: 'sha256:plan' });
+const planWith = (...lines) => `# Plan\n\nApproved narrative.\n\n${BEGIN}\n${lines.join('\n')}\n${END}\n`;
+
+test('[D18] observation is finished BEFORE any check: a crash left through=0 behind one quiescent attempt, the planted future START is untrusted', () => {
+  // Codex R2: the proof runner's quiescent commit landed, the final observe() did not: no untrusted line recorded yet
+  const old = archived(GRAPH(), { authority: { through: 0, trusted: [], untrusted: [] } });
+  const s = ss(old, { planText: planWith(PLANTED) });
+  assert.ok(s.untrusted.has(PLANTED), 'the re-observation classifies the line that appeared while work could run');
+  assert.equal(s.observed, true, 'and completes cleanly (nothing may run)');
+  assert.equal(sourceRefusal(s, fresh(GRAPH(), { authority: { through: 0, trusted: [PLANTED, OWNER], untrusted: [] } }))?.code, 'adopt_authority_untrusted');
+  assert.equal(old.authority.untrusted.length, 0, 'sourceState observes a copy, never the archived object');
+});
+
+test('[D19] [D20] a source is adoptable only when final (retire) and observed: else adopt_source_not_final / adopt_source_unobserved', () => {
+  assert.equal(refusal(archived(), fresh(), { final: { ok: false, reason: 'not a retire archive' } })?.code, 'adopt_source_not_final');
+  assert.equal(refusal(archived(), fresh(), { final: { ok: true, authority_present: false } })?.code, 'adopt_source_unobserved', 'a legacy state had no authority record before retire');
+  assert.equal(refusal(archived(GRAPH(), { authority: undefined }), fresh())?.code, 'adopt_source_unobserved');
+  assert.equal(refusal(archived(), fresh()), null);
+});
+
+test('[D22] the judgment gate is the COMPUTED view: a failed node, a failed repair, an invalid RED and a security judgment refuse, not only stored judgments', () => {
+  const cases = {
+    node_failed: (o) => { o.nodes['web-ui'].state = 'failed'; },
+    repair_failed: (o) => { o.repairs = [{ id: 'r1', kind: 'review', state: 'failed', reason: 'x' }]; },
+    red_invalidated: (o) => { o.gates.red_invalid = { 'api-red': { changed: ['spec/api.test.mjs'], base_moved: false, rerun: { ok: false, attempt_id: 'g', code: 'spec_not_failing', reasons: ['passes'] } } }; },
+    addendum_conflict_or_latch: (o) => { o.config.securityPolicy = 2; o.security = { reapproval: null }; o.authority.trusted = []; },
+  };
+  for (const [name, edit] of Object.entries(cases)) {
+    const old = archived();
+    edit(old);
+    assert.deepEqual(old.judgments, [], `${name}: nothing stored`);
+    if (name === 'addendum_conflict_or_latch') { assert.equal(refusal(old, fresh()), null, 'security on with no security judgment is no refusal'); continue; }
+    assert.equal(refusal(old, fresh())?.code, 'adopt_source_judged', name);
+    assert.ok(computedJudgments(old).some(j => j.code === name), name);
+  }
+});
+
+function finalTree(t) {
+  const top = realpathSync(mkdtempSync(join(tmpdir(), 'adopt-final-')));
+  t.after(() => rmSync(top, { recursive: true, force: true }));
+  const root = join(top, 'T-1');
+  const put = (name, state, { retire = false, recordSeq } = {}) => {
+    const dir = join(root, name), bytes = Buffer.from(JSON.stringify(state));
+    mkdirSync(join(dir, 'retired'), { recursive: true });
+    writeFileSync(join(dir, 'state.json'), bytes);
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ ticket: 'T-1', run_id: state.run_id, archived_at: '2026-11-23T00:00:00.000Z', files: { 'state.json': sha(bytes) } }));
+    if (retire) {
+      writeFileSync(join(dir, 'retired', 'state.json'), bytes);
+      writeFileSync(join(dir, 'retired', 'retire.json'), JSON.stringify({ retired: true, run_id: state.run_id, final_seq: recordSeq ?? state.seq, state_sha256: sha(bytes), authority_present: true }));
+    }
+    return dir;
+  };
+  return { root, put };
+}
+
+test('[D20] [D21] archiveFinality: only the latest retire archive of its run is final (earlier, non-retire, split-retire and superseded archives are not)', (t) => {
+  const { root, put } = finalTree(t);
+  const final = (dir) => archiveFinality(readArchive(dir, { root, ticket: 'T-1', runId: 'run-2' }));
+  const early = put('run-1-1', archived(GRAPH(), { seq: 5 }));
+  const last = put('run-1-2', archived(GRAPH(), { seq: 9 }), { retire: true });
+  assert.equal(final(early).ok, false, 'a plain archive is not a retire archive');
+  assert.deepEqual(final(last), { ok: true, authority_present: true });
+  const wrongSeq = put('run-1-3', archived(GRAPH(), { seq: 3 }), { retire: true, recordSeq: 4 });
+  assert.equal(final(wrongSeq).ok, false, 'the retire record must name the archived seq');
+  rmSync(join(wrongSeq), { recursive: true });
+  const later = put('run-1-4', archived(GRAPH(), { seq: 12 }));
+  assert.equal(final(last).ok, false, 'a later state of the same run exists: the retire archive is not the latest');
+  rmSync(later, { recursive: true });
+  put('other-1', archived(GRAPH(), { run_id: 'other', seq: 99 }));
+  assert.equal(final(last).ok, true, 'another run never supersedes it');
+  rmSync(join(last, 'retired', 'state.json'));
+  assert.equal(final(last).ok, false, 'the retired state itself must be there (a retire that crashed before renaming it)');
 });

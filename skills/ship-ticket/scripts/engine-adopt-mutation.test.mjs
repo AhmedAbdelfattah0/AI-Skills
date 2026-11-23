@@ -1,5 +1,5 @@
 /**
- * S-13a (ASTF-7): every adoption guard has a named mutant (PLAN-S13 §5, D1-D12; Round 1 repair D13-D17), on the ONE shared harness
+ * S-13a (ASTF-7): every adoption guard has a named mutant (PLAN-S13 §5, D1-D12; Round 1 repair D13-D17; attempt 2 D18-D22), on the ONE shared harness
  * (lib/mutation.test-helper.mjs: CRLF-safe anchors, a kill only when every failure is an assertion). Each mutant copies skills/
  * with ONE exact-once replacement and runs only the tests of its target file tagged with its own tag; the unpatched copy (the
  * control) must pass every tagged test of both files, or the verdicts would say nothing. Runs with ENGINE_MUTATION=1 or
@@ -43,7 +43,7 @@ export const ADOPT_MUTANTS = [
   { tag: 'D9', test: PURE, name: 'a non-done archived node adopted', file: ADOPT,
     from: "    if (o.state !== 'done') { verdict[id] = { code: 'node_not_done' }; continue; }", to: '' },
   { tag: 'D10', test: PURE, name: 'a LIVE source ignored', file: ADOPT,
-    from: "  if (live.length) return { code: 'adopt_source_live',", to: "  if (false) return { code: 'adopt_source_live'," },
+    from: "  if (ss.live.length) return { code: 'adopt_source_live',", to: "  if (false) return { code: 'adopt_source_live'," },
   { tag: 'D11', test: PURE, name: 'containment check skipped', file: ADOPT,
     from: "  if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep) || rel.includes(sep)) throw outside(", to: '  if (false) throw outside(' },
   { tag: 'D12', test: CLI, name: 'retire renames on a byte mismatch', file: ADOPT,
@@ -52,13 +52,24 @@ export const ADOPT_MUTANTS = [
   { tag: 'D13', test: CLI, name: 'adopt skips the binding re-check (a narrative or DAG changed after init is adopted)', file: ENGINE,
     from: "    if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));\n    const closed = windowRefusal(E.S);", to: '    const closed = windowRefusal(E.S);' },
   { tag: 'D14', test: PURE, name: 'the archived builder roster is dropped (an original builder reviews its adopted outputs)', file: ADOPT,
-    from: '  for (const b of src.state.builders ?? []) if (isObj(b)', to: '  for (const b of []) if (isObj(b)' },
+    from: '  for (const b of roster) if (isObj(b)', to: '  for (const b of []) if (isObj(b)' },
   { tag: 'D15', test: PURE, name: 'a latched security REAPPROVAL is adopted past', file: ADOPT,
-    from: '  if (oldS.security?.reapproval) return', to: '  if (false) return' },
+    from: '  if (ss.latch) return', to: '  if (false) return' },
   { tag: 'D16', test: PURE, name: 'an outstanding archived judgment is adopted past', file: ADOPT,
-    from: '  if ((oldS.judgments ?? []).length) return', to: '  if (false) return' },
+    from: '  if (ss.judgments.length) return', to: '  if (false) return' },
   { tag: 'D17', test: PURE, name: 'a RUN-STATE line the archive found untrusted is trusted by the adopting run', file: ADOPT,
     from: "  if (trusted.length) return { code: 'adopt_authority_untrusted'", to: "  if (false) return { code: 'adopt_authority_untrusted'" },
+  // Attempt 2 (Codex R2 MAJOR, Opus R2 minors): a source is final, observed, and judged by the computed view
+  { tag: 'D18', test: PURE, name: 'adopt does not observe the archived state first (a planted line left unclassified by a crash is trusted)', file: ADOPT,
+    from: '  observeAuthority(S, planText, isAlive);\n  const live = liveAttempts(S);', to: '  const live = liveAttempts(S);' },
+  { tag: 'D19', test: CLI, name: 'retire does not finish the observation before archiving', file: ENGINE,
+    from: '    const authorityPresent = ctx.retire ? retireObserve(raw, io.readIfExists(E.P.plan), E.alive) : null;', to: '    const authorityPresent = ctx.retire ? Boolean(raw.authority) : null;' },
+  { tag: 'D20', test: PURE, name: 'finality dropped (an earlier or plain archive is a source)', file: ADOPT,
+    from: '  if (!ss.final?.ok) return', to: '  if (false) return' },
+  { tag: 'D21', test: PURE, name: 'latest-state check dropped (a superseded retire archive is final)', file: ADOPT,
+    from: '    if (isObj(st) && st.run_id === src.state.run_id && Number(st.seq ?? 0) > Number(src.state.seq ?? 0)) return no(', to: '    if (false) return no(' },
+  { tag: 'D22', test: PURE, name: 'stored judgments only (failed nodes, failed repairs, invalid RED, security judgments ignored)', file: ADOPT,
+    from: 'export function computedJudgments(S) {\n  return [...(S.judgments ?? []),', to: 'export function computedJudgments(S) {\n  return [...(S.judgments ?? [])];\n  return [...(S.judgments ?? []),' },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];

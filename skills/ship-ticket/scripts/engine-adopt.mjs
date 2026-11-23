@@ -17,12 +17,14 @@
  * Not adopted (R5): review chain, freeze, repairs, security state, test-kinds records, unit evidence and usage rows. Runs with
  * units are refused (`adopt_units_unsupported`). Cross-plan adoption is refused. 13b (RED on a moved base) is not here.
  */
-import { lstatSync, readFileSync, realpathSync, mkdirSync, renameSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync, mkdirSync, renameSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, isAbsolute, sep } from 'node:path';
 import * as io from './engine-io.mjs';
 import { closure, coded, judgment, note, isObj, sha } from './engine-dag.mjs';
 import { runPolicy } from './engine-policy.mjs';
 import { LIVE, unretired } from './engine-quiesce.mjs';
+import { observeAuthority } from './engine-authority.mjs';
+import { redInvalidJudgments, securityJudgments } from './engine-gates.mjs';
 
 /**
  * The node definition fields that must be equal for a node to be adopted (AC2 "scope"; promptFile by path, R11). Omitted on
@@ -34,6 +36,8 @@ const ARCHIVE_FILES = ['state.json', 'engine.jsonl', 'usage.jsonl'];
 /** Retire order: the state, the only handle a retry needs and the only thing that blocks `init`, is renamed last. */
 const RETIRE_ORDER = ['engine.jsonl', 'usage.jsonl', 'state.json'];
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** The record `archive --retire` writes into <archive>/retired/ before it renames anything: the one producer of an adoptable source. */
+export const RETIRE_RECORD = 'retire.json';
 
 /** Canonical JSON (object keys sorted at every depth), so key order is never a difference. */
 const canon = (v) => JSON.stringify(v, (k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x)) ?? 'undefined';
@@ -89,7 +93,54 @@ export function readArchive(from, { root, ticket, runId }) {
     || !isObj(state.nodes) || !Array.isArray(state.attempts) || !isObj(state.config))
     throw bad(`state.json is not engine state of ${ticket} run ${m.run_id}`);
   if (state.run_id === runId) throw bad(`the archive is of the adopting run ${runId} itself`);
-  return { dir, manifest: m, manifest_sha256: sha(mbytes), state };
+  return { dir, root: top, manifest: m, manifest_sha256: sha(mbytes), state };
+}
+
+/** Parsed JSON of a regular file, or null. */
+const regularJson = (file) => { const b = regularBytes(file); try { return b === null ? null : JSON.parse(b.toString('utf8')); } catch { return null; } };
+
+/**
+ * Whether archive `src` (readArchive) is FINAL: written by `archive --retire true` (its retire record names this run, the archived
+ * seq and state digest, and the retired state itself is there with those bytes) and the latest state of its run (no other archive
+ * of the same run under the root holds a later seq). Returns { ok: true, authority_present } or { ok: false, reason }.
+ */
+export function archiveFinality(src) {
+  const no = (reason) => ({ ok: false, reason });
+  const rec = regularJson(join(src.dir, 'retired', RETIRE_RECORD)), mine = src.manifest.files['state.json'];
+  const retired = regularBytes(join(src.dir, 'retired', 'state.json'));
+  if (!isObj(rec) || rec.retired !== true || rec.run_id !== src.state.run_id || rec.final_seq !== src.state.seq || rec.state_sha256 !== mine
+    || retired === null || sha(retired) !== mine)
+    return no('is not a completed `archive --retire true` (the one producer of an adoptable source)');
+  for (const d of readdirSync(src.root)) {
+    if (join(src.root, d) === src.dir) continue;
+    const m = regularJson(join(src.root, d, 'manifest.json')), st = m?.run_id === src.state.run_id ? regularJson(join(src.root, d, 'state.json')) : null;
+    if (isObj(st) && st.run_id === src.state.run_id && Number(st.seq ?? 0) > Number(src.state.seq ?? 0)) return no(`is superseded: archive ${d} holds a later state of ${src.state.run_id}`);
+  }
+  return { ok: true, authority_present: rec.authority_present === true };
+}
+
+/** Every judgment a `status` of `S` would show from its own records (not binding drift): stored, failed nodes and repairs, invalid RED, security. */
+export function computedJudgments(S) {
+  return [...(S.judgments ?? []),
+    ...Object.entries(S.nodes ?? {}).filter(([, n]) => n?.state === 'failed').map(([id, n]) => judgment('node_failed', id, n.reason ?? 'terminal failure')),
+    ...(S.repairs ?? []).filter(r => r?.state === 'failed' && r.kind !== 'unit-review').map(r => judgment('repair_failed', r.id, r.reason ?? 'terminal failure')),
+    ...redInvalidJudgments(S), ...securityJudgments(S)];
+}
+
+/**
+ * The ONE view of an archived source every refusal derives from. A copy of the archived state is OBSERVED first against the
+ * current plan (`observeAuthority`), so a line that appeared while its work could run is classified untrusted even when a crash
+ * left that run's own observation unfinished. `final` is archiveFinality(src) (the caller's fs read). Returns
+ * { state, final, observed, judgments, untrusted, latch, roster, live }.
+ */
+export function sourceState(src, { planText, isAlive, final }) {
+  const S = structuredClone(src.state);
+  const recorded = isObj(S.authority);
+  observeAuthority(S, planText, isAlive);
+  const live = liveAttempts(S);
+  return { state: S, final, live, observed: recorded && final?.authority_present === true && !live.length && S.authority.through === S.attempts.length,
+    judgments: computedJudgments(S), untrusted: new Set((S.authority.untrusted ?? []).map(u => u?.line)), latch: Boolean(S.security?.reapproval),
+    roster: structuredClone(S.builders ?? []) };
 }
 
 /** Why the adopting run `S` is no longer adoptable (null when the window is open): adoption happens before any work (R8). */
@@ -104,22 +155,23 @@ export function windowRefusal(S) {
 }
 
 /**
- * A whole refusal of the archived run `oldS` as a source for `newS` ({ code, reason }), or null. Throws
+ * A whole refusal of the archived source `ss` (sourceState) for the adopting run `newS` ({ code, reason }), or null. Throws
  * `policy_version_unsupported` (runPolicy) for a version this engine does not support. `engine` is ctx.policy (tests only).
  */
-export function sourceRefusal(oldS, newS, engine = null) {
+export function sourceRefusal(ss, newS, engine = null) {
+  const oldS = ss.state;
   const oldP = runPolicy(oldS, engine), newP = runPolicy(newS, engine);
-  const live = liveAttempts(oldS);
-  if (live.length) return { code: 'adopt_source_live', reason: `archived attempt(s) ${live.join(', ')} are live or not proven quiescent: resume the old run, then archive it again` };
+  if (!ss.final?.ok) return { code: 'adopt_source_not_final', reason: `the archive ${ss.final?.reason ?? 'is not final'}: adopt only from the last \`archive --retire true\` of the run` };
+  if (ss.live.length) return { code: 'adopt_source_live', reason: `archived attempt(s) ${ss.live.join(', ')} are live or not proven quiescent: resume the old run, then archive it again` };
+  if (!ss.observed) return { code: 'adopt_source_unobserved', reason: 'the archived run\'s RUN-STATE observation is not complete (no authority record before retire, or attempts beyond its observed point)' };
   if (oldS.plan_digest !== newS.plan_digest) return { code: 'adopt_plan_mismatch', reason: `archived plan digest ${oldS.plan_digest} is not this run's ${newS.plan_digest} (cross-plan adoption is refused)` };
   if (semanticsKey(oldP.semantics) !== semanticsKey(newP.semantics))
     return { code: 'adopt_policy_mismatch', reason: `archived policy_version ${oldP.version} and this run's ${newP.version} differ in semantics other than ${OWN_FLAGS.join(', ')}` };
   if (withUnits(oldS) || withUnits(newS)) return { code: 'adopt_units_unsupported', reason: 'adoption does not cover runs with units (their evidence bindings are not adopted)' };
   // the independence class: records the old run derived from its execution history that a fresh run would not re-derive
-  if (oldS.security?.reapproval) return { code: 'adopt_reapproval_pending', reason: 'the archived run is latched on a security REAPPROVAL: re-plan and re-approve; its work is not adopted' };
-  if ((oldS.judgments ?? []).length) return { code: 'adopt_source_judged', reason: `the archived run has outstanding judgment(s) ${oldS.judgments.map(j => j?.code).join(', ')}: resolve them in the old run, then archive it again` };
-  const planted = new Set((oldS.authority?.untrusted ?? []).map(u => u?.line));
-  const trusted = (newS.authority?.trusted ?? []).filter(l => planted.has(l));
+  if (ss.latch) return { code: 'adopt_reapproval_pending', reason: 'the archived run is latched on a security REAPPROVAL: re-plan and re-approve; its work is not adopted' };
+  if (ss.judgments.length) return { code: 'adopt_source_judged', reason: `the archived run has outstanding judgment(s) ${ss.judgments.map(j => j?.code).join(', ')}: resolve them in the old run, then archive it again` };
+  const trusted = (newS.authority?.trusted ?? []).filter(l => ss.untrusted.has(l));
   if (trusted.length) return { code: 'adopt_authority_untrusted', reason: `this run trusts RUN-STATE line(s) the archived run saw appear while its work could run: ${trusted.join(' ')}` };
   return null;
 }
@@ -185,7 +237,7 @@ export function adoptable({ newS, oldS, fingerprints, redChanges }) {
 }
 
 /** Apply verdicts `v` from archive `src` to the adopting state `S` in memory (the caller's one commit persists it, R8). */
-export function applyAdoption(S, src, v) {
+export function applyAdoption(S, src, v, roster = src.state.builders ?? []) {
   const from = { run_id: src.state.run_id, archive: src.dir, manifest_sha256: src.manifest_sha256 };
   for (const id of v.adopted) {
     const o = src.state.nodes[id];
@@ -195,11 +247,22 @@ export function applyAdoption(S, src, v) {
   // Independence (gate.mjs reviewer_is_builder): every archived builder, adopted node or not, repairs included, stays a builder of
   // this run, so a chained adoption carries the roster on; the work tree may hold any of their bytes.
   const known = new Set((S.builders ??= []).map(b => `${b.identity}\u0000${b.node}`));
-  for (const b of src.state.builders ?? []) if (isObj(b) && !known.has(`${b.identity}\u0000${b.node}`)) { known.add(`${b.identity}\u0000${b.node}`); S.builders.push(structuredClone(b)); }
+  for (const b of roster) if (isObj(b) && !known.has(`${b.identity}\u0000${b.node}`)) { known.add(`${b.identity}\u0000${b.node}`); S.builders.push(structuredClone(b)); }
   S.judgments.push(...v.judgments);
   // R10: the archived run's usage stays in its archive; the note is the join key for a cumulative cost
   note(S, 'ADOPTED', { from_run: from.run_id, archive: from.archive, manifest_sha256: from.manifest_sha256, adopted: v.adopted,
     rejected: v.rejected.map(r => ({ node: r.node, code: r.code })), red_carried: Object.keys(v.red).sort(), archived_usage_records: (src.state.usage ?? []).length });
+}
+
+/**
+ * Finish the RUN-STATE observation of the raw live state `S` before it is retired (in place; the caller persists it): a crash
+ * after a quiescent commit and before the final observe() of a command leaves lines unclassified. Returns whether `S` had an
+ * authority record before (a state without one cannot have classified anything and is never an adoptable source).
+ */
+export function retireObserve(S, planText, isAlive) {
+  const recorded = isObj(S.authority);
+  observeAuthority(S, planText, isAlive);
+  return recorded;
 }
 
 /** Why `S` (the raw live state) cannot be retired now (null when quiescent): a live, unknown or unretired attempt (OD-1). */
@@ -213,7 +276,7 @@ export function retireRefusal(S) {
  * file appeared that was not archived), then RENAME (never delete) the live files into <dir>/retired/, the state last. A crash
  * in between leaves the state live (retry: a new archive of what is left) or retired, never neither. Returns the retired names.
  */
-export async function retireLive({ dir, files, sources, hooks }) {
+export async function retireLive({ dir, files, sources, hooks, record }) {
   await io.boundary(hooks, 'retire-check', { dir });
   for (const name of ARCHIVE_FILES) {
     const live = regularBytes(sources[name]), copy = Object.hasOwn(files, name) ? regularBytes(join(dir, name)) : null;
@@ -221,6 +284,8 @@ export async function retireLive({ dir, files, sources, hooks }) {
       throw coded('retire_mismatch', `${name}: the live bytes differ from the archived copy in ${dir}; nothing was retired (archive again)`);
   }
   mkdirSync(join(dir, 'retired'));
+  // written before any rename: a retire record without its retired state is not final (archiveFinality), and the state stays live
+  writeFileSync(join(dir, 'retired', RETIRE_RECORD), JSON.stringify({ retired: true, ...record, state_sha256: files['state.json'] }, null, 2) + '\n');
   const names = RETIRE_ORDER.filter(n => Object.hasOwn(files, n));
   for (const name of names) {
     await io.boundary(hooks, 'retire-rename', { name });
