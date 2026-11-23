@@ -114,6 +114,7 @@ jobs:
           skills/ship-ticket/scripts/ship-ready-check.test.mjs
           skills/ship-ticket/scripts/base-drift.test.mjs
           skills/ship-ticket/scripts/review-wording.test.mjs
+          skills/ship-ticket/scripts/fr4-wording.test.mjs
           skills/ship-ticket/scripts/run-engine-record.test.mjs
           skills/ship-ticket/scripts/run-engine-policy.test.mjs
           skills/ship-ticket/scripts/engine-fixture-warmup.test.mjs
