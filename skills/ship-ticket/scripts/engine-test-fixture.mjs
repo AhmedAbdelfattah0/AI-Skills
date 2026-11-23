@@ -223,16 +223,26 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
  * (never init.defaultBranch), clones it bare to <root>/origin.git as remote `origin` and fetches it. `upstream(n, prefix)`
  * pushes `n` commits (one file each, `<prefix>/f<i>.txt`) to origin from a separate clone, as another developer would;
  * the fixture repo's own refs do not move until `fetch()`. `git(...args)` runs in the fixture repo.
+ *
+ * S-28a: `github: 'owner/repo'` makes origin GitHub-shaped: remote.origin.url is https://github.com/<owner/repo>.git and a
+ * repo-local `url.<bare>.insteadOf` maps it to the local bare, so no network is reached (the technique of commit a890b0d
+ * run-engine-r0s5.test.mjs lines 389-391). `repoint(slug, { reachable })` re-points origin at another GitHub URL, mapped to the
+ * same bare (reachable, the default: the identity is the only difference) or to a path that does not exist.
  */
-export function withOrigin(fx, { branch = 'main' } = {}) {
+export function withOrigin(fx, { branch = 'main', github } = {}) {
   const run = (cwd, ...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd, encoding: 'utf8' });
   const must = (cwd, ...a) => { const r = run(cwd, ...a); assert.equal(r.status, 0, `git ${a.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
   const origin = join(fx.root, 'origin.git'), up = join(fx.root, 'upstream');
+  const ghUrl = (slug) => `https://github.com/${slug}.git`;
   must(fx.repo, 'add', '-A');
   must(fx.repo, 'commit', '-q', '--allow-empty', '-m', 'base');
   must(fx.repo, 'branch', '-M', branch);
   must(fx.root, 'clone', '-q', '--bare', fx.repo, origin);
   must(fx.repo, 'remote', 'add', 'origin', origin);
+  if (github) {
+    must(fx.repo, 'config', '--add', `url.${origin}.insteadOf`, ghUrl(github));
+    must(fx.repo, 'remote', 'set-url', 'origin', ghUrl(github));
+  }
   must(fx.repo, 'fetch', '-q', 'origin');
   must(fx.repo, 'branch', '-q', `--set-upstream-to=origin/${branch}`, branch); // the base branch tracks origin, as a clone's does
   must(fx.root, 'clone', '-q', '--branch', branch, origin, up);
@@ -249,7 +259,83 @@ export function withOrigin(fx, { branch = 'main' } = {}) {
       return must(up, 'rev-parse', 'HEAD');
     },
     /** Rewind origin's branch to `sha` (a force-push below what was pinned). */
-    rewind: (sha) => { must(up, 'push', '-q', '--force', 'origin', `${sha}:refs/heads/${branch}`); } };
+    rewind: (sha) => { must(up, 'push', '-q', '--force', 'origin', `${sha}:refs/heads/${branch}`); },
+    /** S-28a: point remote.origin.url at https://github.com/<slug>.git, mapped to the bare (reachable) or to a missing path. */
+    repoint: (slug, { reachable = true } = {}) => {
+      must(fx.repo, 'config', '--add', `url.${reachable ? origin : join(fx.root, 'nowhere.git')}.insteadOf`, ghUrl(slug));
+      must(fx.repo, 'remote', 'set-url', 'origin', ghUrl(slug));
+    },
+    /**
+     * S-28a attempt 2: a SECOND bare repository at https://github.com/<slug>.git (insteadOf) that is origin PLUS `extra` commits
+     * (shared ancestry), its tip fetched into the fixture repo (every object present), so a read mixing it with origin pins or
+     * verifies its SHAs instead of failing. Does not change remote.origin.url. -> its tip.
+     */
+    evil(slug = 'evil/other', extra = 2) {
+      const bare = join(fx.root, 'evil.git'), work = join(fx.root, 'evil-work');
+      must(fx.root, 'clone', '-q', '--bare', origin, bare);
+      must(fx.root, 'clone', '-q', '--branch', branch, bare, work);
+      for (let i = 0; i < extra; i++) { writeFileSync(join(work, `evil${i}.txt`), `evil ${i}\n`); must(work, 'add', '-A'); must(work, 'commit', '-q', '-m', `evil ${i}`); }
+      must(work, 'push', '-q', 'origin', `HEAD:refs/heads/${branch}`);
+      must(fx.repo, 'config', '--add', `url.${bare}.insteadOf`, ghUrl(slug));
+      must(fx.repo, 'fetch', '-q', bare, `+refs/heads/${branch}:refs/evil/${branch}`);
+      return must(work, 'rev-parse', 'HEAD');
+    },
+    ghUrl };
+}
+
+/**
+ * S-28a attempt 2: a deterministic counting `git` shim, first on fx.env.PATH (the engine CLI and every git it spawns use it; the
+ * test's own git calls do not). Every path is written INTO the script (underHardenedGit strips GIT_* variables). It finds the
+ * subcommand past --options and the -c/-C/--git-dir/--work-tree/--namespace operands, counts each `config` process that names
+ * `remote.` (one line in log), and records each ls-remote's arguments. `flip(n, { key, to, restore })`: on the n-th counted
+ * config process it sets `key` to `to` before running it, and (restore, the default) puts the old value back after it.
+ * POSIX only (callers skip win32).
+ */
+export function withGitShim(fx) {
+  const dir = join(fx.root, 'shim'), real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(real.startsWith('/'), `the real git is found by absolute path: ${real}`);
+  mkdirSync(dir, { recursive: true });
+  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+D=${q(dir)}; REAL=${q(real)}; REPO=${q(fx.repo)}
+sub=''; skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in -c|-C|--git-dir|--work-tree|--namespace) skip=1 ;; -*) ;; *) sub="$a"; break ;; esac
+done
+if [ "$sub" = ls-remote ]; then printf '%s\\n' "$*" >> "$D/ls"; fi
+if [ "$sub" = config ]; then
+  case "$*" in *remote*)
+    n=$(( $(cat "$D/count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/count"; printf '%s %s\\n' "$n" "$*" >> "$D/log"
+    if [ "$n" = "$(cat "$D/flip" 2>/dev/null)" ]; then
+      key=$(cat "$D/key"); old=$("$REAL" -C "$REPO" config --get "$key")
+      "$REAL" -C "$REPO" config "$key" "$(cat "$D/to")"
+      "$REAL" "$@"; rc=$?
+      if [ "$(cat "$D/restore")" = 1 ]; then if [ -n "$old" ]; then "$REAL" -C "$REPO" config "$key" "$old"; else "$REAL" -C "$REPO" config --unset "$key"; fi; fi
+      exit $rc
+    fi ;;
+  esac
+fi
+exec "$REAL" "$@"
+`);
+  chmodSync(join(dir, 'git'), 0o755);
+  const sep = POSIX ? ':' : ';';
+  fx.env.PATH = dir + sep + fx.env.PATH;
+  if (fx.env.Path !== undefined) fx.env.Path = dir + sep + fx.env.Path;
+  const lines = (f) => { try { return readFileSync(join(dir, f), 'utf8').split('\n').filter(Boolean); } catch { return []; } };
+  const shim = {
+    /** Clear the counters and logs, and any flip. */
+    reset: () => { for (const f of ['count', 'log', 'ls', 'flip']) rmSync(join(dir, f), { force: true }); return shim; },
+    flip: (n, { key = 'remote.origin.url', to, restore = true }) => {
+      writeFileSync(join(dir, 'flip'), String(n)); writeFileSync(join(dir, 'key'), key); writeFileSync(join(dir, 'to'), to); writeFileSync(join(dir, 'restore'), restore ? '1' : '0');
+      return shim;
+    },
+    /** The counted remote-config processes since the last reset (their argv). */
+    reads: () => lines('log'),
+    /** The ls-remote argv since the last reset. */
+    lsRemotes: () => lines('ls'),
+  };
+  return shim.reset();
 }
 
 export function spawnSpy() {

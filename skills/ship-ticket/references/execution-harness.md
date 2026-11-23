@@ -392,12 +392,86 @@ Limits:
   `remote set-url` can redirect it.
 - `ls-remote` uses the user's git config and credential helpers. Inherited `GIT_SSH_COMMAND` and
   `GIT_ASKPASS` are not honored for these reads. The hermetic git runner (S-02a0c) is not used yet.
-- The base is checked at `gate reassess` only (and reported by `status`). A pinned run without
-  `config.securityPolicy 2` gets the accessor but no base check.
-- A remote URL re-pointed at another repository mid-run is not detected (`identity_changed` is
-  S-28a). A second URL added mid-run is refused at the next reassess.
+- Without `config.repoIdentity`, the base is checked at `gate reassess` only (and reported by
+  `status`), so a pinned run without `config.securityPolicy 2` gets the accessor but no base check.
+- Without `config.repoIdentity`, a remote URL re-pointed at another repository mid-run is not
+  detected. With it, the URL is `identity_changed` at every gate (below). A second URL added mid-run
+  is refused at the next reassess.
 - `state.json` is same-user writable: a tampered but well-formed `S.base` is trusted.
 - `base-drift.mjs` is unchanged. It is the standalone, advisory local-ref check that the briefs use.
+
+**Repository identity (S-28a, opt-in).** `config.repoIdentity: true` (exactly `true`, never
+defaulted, bound by the DAG digest) requires `config.pinnedBase`. It binds the run to ONE GitHub
+repository, trust on first use at `init`. The identity of record is `S.base.{ remote, identity }`,
+and no other key holds it. Every remote URL value of the run (fetch and push) goes through ONE strict
+parser, `strictGithub` in `github-identity.mjs`. It accepts `https://github.com/<o>/<r>`,
+`ssh://[user@]github.com/<o>/<r>` and `[user@]github.com:<o>/<r>` (optional `.git` and `/`). It refuses
+any other host, any port, plaintext `http://` and `git://`, an https user part (`https://evil.invalid#@github.com/...`
+reaches another host), a user, owner or repo starting with `-`, `.` and `..`, and anything after the repo.
+`repositoryOf`, which runs without the flag use, is unchanged. `init` refuses `identity_unbound`,
+writing nothing, when the remote names no repository on github.com. It refuses `remote_ambiguous` for
+several fetch or push values, or a push value naming another repository. Otherwise it records an `IDENTITY_BOUND` event
+and policy version 9 to 12, which is the pinned version 5 to 8 plus `repoIdentity`. An engine without
+S-28a refuses 9 to 12 with `policy_version_unsupported`, and never reads such a run as a plain pinned
+run.
+
+Each check takes ONE snapshot: the remote's `url` and `pushurl` values from ONE `git config -z
+--get-regexp` process, read-only and hardened. The values are NUL-separated, so a value holding a
+newline cannot forge a key. The remote name is regex-escaped. Every scope counts (system, global,
+local, worktree, `includeIf`), and any git failure is refused. The identity is compared from that
+snapshot, and the base is then read by the snapshot's URL: no consumer re-reads the configured URL.
+Init, reassess, review and confirmation take one snapshot each; ship-ready takes two, one before its
+proof and one after it. The snapshot covers those values only. `ls-remote` is a separate git process
+that reads config itself (`url.*.insteadOf`, `http.*`, `core.sshCommand`). At reassess, S-12's own
+base check (`pinnedBaseRefusal`) runs by the snapshot, so both modes share one base check.
+
+| Gate | Check, in order | On a pass |
+|---|---|---|
+| `gate reassess` | the identity, first (so nothing is sent to a re-pointed URL), then S-12's base check | as before |
+| `gate review` (original) | the identity, then the remote base against `S.base` (the pin), the merge base, and the local base branch | `S.freeze.base` = the remote head now; `BASE_FROZEN` event |
+| `gate review` (confirmation) | the identity, then the remote base against `S.freeze.base` | nothing new |
+| `gate ship-ready` | the identity, then the remote base against `S.freeze.base`, before the proof runs and again after it (a proof command can re-point the remote or move the local base; the proof is then dropped) | `S.ship_ready.base` = the freeze base |
+
+The freeze base is exactly `{ remote, identity, ref, sha, merge_base }`. A repair re-freeze keeps
+it. SHIP_READY binds it and does not adopt a head that advanced after the freeze. A RETRY re-freeze
+of the same candidate moves it.
+
+New codes: `identity_changed` (the remote names another repository, another host or a port, or none), `identity_unbound`
+(`init` only) and `identity_state_missing`. The base checks reuse `remote_ambiguous`,
+`base_unverified`, `base_remote_unavailable`, `base_moved_remote` (a rewind below the freeze sha)
+and `base_moved_local`. Every refusal is a judgment point and none latches. The gate records only
+its `GATE` line: no freeze, SHIP_READY, review record, proof or security record. To recover,
+restore the URL and retry. A `base_moved_remote` after the freeze needs an owner RETRY (the new
+original review freezes the head as it is then). A moved merge base needs a new run.
+
+The load invariant `identity_state_missing` is one-way. The policy flag and `config.repoIdentity`
+must agree, and under the flag `S.base.identity` must be non-null and every non-null freeze and
+SHIP_READY must carry an exact base record. The converse does not hold: a version 5 to 8 run on a
+GitHub origin records an identity too.
+
+With the flag off, the engine behaves as before, byte for byte: no `freeze.base`, no
+`ship_ready.base`, and no identity event. Rollback is the flag.
+
+S-28a limits:
+- The identity is the CONFIGURED URL. The endpoint behind it is not proven: `url.*.insteadOf`
+  applies when `ls-remote` (or a fetch) runs, credential helpers are not checked, and the
+  `ls-remote` answer is not attested.
+- `pushInsteadOf`, `branch.*.pushRemote` and `remote.pushDefault` are not bound. The engine never
+  pushes; binding a push target is S-28b's publication binding.
+- The "one snapshot, nothing is sent to a re-pointed URL" guarantee holds for the GATES (init,
+  reassess, review, confirmation, ship-ready). `status` is an advisory read (OD-10): its `base` block
+  still reads the configured URL. On a run whose origin was re-pointed, it can therefore contact the
+  re-pointed URL and report that remote's head as an advisory. It decides and writes nothing, and
+  the next gate refuses `identity_changed`. Binding `status` to the snapshot is left to S-14, which
+  derives the status advisory.
+- A proof command that adds `url.<other bare>.insteadOf <the run's URL>` still reaches SHIP_READY.
+  `ls-remote` is given the run's URL but is served by the other repository. `ship_ready.base` stays
+  the freeze sha, so the other repository's head is not adopted.
+- A same-user rewrite of `state.json` together with the URL is not caught.
+- Nothing is re-read between two gates, so a change made between gates is caught at the next one.
+  Ship-ready, which no gate follows, reads both again after its proof.
+- Not in S-28a: enrollment, review freshness, the publication/PR half, and a `status` advisory.
+  These belong to S-28b and S-14.
 
 **Lock and persistence.** Every mutating command takes one lock file created
 with `O_EXCL` holding `{pid, process_start_time, host, run_id, nonce}`, and
@@ -468,6 +542,47 @@ timing data that way). Run `run-engine.mjs archive` first: it copies them with a
 overwriting an earlier archive. It is owner-invoked, takes the lock but changes nothing in engine state, refuses another run's id (`run_mismatch`), and does not copy
 `.attempts/` (envelopes and outputs). `usage.jsonl` is copied as it stands: run `archive` when nothing is dispatching or importing usage,
 or its last line may be a partial record (the manifest hashes the copy, not a repaired file).
+`archive --retire true` (S-13a) is the one exception to "changes nothing": after the copy it refuses while any attempt is
+live or not proven quiescent (`retire_live_attempts`) or when the live bytes differ from the archived copy (`retire_mismatch`),
+first finishes the RUN-STATE authority observation of the live state and persists it (a crash after a quiescent commit and
+before a command's final observation leaves lines unclassified), copies, writes `<archive>/retired/retire.json` (run, final
+seq, state digest, whether an authority record existed), then RENAMES (never deletes) the live engine log, usage ledger and
+state, the state last, into `<archive>/retired/`, so a new run of the ticket can `init`. A crash between renames leaves the state live; `archive --retire true` again completes it.
+
+**Run adoption (`adopt`, S-13a, same base).** A new run can take over the still-valid work of an archived run of the same
+ticket and approved plan instead of re-dispatching it. Flow: `archive --retire true` the old run; the owner appends a new
+`START` of the new run for the same narrative (that START is the approval: `adopt` has no authority of its own); `init` the
+new run; `run-engine.mjs adopt --from <archive dir>`; then `drive`. `adopt` runs only right after `init` (zero attempts, every
+node pending, no RED, freeze, review or earlier adoption: else `adoption_window_closed`, also what a second or concurrent
+`adopt` gets) and writes one atomic commit or nothing. The source must be FINAL: the completed `archive --retire true` of its
+run (retire record and retired state present) holding that run's latest state; an earlier or plain `archive`, a retire that
+crashed before renaming the state, or an archive superseded by a later state of the run is `adopt_source_not_final`. A copy of
+the archived state is observed against the current plan before any check, so a line that appeared while its work could run is
+untrusted even when its own observation never finished; a source without a complete observation is
+`adopt_source_unobserved`. Whole refusals (exit 1, nothing written): `--from` not a run archive directly under `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/` after resolving symlinks (`adopt_source_outside`); a
+manifest or file that does not verify (`adopt_archive_invalid`); a live or unretired archived attempt (`adopt_source_live`); a
+different plan digest (`adopt_plan_mismatch`: cross-plan adoption is refused); policy semantics that differ other than the
+pinned base and the repository identity flag (`adopt_policy_mismatch`); under `config.repoIdentity`, an archived run whose
+`S.base` names another repository than this run's (`adopt_identity_mismatch`, R14; an archive naming none is adopted, and a
+flag-off run never gets this refusal). Adoption never touches `S.base`, the `IDENTITY_BOUND` note or a freeze base, so every
+later identity check of the adopting run is unchanged; units on either side (`adopt_units_unsupported`); a latched security REAPPROVAL (`adopt_reapproval_pending`); an
+outstanding archived judgment as `status` would compute it: stored judgments, failed nodes and repairs, refused RED re-runs and
+security judgments (`adopt_source_judged`); a RUN-STATE line this run trusts that the archived run saw appear while
+its work could run (`adopt_authority_untrusted`). The binding of the new run (narrative, START and DAG bytes) is re-verified
+first, as by every mutating command. Per node, an archived `done` node is
+adopted only when its definition (id, deps, reads, writes, othersOwned, resources, redSpecs, evidence, phase, role, risk,
+modelTier, promptFile path, acceptance, checks; not complexity or estimatedMemoryMb, which only schedule) is unchanged (`node_scope_changed`), its read and write fingerprints equal the work tree
+(`node_files_changed`) and every dependency is adopted (`dep_not_adopted`: a changed node invalidates every dependent). A
+RED-bearing node also needs its archived RED evidence to bind the new run's specs and runner and to be unchanged by the
+engine's own RED-validity check (same spec bytes, same base); the evidence is then carried verbatim. Otherwise the node is not
+adopted and the run stops on the judgment `adopt_red_unverified` (or `adopt_red_missing`; exit 2): re-running RED after the
+dependents' implementation is in the tree would only report `spec_not_failing`. A moved base always gives
+`adopt_red_unverified` in this slice. No command clears it in that run, and a second `adopt` is always
+`adoption_window_closed`: the clearing path is a fresh run (`archive --retire true`, a new START, `init`), adopted after the
+archived bytes are restored, or not adopted at all. Adopted nodes carry `adopted: { run_id, archive, manifest_sha256 }`; one `ADOPTED`
+engine note lists the adopted and rejected nodes (no RUN-STATE line). The archived builder roster (every builder, repairs
+included, and through a chained adoption) is carried, so an original builder is still `reviewer_is_builder` at the final review. Review records, the freeze, repairs, security state,
+test-kinds records, unit evidence and usage rows are never adopted; the archived usage stays in its archive.
 
 **Plan roots are not node writes.** A node whose `writes` or `othersOwned` sit under `.specs/` or
 `.spec/` is `dag_invalid` at `init` (the carrier always refused such a worker, as a `node_failed` at
