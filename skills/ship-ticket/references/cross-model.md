@@ -26,7 +26,7 @@ Record `host_agent`, `counterpart_agent`, CLI version, carrier and exact session
 ID. The PLAN debate is the default for every implementation plan (a plan with a
 Design Contract), STANDARD or ELEVATED. Risk classification alone never skips
 it. `SKIPPED` is valid only with an explicit owner-approved exception frozen in
-the plan (section 7 "Debate carrier and exceptions requested", below), and the
+the plan (the `debate-dispositions-v1:` line, below), and the
 exception covers this ticket only. The debate requires actual counterpart
 participation. If Codex is unavailable or fails after bounded recovery, hold the
 same debate with a fresh Fable session as the declared substitute: the attestation
@@ -201,8 +201,7 @@ prototype and attaches the result); (2) a fresh counterpart session carrying the
 delta and the ledger, recording which strategies already failed; (3) if rounds are
 still non-productive, escalate as `UNRESOLVED` with both positions. A legitimately
 maintained finding may take more than two exchanges while rounds stay productive.
-A blocker or major closes only by the counterpart conceding with evidence or by an
-owner disposition, never silently.
+A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text.
 
 The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval. Escalate only for a
 genuine unresolved decision, stagnation after a strategy change, or an actual
@@ -230,10 +229,8 @@ reasoning. Send the revised full draft or unambiguous versioned delta, every
 finding's disposition and evidence, and host counterproposals to the **same**
 counterpart session. Ask it to defend or concede disputed points and verify the
 changed design and affected seams, without rereading the whole repository. The
-counterpart marks each closed finding in its response header (below) with a line
-`finding <ID>: conceded` or `finding <ID>: confirmed`, nothing after the keyword; a
-blocker or major counts as closed by the counterpart only when the round it cites
-carries that line for the finding's own canonical ID (an alias never closes it).
+counterpart states each finding's disposition in its response object (below):
+`conceded`, `confirmed`, `maintained` or `new`; an alias never closes a finding.
 Agreement on an older draft never transfers automatically to a revised one.
 
 If the Integration Contract changes, recheck affected provider/consumer
@@ -242,26 +239,32 @@ occur during debate.
 
 ### Responses, outcomes and the attestation
 
-Each counterpart response begins with a header: every line before its first blank
-line, and only those, is parsed. The header holds `verdict: AGREE` or
-`verdict: CHANGES_REQUESTED`, `request_id: <id from the brief>`, `plan_version: <v>`
-and `plan_digest: <digest>` (the digest line is required when the brief carried
-one), each exactly once from column 1, plus the `finding <ID>: conceded|confirmed`
-lines. Any other header line (a fence, an indented or quoted line, prose, a hedged
-concession) refuses the response; everything after the first blank line is prose
-and never counts as an echo or a concession, so "AGREE for v4" in prose is not an
-echo. Findings
-follow, at most twelve (blockers and majors first, at most three minors), each with
-a stable ID, severity, plan section, repository evidence, consequence and proposed
-change; delta responses explicitly concede or defend previous findings, and excess
-material findings return `overflow`.
+The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
+
+The brief starts with the three lines `request_id: <id>`, `plan_version: <v>` and
+`plan_digest: <digest>`, each exactly once, and states the schema:
+
+```text
+{"v":1,"request_id":"<id>","plan_version":"v<n>","plan_digest":"sha256:<64 hex>","verdict":"AGREE"|"CHANGES_REQUESTED","findings":[{"id":"<id>","status":"conceded"|"confirmed"|"maintained"|"new","severity":"blocker"|"major"|"minor","note":"<at most 2000 characters>"}]}
+```
+
+`severity` is required for a `new` finding and optional otherwise; `note` is
+optional and is never parsed (a verdict inside it carries no authority); at most
+twelve findings with unique ids. The whole `finalMessage` is that object: UTF-8,
+no BOM, at most 16 KiB, nothing before or after it (no whitespace, fence or prose),
+no duplicate or additional key, and bytes equal to the compact serialization in
+schema key order. Refused as `debate_response_invalid`: anything else, `AGREE` with
+a `maintained` finding or a `new` blocker or major, `CHANGES_REQUESTED` with
+nothing `maintained` or `new`, and closing an id that is not open. A `request_id`
+or `plan_version` other than the round's is `debate_request_mismatch`; another
+`plan_digest` is `debate_digest_mismatch`. The canonical ledger is derived from the
+verified objects in round order (`new` and `maintained` open an id, the highest
+severity wins; `conceded` and `confirmed` close it), and the attestation ledger
+must equal it (`debate_attestation_invalid`).
 
 Outcomes, independent of the carrier:
 
-- `CONVERGED` requires the counterpart's confirmation of the exact final plan digest: the last response is `AGREE` for the same `request_id`,
-  `plan_version` and `plan_digest`, verified from the retained relay evidence, with
-  no open blocker or major in the canonical ledger and changed-contract
-  compatibility rechecked. A clean initial critique the host accepts without
+- `CONVERGED` requires the counterpart's confirmation of the exact final plan digest: the last counterpart response object is schema-valid and AGREE for the exact plan_version/plan_digest/request_id, verified from the retained relay evidence; the canonical ledger DERIVED from the response objects has no open blocker/major; changed-contract compatibility rechecked. A clean initial critique the host accepts without
   changes still needs that confirmation of the frozen digest.
 - `UNRESOLVED`: at least one outstanding canonical finding with both positions. It
   is a valid owner-decision presentation state without the counterpart's `AGREE`
@@ -278,9 +281,17 @@ Outcomes, independent of the carrier:
 "Same-provider" is stated only where the identities really share a provider,
 computed from `provider:model`, not from the host name.
 
-Freeze section 7 (the human-readable ledger up to the last substantive round and
-the predeclared `Attestation: debate-<ticket>-<yyyymmddThhmmZ>` reference) before
-the final confirmation request. The terminal data lives outside the digest-hashed
+Freeze the narrative before the final confirmation request: section 7 (the
+human-readable ledger, never authoritative) and the ONE visible line
+`debate-dispositions-v1: <canonical JSON>` at column 1, printed by
+`node scripts/brief.mjs debate-serialize --dispositions <json>`. That line is the
+owner-approved machine content: `{v: 1, debate_id, outcome, carrier_degraded,
+degradation_ack, exception: null | {kind: SKIPPED | WAIVED, reason, scope, ack},
+dispositions: [{id, kind: accept_risk | decided | waived, resolution,
+design_change}]}`. It is digest-bound (outside the RUN-STATE body), exactly one
+occurrence of its token is allowed in the narrative, and Markdown context (fences,
+indentation, tables) is never read for authority. It is written before the
+confirmation round, because the digest covers it. The terminal data lives outside the digest-hashed
 narrative, in the plan file: one line `<!-- debate-attestation-v1 <canonical JSON> -->`
 inside the RUN-STATE body, printed by `node scripts/brief.mjs debate-serialize --attestation <json>`
 (deterministic and comment-safe; never a line starting with `{`). The attestation
@@ -301,11 +312,9 @@ evidence file a regular file inside the bundle, no symbolic link), the relay
 `status`, exit code (0 for a completed round, in the record and the result), the
 non-empty thread or session id bound to the result, read-only on every round (the
 Claude relay also needs `authMethod: claude.ai`), the brief and response
-`request_id` binding, the outcome rules (section 7 holds exactly one `**Result:**`
-line, whose first word must be the attestation outcome) and the frozen exception
-and degradation acknowledgements. Section 7 must be fence-free, and its machine-read
-lines (`**Result:**`, `Attestation:`, the carrier bullets, the disposition table)
-start at column 1. It binds the relay workdir to `--repo`, never to a path the
+`request_id` binding, the response objects and the derived ledger, the outcome
+rules (the dispositions line's `debate_id` and `outcome` must equal the
+attestation's) and the frozen exception and degradation acknowledgements. It binds the relay workdir to `--repo`, never to a path the
 attestation merely names: the workdir must exist when checked, be the top level of
 a Git work tree, and be either the repository's own top level or a worktree the
 repository has registered (`git worktree list --porcelain`). Every git query of the
@@ -341,22 +350,21 @@ it the attestation hash and resolvable evidence are mandatory. A plan without
 (`DEBATE_POLICY_CUTOFF` in `brief.mjs`, finalized at merge).
 
 An `UNRESOLVED` or `LIMIT_REACHED` plan may START only when every outstanding
-canonical finding (and, for `LIMIT_REACHED`, the limit itself as row `LIMIT`) has a
-concrete disposition in the approved digest: `accept_risk` with the accepted-risk
-text, `decided` with the actual decision, or `waived` with the frozen exception.
-`decide` or `re-debate` without the resolution is pending and blocks START
-(`debate_disposition_pending`). The Design change cell is exactly `yes` or `no`;
-anything else is pending. A design-changing disposition (`yes`) needs a new
+canonical finding (and, for `LIMIT_REACHED`, the limit itself as id `LIMIT`) has a
+concrete disposition in the frozen dispositions line of the approved digest:
+`accept_risk` with the accepted-risk text, `decided` with the actual decision, or
+`waived` with the frozen exception. A pending finding has no row and blocks START
+(`debate_disposition_pending`). A design-changing disposition (`design_change: true`) needs a new
 `plan_version`, the counterpart's AGREE for the new digest, then native approval
-again (`debate_reconfirm_required`). A finding the attestation records as closed by
-the owner goes through the same disposition validation. Populated names or timestamps are
+again (`debate_reconfirm_required`). The attestation never closes a finding on its
+own: its ledger must equal the one derived from the response objects. Populated names or timestamps are
 never proof of authorization. Documented limit: this detects inconsistency, replay
 and stale or unrelated results; it cannot authenticate against a host able to
-fabricate every input. A provider or resource limit quotes one whole diagnostic entry
-of the last attempt (the relay `error`, an error event, or the dispatch error; never
-a counterpart message or event), and that entry's class must match the limit kind:
-an entry naming both provider and permission words is ambiguous and supports
-neither. Host-trust residual, the same property as
+fabricate every input. A provider or resource limit quotes text from one string of one whole diagnostic
+source of the last attempt: the relay `error` field, one whole error event, or the
+dispatch error; never a counterpart message or event. The class is read from the
+whole source, so one event naming both a permission error and a 429 is ambiguous and
+supports neither kind. Host-trust residual, the same property as
 `SECURITY_POLICY_CUTOFF` in engine-dag.mjs: a new plan without `debate_policy`
 whose START `approved_at` is backdated before `DEBATE_POLICY_CUTOFF` passes as
 legacy, because the host writes `approved_at`; no new mechanism closes that. Engine

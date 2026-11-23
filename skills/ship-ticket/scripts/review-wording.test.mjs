@@ -230,6 +230,9 @@ const S4_SUPERSEDED = [
   /remaining debate budget/i, /debate budget does not reset/i, /debate's (remaining|existing time)/i, /when the work is security-sensitive/i,
   /total_timeout: 20m/i, /debate_responses=0\|1\|2\|3/i, /debate_status=converged\|unresolved\|degraded/i,
   /debate the whole plan when it is security-sensitive/i, /counterpart when the work is security-sensitive/i,
+  // approved amendment 2026-11-23: the free-text header grammar and machine-read section 7 Markdown are gone
+  /response header/i, /finding <ID>: conceded/i, /probe-ok/i, /Section 7 must be fence-free/i, /machine-read lines \(`\*\*Result/i,
+  /Design change cell/i, /Debate carrier and exceptions requested/i, /predeclared `Attestation:/i,
 ];
 test('S4: no superseded debate scope, cap or default-skip instruction survives in SKILL.md, AGENTS.md or any reference', () => {
   const files = S4_FILES();
@@ -281,8 +284,12 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(!/resolves no finding/.test(x + skill + plan), 'the stronger degraded-carrier claim is gone');
   assert.ok(plan.includes('debate_policy: 2'));
   assert.ok(plan.includes('the §7 Planning Debate runs for every implementation plan, whatever the review profile'));
-  assert.ok(plan.includes('### Debate carrier and exceptions requested'));
-  assert.ok(plan.includes('| Finding | Disposition | Resolution | Design change |'));
+  // approved amendment 2026-11-23: Markdown in section 7 is human-readable only; the authority is one dispositions line
+  assert.ok(plan.includes('debate-dispositions-v1: <canonical JSON printed by debate-serialize --dispositions>'));
+  assert.ok(plan.includes('The Markdown below is the human-readable ledger only and is never authoritative.'));
+  assert.ok(x.includes('A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text.'));
+  assert.ok(x.includes('instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence.'));
+  assert.ok(x.includes('the last counterpart response object is schema-valid and AGREE for the exact plan_version/plan_digest/request_id, verified from the retained relay evidence; the canonical ledger DERIVED from the response objects has no open blocker/major'));
   assert.ok(agents.includes('The reciprocal PLAN debate is the default for every implementation plan, STANDARD or ELEVATED'));
   assert.ok(obs.includes('Never invoke the logger per debate round while native Plan Mode is active.'));
   assert.ok(codex.includes('Real-relay compatibility inside native Plan Mode is UNVERIFIED until this manual probe passes in a real Plan Mode session'));

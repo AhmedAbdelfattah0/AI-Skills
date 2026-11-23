@@ -486,7 +486,8 @@ in as the declared degraded carrier, `carrier.degraded: true`, when Codex is
 unavailable): the host drafts and responds, the counterpart challenges and checks
 revisions, and the same counterpart session defends or concedes. There is no
 default call or minute cap. It stops on evidence: `CONVERGED` needs the
-counterpart's AGREE echoed for the exact final plan digest; rounds that stop being
+counterpart's AGREE as one schema-validated response object (never free text) for
+the exact final plan digest; rounds that stop being
 productive climb a diagnostic ladder and then escalate as `UNRESOLVED`; an
 owner-configured budget or a provider or resource limit is reported as
 `LIMIT_REACHED`, never as convergence. `brief.mjs debate-check` verifies the

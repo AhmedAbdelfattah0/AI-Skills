@@ -15,6 +15,7 @@
  *   brief.mjs start-check --plan <plan.md> --run-id <id> [--repo <dir>]   read-only START validation, typed JSON on stdout
  *   brief.mjs debate-check --plan <plan.md> --bundle <dir> --repo <dir>   read-only Planning Debate check before ExitPlanMode (S4)
  *   brief.mjs debate-serialize --attestation <json>      prints the plan-resident attestation line and its sha256
+ *   brief.mjs debate-serialize --dispositions <json>     prints the narrative `debate-dispositions-v1:` line
  *   brief.mjs debate-retain --plan <plan.md> --bundle <dir> --repo <dir>   copies the debate bundle to the retained locator
  *   brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--carrier codex|claude] [--cli <bin>] [--busy-timeout <dur>] [--probe-timeout <dur>]
  *                                                     PLAN carrier probe: dispatch, fresh_result, resume, cancellation, coverage
@@ -169,10 +170,10 @@ export function debateLegacyApproval(start) {
 export const DEBATE_OUTCOMES = Object.freeze(['CONVERGED', 'UNRESOLVED', 'LIMIT_REACHED', 'SKIPPED']);
 /** Every refusal code `debate-check` and the START debate fields can return. */
 export const DEBATE_CODES = Object.freeze(['debate_policy_missing', 'debate_attestation_missing', 'debate_attestation_invalid', 'debate_attestation_changed',
-  'debate_evidence_missing', 'debate_evidence_mismatch', 'debate_digest_mismatch', 'debate_request_mismatch', 'debate_echo_invalid', 'debate_carrier_invalid',
+  'debate_evidence_missing', 'debate_evidence_mismatch', 'debate_digest_mismatch', 'debate_request_mismatch', 'debate_response_invalid', 'debate_carrier_invalid',
   'debate_degradation_unacknowledged', 'debate_open_finding', 'debate_outcome_invalid', 'debate_limit_invalid', 'debate_exception_missing',
   'debate_disposition_pending', 'debate_reconfirm_required', 'debate_workdir_unbound']);
-/** The frozen acknowledgement sentences of section 7 "Debate carrier and exceptions requested" (exact text). */
+/** The frozen acknowledgement sentences of the `debate-dispositions-v1` line (exact text). */
 export const DEGRADED_ACK = 'The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply.';
 export const SKIP_ACK = 'The owner approves skipping the Planning Debate for this ticket only.';
 export const WAIVE_ACK = 'The owner waives the listed debate findings for this ticket only.';
@@ -186,11 +187,7 @@ const ROUND_STATUS = ['completed', 'failed', 'timeout', 'aborted', 'unavailable'
 const LIMIT_KINDS = ['configured_budget', 'provider_limit', 'resource_limit'];
 const SEVERITIES = ['blocker', 'major', 'minor'];
 const CONCRETE = new Set(['accept_risk', 'decided', 'waived']);
-const ECHO_LINE = /^(verdict|request_id|plan_version|plan_digest): (\S+)$/;
 const BRIEF_LINE = /^(request_id|plan_version|plan_digest): (\S+)$/;
-const CONCEDE_LINE = /^finding ([A-Za-z0-9][A-Za-z0-9._-]*): (conceded|confirmed)$/;
-/** A fence-like run (three or more backticks or tildes) at any indent or behind any quote prefix. */
-const FENCE_RUN = /^[ \t>]*(`{3,}|~{3,})/m;
 const sha256Of = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -252,91 +249,122 @@ function debatePolicy(narr) {
   return { value: found.length === 1 ? found[0] : null, count: found.length };
 }
 
+// ---- the frozen dispositions line (approved amendment 2026-11-23, B1 closed structurally) -----------------------------
 /**
- * Whether line `at` sits inside a fenced block: a run of three or more backticks or tildes (any indent or quote prefix)
- * opens one, and a run of the same character at least as long with nothing after it closes it.
+ * Markdown never carries authority. The owner-approved machine content of section 7 (outcome, degraded-carrier
+ * acknowledgement, exception, dispositions) is ONE visible narrative line `debate-dispositions-v1: <canonical JSON>` at
+ * column 1: inside the narrative, so the approved digest binds it; visible in the ExitPlanMode presentation; serialized
+ * by the same comment-safe canonical serializer as the attestation; exactly one occurrence of the token in the narrative.
+ * Code fences, indentation and the human-readable section 7 Markdown are never read for authority.
  */
-function insideFence(lines, at) {
-  let open = null;
-  for (let i = 0; i < at; i += 1) {
-    const m = /^[ \t>]*(`{3,}|~{3,})(.*)$/.exec(lines[i]);
-    if (!m) continue;
-    if (!open) open = { ch: m[1][0], len: m[1].length };
-    else if (m[1][0] === open.ch && m[1].length >= open.len && !m[2].trim()) open = null;
+const DISPO_HEAD = 'debate-dispositions-v1: ';
+const DISPO_TOKEN = 'debate-dispositions-v1';
+const DISPO_KEYS = ['carrier_degraded', 'debate_id', 'degradation_ack', 'dispositions', 'exception', 'outcome', 'v'];
+const EXCEPTION_KEYS = ['ack', 'kind', 'reason', 'scope'];
+const DISPOSITION_KEYS = ['design_change', 'id', 'kind', 'resolution'];
+const sameKeys = (o, keys) => isObject(o) && Object.keys(o).length === keys.length && keys.every((k) => Object.hasOwn(o, k));
+/** The comment-safe canonical JSON of the attestation and the dispositions line (keys sorted, hidden breaks, C1, `<`, `>` escaped). */
+const commentSafeJson = (o) => eventLine(canonical(o)).replace(/[\u007f-\u009f<>]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+/** The one narrative line carrying the owner-approved debate dispositions. */
+export function serializeDispositions(d) {
+  if (!isObject(d)) throw fail('debate_attestation_invalid: the dispositions must be a JSON object');
+  return `${DISPO_HEAD}${commentSafeJson(d)}`;
+}
+/**
+ * `{ d }` or `{ error }` for the narrative's dispositions line. Schema: {v: 1, debate_id, outcome, carrier_degraded:
+ * bool, degradation_ack: string|null, exception: null|{kind: SKIPPED|WAIVED, reason, scope, ack}, dispositions:
+ * [{id, kind: accept_risk|decided|waived, resolution, design_change: bool}]}, no other key; a pending finding has no row.
+ */
+function readDispositions(narr) {
+  const text = normalise(narr);
+  const count = text.split(DISPO_TOKEN).length - 1;
+  if (count !== 1) return { error: `the narrative must hold exactly one ${DISPO_TOKEN} line (found ${count} occurrences of the token)` };
+  const line = text.split('\n').find((l) => l.includes(DISPO_TOKEN));
+  if (!line.startsWith(DISPO_HEAD)) return { error: `the ${DISPO_TOKEN} line must be a whole line from column 1: \`${DISPO_HEAD}<canonical JSON>\`` };
+  let d;
+  try { d = JSON.parse(line.slice(DISPO_HEAD.length)); } catch (err) { return { error: `the ${DISPO_TOKEN} JSON does not parse: ${err.message}` }; }
+  if (!sameKeys(d, DISPO_KEYS)) return { error: `the ${DISPO_TOKEN} object must hold exactly ${DISPO_KEYS.join(', ')}` };
+  if (serializeDispositions(d) !== line) return { error: `the ${DISPO_TOKEN} line is not in canonical form (use \`brief.mjs debate-serialize --dispositions\`)` };
+  if (d.v !== 1 || typeof d.debate_id !== 'string' || !DEBATE_OUTCOMES.includes(d.outcome) || typeof d.carrier_degraded !== 'boolean'
+    || !(d.degradation_ack === null || typeof d.degradation_ack === 'string')) return { error: `${DISPO_TOKEN}: v 1, debate_id, outcome, carrier_degraded and degradation_ack have the wrong type or value` };
+  if (d.exception !== null && !(sameKeys(d.exception, EXCEPTION_KEYS) && ['SKIPPED', 'WAIVED'].includes(d.exception.kind)
+    && EXCEPTION_KEYS.every((k) => typeof d.exception[k] === 'string'))) return { error: `${DISPO_TOKEN}: exception is null or {kind: SKIPPED|WAIVED, reason, scope, ack}` };
+  if (!Array.isArray(d.dispositions)) return { error: `${DISPO_TOKEN}: dispositions must be an array` };
+  const ids = new Set();
+  for (const row of d.dispositions) {
+    if (!sameKeys(row, DISPOSITION_KEYS) || typeof row.id !== 'string' || !CONCRETE.has(row.kind) || typeof row.resolution !== 'string' || typeof row.design_change !== 'boolean') {
+      return { error: `${DISPO_TOKEN}: each disposition is {id, kind: accept_risk|decided|waived, resolution, design_change: true|false}` };
+    }
+    if (ids.has(row.id)) return { error: `${DISPO_TOKEN}: ${row.id} has two dispositions` };
+    ids.add(row.id);
   }
-  return open !== null;
+  return { d };
 }
 
-/** Section 7 of the narrative (from `## 7.` to the next `## ` heading), or ''. */
-function sectionSeven(narr) {
-  const lines = normalise(narr).split('\n');
-  const at = lines.findIndex((l) => /^## 7\./.test(l));
-  if (at < 0) return '';
-  const end = lines.findIndex((l, i) => i > at && /^## /.test(l));
-  return lines.slice(at, end < 0 ? lines.length : end).join('\n');
+/** Whether the dispositions line carries the owner exception of `kind` (SKIPPED or WAIVED): reason, scope this ticket and the exact acknowledgement. */
+function exceptionOk(D, kind) {
+  const e = D?.exception;
+  return isObject(e) && e.kind === kind && !placeholder(e.reason) && e.scope === 'this ticket' && e.ack === (kind === 'SKIPPED' ? SKIP_ACK : WAIVE_ACK);
 }
 
-/** The frozen "Debate carrier and exceptions requested" bullets of section 7. */
-function carrierSection(sec7) {
-  const lines = sec7.split('\n');
-  const at = lines.findIndex((l) => /^### Debate carrier and exceptions requested\s*$/.test(l));
-  const out = { present: at >= 0 };
-  if (at < 0) return out;
-  const keys = { 'carrier.degraded': 'degraded', 'degradation acknowledgement': 'degradationAck', exception: 'exception', 'exception reason': 'reason', 'exception acknowledgement': 'exceptionAck', scope: 'scope' };
-  for (const l of lines.slice(at + 1)) {
-    if (/^#{2,3} /.test(l)) break;
-    const m = /^- ([a-z. ]+): (.*)$/.exec(l.trimEnd());
-    if (m && Object.hasOwn(keys, m[1])) out[keys[m[1]]] = m[2].trim();
-  }
-  return out;
-}
-
-/** Whether section 7 carries the owner exception of `kind` (SKIPPED or WAIVED): reason, scope this ticket and the exact acknowledgement. */
-function exceptionOk(sec, kind) {
-  return Boolean(sec.present) && sec.exception === kind && !placeholder(sec.reason) && sec.scope === 'this ticket'
-    && sec.exceptionAck === (kind === 'SKIPPED' ? SKIP_ACK : WAIVE_ACK);
-}
-
-/** Disposition rows of section 7's `| Finding | Disposition | Resolution | Design change |` table, by finding id. */
-function dispositionRows(sec7) {
-  const rows = new Map();
-  const lines = sec7.split('\n');
-  const at = lines.findIndex((l) => /^\|\s*Finding\s*\|\s*Disposition\s*\|\s*Resolution\s*\|\s*Design change\s*\|\s*$/.test(l.trimEnd()));
-  if (at < 0) return rows;
-  for (const l of lines.slice(at + 1)) {
-    if (!l.startsWith('|')) break;
-    const cells = l.trimEnd().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
-    if (cells.every((c) => /^:?-+:?$/.test(c))) continue;
-    const [id, disposition, resolution, design] = cells;
-    if (id) rows.set(id.replace(/`/g, ''), { disposition: (disposition ?? '').replace(/`/g, ''), resolution: resolution ?? '', design: design ?? '' });
-  }
-  return rows;
-}
+// ---- the counterpart response v1 (approved amendment 2026-11-23) ------------------------------------------------------
+export const RESPONSE_MAX_BYTES = 16384;
+const RESPONSE_KEYS = ['v', 'request_id', 'plan_version', 'plan_digest', 'verdict', 'findings'];
+const FINDING_KEYS = ['id', 'status', 'severity', 'note'];
+const RESPONSE_STATUS = ['conceded', 'confirmed', 'maintained', 'new'];
+const FINDING_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const PLAN_VERSION = /^v[0-9]{1,4}$/;
 
 /**
- * The anchored header of a counterpart response: the lines before its first blank line, and nothing else, are parsed.
- * Every header line is exactly one of the four echo lines (`verdict:`, `request_id:`, `plan_version:`, `plan_digest:`)
- * or a concession `finding <ID>: conceded|confirmed` with nothing after the keyword, from column 1. Any other header line
- * (a fence run, an indented or quoted line, prose, a hedged concession) refuses the response; the rest of the response is
- * prose and is never read for an echo or a concession, so no fence state is tracked.
+ * Validate one counterpart response: the ENTIRE text must be one counterpart-response-v1 object, UTF-8, at most 16 KiB,
+ * nothing before or after it (JSON.parse refuses prose, fences and a BOM), every schema field with a valid type and enum
+ * (a missing field fails its own check), and bytes equal to its schema-ordered compact serialization: that one rebuild
+ * is the key-tracking guard, refusing whitespace, key order, duplicate and extra keys at every level. Contradictions are refused (AGREE with
+ * a maintained finding or a new blocker or major; CHANGES_REQUESTED with nothing maintained or new). With `expect`, the
+ * request_id, plan_version and plan_digest are bound to it. `note` is never read. No free-text fallback exists.
+ * Returns `{ ok: true, obj }` or `{ ok: false, code, why }`.
  */
-function parseHeader(text) {
-  const lines = normalise(text).split('\n');
-  const end = lines.findIndex((l) => l.trim() === '');
-  const fields = {};
-  const concessions = new Set();
-  for (const raw of end < 0 ? lines : lines.slice(0, end)) {
-    const l = raw.replace(/[ \t]+$/, '');
-    let m;
-    if ((m = ECHO_LINE.exec(l))) {
-      if (Object.hasOwn(fields, m[1])) return { ok: false, why: `the response repeats the echo line ${m[1]}:` };
-      fields[m[1]] = m[2];
-    } else if ((m = CONCEDE_LINE.exec(l))) concessions.add(m[1]);
-    else return { ok: false, why: `the response header (the lines before the first blank line) holds a line that is neither an echo line nor \`finding <ID>: conceded|confirmed\`: ${JSON.stringify(l.slice(0, 60))}` };
+export function parseResponse(text, expect = null) {
+  const bad = (why, code = 'debate_response_invalid') => ({ ok: false, code, why });
+  if (typeof text !== 'string') return bad('the response is not text');
+  if (Buffer.byteLength(text, 'utf8') > RESPONSE_MAX_BYTES) return bad(`the response is larger than ${RESPONSE_MAX_BYTES} bytes`);
+  let o;
+  try { o = JSON.parse(text); } catch { return bad('the response is not exactly one JSON object (text, a fence or a BOM around it, or invalid JSON)'); }
+  if (!isObject(o)) return bad('the response is not a JSON object');
+  if (o.v !== 1) return bad('v must be the integer 1');
+  if (typeof o.request_id !== 'string' || !SAFE_SEGMENT.test(o.request_id)) return bad('request_id must be a safe identifier');
+  if (typeof o.plan_version !== 'string' || !PLAN_VERSION.test(o.plan_version)) return bad('plan_version must match v<1-4 digits>');
+  if (typeof o.plan_digest !== 'string' || !DIGEST_FORMAT.test(o.plan_digest)) return bad('plan_digest must be sha256:<64 hex>');
+  if (o.verdict !== 'AGREE' && o.verdict !== 'CHANGES_REQUESTED') return bad('verdict must be AGREE or CHANGES_REQUESTED');
+  if (!Array.isArray(o.findings) || o.findings.length > 12) return bad('findings must be an array of at most 12 objects');
+  const ids = new Set();
+  for (const f of o.findings) {
+    if (!isObject(f)) return bad('a finding is not an object');
+    if (typeof f.id !== 'string' || !FINDING_ID.test(f.id)) return bad('a finding id must be a safe identifier');
+    if (ids.has(f.id)) return bad(`finding ${f.id} appears twice`);
+    ids.add(f.id);
+    if (!RESPONSE_STATUS.includes(f.status)) return bad(`finding ${f.id}: status must be conceded, confirmed, maintained or new`);
+    if (Object.hasOwn(f, 'severity') ? !SEVERITIES.includes(f.severity) : f.status === 'new') return bad(`finding ${f.id}: severity is blocker, major or minor, and required for a new finding`);
+    if (Object.hasOwn(f, 'note') && !(typeof f.note === 'string' && f.note.length <= 2000)) return bad(`finding ${f.id}: note must be a string of at most 2000 characters`);
   }
-  for (const k of ['verdict', 'request_id', 'plan_version']) if (!Object.hasOwn(fields, k)) return { ok: false, why: `the response header has no \`${k}: <value>\` line` };
-  if (!['AGREE', 'CHANGES_REQUESTED'].includes(fields.verdict)) return { ok: false, why: `verdict ${fields.verdict} is neither AGREE nor CHANGES_REQUESTED` };
-  return { ok: true, ...fields, concessions };
+  const ordered = { v: o.v, request_id: o.request_id, plan_version: o.plan_version, plan_digest: o.plan_digest, verdict: o.verdict,
+    findings: o.findings.map((f) => Object.fromEntries(FINDING_KEYS.filter((k) => Object.hasOwn(f, k)).map((k) => [k, f[k]]))) };
+  if (JSON.stringify(ordered) !== text) return bad('the response bytes are not its canonical serialization (schema key order, no whitespace, no duplicate key)');
+  if (o.verdict === 'AGREE' && o.findings.some((f) => f.status === 'maintained' || (f.status === 'new' && f.severity !== 'minor'))) return bad('AGREE contradicts a maintained finding or a new blocker or major');
+  if (o.verdict === 'CHANGES_REQUESTED' && !o.findings.some((f) => f.status === 'maintained' || f.status === 'new')) return bad('CHANGES_REQUESTED with no maintained or new finding');
+  if (expect) {
+    if (o.request_id !== expect.request_id) return bad(`the response answers request_id ${o.request_id}, not ${expect.request_id} (a stale or foreign response)`, 'debate_request_mismatch');
+    if (o.plan_version !== expect.plan_version) return bad(`the response names plan_version ${o.plan_version}, not ${expect.plan_version}`, 'debate_request_mismatch');
+    if (o.plan_digest !== expect.plan_digest) return bad(`the response names plan_digest ${o.plan_digest}, not ${expect.plan_digest}`, 'debate_digest_mismatch');
+  }
+  return { ok: true, obj: o };
+}
+
+/** {@link parseResponse} over raw bytes: decoded as strict UTF-8 (invalid bytes refused; a BOM is kept, so it is refused). */
+export function parseResponseBytes(bytes, expect = null) {
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch { return { ok: false, code: 'debate_response_invalid', why: 'the response bytes are not valid UTF-8' }; }
+  return parseResponse(text, expect);
 }
 
 /** The first `request_id:`, `plan_version:` and `plan_digest:` lines of the brief that was sent. */
@@ -454,26 +482,51 @@ function reconfirmed(rounds, digest) {
 }
 
 /**
- * `[code, message]` when a disposition row does not authorize, else null: a concrete kind with its text, `waived` only
- * with the frozen exception, a Design change cell of exactly yes or no (anything else fails closed), and yes only after
- * a new plan_version and the counterpart's AGREE for the current digest.
+ * `[code, message]` when a disposition does not authorize START, else null: a row with a concrete resolution text,
+ * `waived` only with the frozen exception, and `design_change: true` only after a new plan_version and the
+ * counterpart's AGREE for the current digest. A pending finding simply has no row.
  */
-function dispositionProblem(id, row, sec, rounds, digest) {
-  if (!row) return ['debate_disposition_pending', `outstanding ${id} has no disposition row in section 7 (accept_risk, decided or waived with its text)`];
-  if (!CONCRETE.has(row.disposition) || placeholder(row.resolution)) return ['debate_disposition_pending', `${id}: ${row.disposition || '(empty)'} without a concrete resolution blocks START (decide and re-debate are pending)`];
-  if (row.disposition === 'waived' && !exceptionOk(sec, 'WAIVED') && !exceptionOk(sec, 'SKIPPED')) return ['debate_disposition_pending', `${id}: waived needs the owner exception frozen in section 7`];
-  const design = row.design.trim().toLowerCase();
-  if (design !== 'yes' && design !== 'no') return ['debate_disposition_pending', `${id}: the Design change cell must be exactly yes or no, not ${JSON.stringify(row.design)}`];
-  if (design === 'yes' && !reconfirmed(rounds, digest)) return ['debate_reconfirm_required', `${id}: a design-changing disposition needs a new plan_version, the counterpart's AGREE for the new digest, then native approval again`];
+function dispositionProblem(id, row, D, rounds, digest) {
+  if (!row) return ['debate_disposition_pending', `outstanding ${id} has no disposition in the ${DISPO_TOKEN} line (accept_risk, decided or waived with its text)`];
+  if (placeholder(row.resolution)) return ['debate_disposition_pending', `${id}: ${row.kind} without a concrete resolution blocks START`];
+  if (row.kind === 'waived' && !exceptionOk(D, 'WAIVED') && !exceptionOk(D, 'SKIPPED')) return ['debate_disposition_pending', `${id}: waived needs the owner exception in the ${DISPO_TOKEN} line`];
+  if (row.design_change && !reconfirmed(rounds, digest)) return ['debate_reconfirm_required', `${id}: a design-changing disposition needs a new plan_version, the counterpart's AGREE for the new digest, then native approval again`];
   return null;
+}
+
+const RANK = { minor: 1, major: 2, blocker: 3 };
+const RANK_NAME = ['', 'minor', 'major', 'blocker', 'unknown'];
+/**
+ * The canonical ledger DERIVED from the verified response objects, in round order: `new` and `maintained` open an id
+ * (the highest severity seen wins; a `maintained` id never opened has an unknown severity, which blocks), `conceded` and
+ * `confirmed` close an open id in that round. Closing an id that is not open is refused. Aliases play no part.
+ */
+function deriveLedger(rounds, perRound, add) {
+  const ledger = new Map();
+  for (const r of rounds) {
+    const resp = isObject(r) && r.status === 'completed' ? perRound.get(r.n)?.response : null;
+    if (!resp) continue;
+    for (const f of resp.findings) {
+      const cur = ledger.get(f.id);
+      if (f.status === 'conceded' || f.status === 'confirmed') {
+        if (!cur?.open) { add('debate_response_invalid', `round ${r.n}: ${f.status} ${f.id}, which is not open in the ledger before that round`); continue; }
+        ledger.set(f.id, { rank: cur.rank, open: false, closed_round: r.n });
+      } else {
+        const rank = Math.max(cur?.rank ?? 0, f.severity ? RANK[f.severity] : (cur ? 0 : 4));
+        ledger.set(f.id, { rank, open: true, closed_round: null });
+      }
+    }
+  }
+  return ledger;
 }
 
 /**
  * The full Planning Debate verification of a plan against a bundle root and the target repository. Read-only. Never
  * forces agreement: UNRESOLVED and LIMIT_REACHED are valid presentation states (`ok`), never refused merely because the
- * counterpart did not AGREE; only CONVERGED is debate-qualified. A degraded carrier is a transport label: the same checks
- * apply to it, and a substitute's verified concession counts exactly like any other. Documented limit: this detects
- * inconsistency, replay and stale or unrelated results; it cannot authenticate against a host able to fabricate every input.
+ * counterpart did not AGREE; only CONVERGED is debate-qualified. Agreement and finding dispositions come only from the
+ * schema-validated response objects; the owner's dispositions only from the frozen dispositions line. A degraded carrier
+ * is a transport label: the same checks apply. Documented limit: this detects inconsistency, replay and stale or
+ * unrelated results; it cannot authenticate against a host able to fabricate every input.
  */
 function verifyDebate(planText, { bundleDir, repo = null }) {
   const digest = planDigest(planText); // throws plan_invalid
@@ -490,34 +543,22 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   if (!got.ok) { add(got.error.code, got.error.message); return done(); }
   const att = got.attestation;
   base.attestation_sha256 = got.sha256;
-  const sec7 = sectionSeven(narr);
-  const sec = carrierSection(sec7);
-  const rows = dispositionRows(sec7);
-  const narrLines = normalise(narr).split('\n');
-  const s7 = narrLines.flatMap((l, i) => (/^## 7\./.test(l) ? [i] : []));
-  if (s7.length !== 1) add('debate_attestation_invalid', `the plan must hold exactly one \`## 7.\` heading (found ${s7.length})`);
-  else if (insideFence(narrLines, s7[0])) add('debate_attestation_invalid', 'section 7 sits inside a fenced block opened earlier in the plan: its machine-read lines must be outside every fence');
-  if (FENCE_RUN.test(sec7)) add('debate_attestation_invalid', 'section 7 holds a code fence: its machine-read lines (Result, Attestation, carrier section, disposition table) must be fence-free');
-  for (const [what, re] of [['Attestation:', /^\s*Attestation:/], ['### Debate carrier and exceptions requested', /^\s*#+\s*Debate carrier and exceptions requested/], ['disposition table header', /^\s*\|\s*Finding\s*\|\s*Disposition\s*\|/]]) {
-    if (sec7.split('\n').filter((l) => re.test(l)).length > 1) add('debate_attestation_invalid', `section 7 holds more than one ${what} line`);
-  }
+  const dl = readDispositions(narr);
+  if (dl.error) add('debate_attestation_invalid', dl.error);
+  const D = dl.d ?? null;
   // ---- schema
   if (att.v !== 1 || att.policy !== 2) add('debate_attestation_invalid', 'the attestation must carry v: 1 and policy: 2');
   if (!SAFE_SEGMENT.test(String(att.ticket)) || !DEBATE_ID_FORMAT.test(String(att.debate_id)) || !String(att.debate_id).startsWith(`debate-${att.ticket}-`)) {
     add('debate_attestation_invalid', 'debate_id must be `debate-<ticket>-<yyyymmddThhmmZ>` with a safe ticket key');
   }
-  const ref = /^Attestation:\s*(\S+)\s*$/m.exec(sec7);
-  if (!ref || ref[1] !== att.debate_id) add('debate_attestation_invalid', `section 7 must predeclare \`Attestation: ${att.debate_id}\` in the frozen narrative`);
+  if (D && D.debate_id !== att.debate_id) add('debate_attestation_invalid', `the ${DISPO_TOKEN} line names debate ${D.debate_id}, not the attestation's ${att.debate_id}`);
   const outcome = att.outcome;
   if (!DEBATE_OUTCOMES.includes(outcome)) {
     add('debate_outcome_invalid', `outcome ${JSON.stringify(outcome)} is not one of ${DEBATE_OUTCOMES.join(', ')}${outcome === 'DEGRADED' ? ' (a degraded carrier is carrier.degraded, never an outcome)' : ''}`);
     return done();
   }
   base.outcome = outcome;
-  const resultLines = sec7.split('\n').filter((l) => l.includes('**Result:**'));
-  const declared = /^\*\*Result:\*\*\s*`?([A-Z_]+)/.exec(resultLines[0] ?? '')?.[1];
-  if (resultLines.length !== 1) add('debate_outcome_invalid', `section 7 must hold exactly one **Result:** line (found ${resultLines.length})`);
-  else if (declared !== outcome) add('debate_outcome_invalid', declared ? `section 7 states **Result:** ${declared}, but the attestation outcome is ${outcome}` : 'section 7 must state the outcome as the first word of its **Result:** line, from column 1');
+  if (D && D.outcome !== outcome) add('debate_outcome_invalid', `the ${DISPO_TOKEN} line states outcome ${D.outcome}, but the attestation outcome is ${outcome}`);
   if (Object.hasOwn(att, 'debate_qualified')) add('debate_outcome_invalid', 'an attestation never declares debate_qualified: the checker computes it');
   const host = isObject(att.host) ? att.host : {};
   const carrier = isObject(att.carrier) ? att.carrier : {};
@@ -540,8 +581,8 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   if (!carrier.degraded && (carrier.agent !== PAIRED[host.agent] || base.diversity === 'same_provider')) {
     add('debate_carrier_invalid', `a ${host.agent} host pairs with ${PAIRED[host.agent] ?? 'its configured counterpart'}; any substitute (Fable or a same-provider session) is carrier.degraded: true`);
   }
-  if (sec.present && sec.degraded !== String(carrier.degraded)) add('debate_carrier_invalid', 'the frozen carrier section of section 7 disagrees with the attestation carrier.degraded');
-  if (att.carrier.degraded && !(sec.degraded === 'true' && sec.degradationAck === DEGRADED_ACK)) add('debate_degradation_unacknowledged', 'a degraded carrier needs the frozen acknowledgement in section 7 "Debate carrier and exceptions requested"');
+  if (D && D.carrier_degraded !== carrier.degraded) add('debate_carrier_invalid', `the ${DISPO_TOKEN} line disagrees with the attestation carrier.degraded`);
+  if (att.carrier.degraded && !(D?.carrier_degraded === true && D.degradation_ack === DEGRADED_ACK)) add('debate_degradation_unacknowledged', `a degraded carrier needs the frozen acknowledgement in the ${DISPO_TOKEN} line`);
   if (carrier.kind !== 'native_session') {
     if (!(typeof att.workdir === 'string' && isAbsolute(att.workdir))) add('debate_attestation_invalid', 'workdir (the directory the relay ran in) must be an absolute path');
     else bindWorkdir(att, repo, add);
@@ -559,28 +600,22 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
     perRound.set(r.n, verifyRound(r, att, bundleDir, add));
     if (r.status === 'completed') completedNumbers.add(r.n);
   });
-  // ---- the canonical ledger
-  const ids = new Map();
+  // ---- the canonical ledger: derived from the response objects; the attestation ledger must equal it
+  const ledger = deriveLedger(rounds, perRound, add);
+  const attById = new Map();
   for (const f of findings) {
     if (!isObject(f) || !nonEmpty(f.id) || !SEVERITIES.includes(f.severity) || !['open', 'resolved'].includes(f.status)) { add('debate_attestation_invalid', `finding ${JSON.stringify(f?.id)} needs id, severity (${SEVERITIES.join('|')}) and status (open|resolved)`); continue; }
-    const names = [f.id, ...asList(f.aliases)];
-    for (const name of names) {
-      if (ids.has(name)) add('debate_attestation_invalid', `finding id or alias ${name} is used twice in the canonical ledger`);
-      ids.set(name, f.id);
-    }
-    if (f.status === 'resolved' && f.severity !== 'minor') {
-      if (f.closed_by === 'owner') {
-        const p = dispositionProblem(f.id, rows.get(f.id), sec, rounds, digest);
-        if (p) add(p[0], `${f.severity} ${f.id} closed by the owner: ${p[1]}`);
-      } else {
-        const conceded = perRound.get(f.closed_round)?.concessions;
-        const byCounterpart = f.closed_by === 'counterpart' && completedNumbers.has(f.closed_round) && nonEmpty(f.evidence) && Boolean(conceded?.has(f.id));
-        if (!byCounterpart) add('debate_attestation_invalid', `${f.severity} ${f.id} is closed without a verified round whose response concedes it (\`finding ${f.id}: conceded|confirmed\`) with evidence, or an owner disposition`);
-      }
-    }
+    if (attById.has(f.id)) add('debate_attestation_invalid', `finding ${f.id} appears twice in the attestation ledger`);
+    attById.set(f.id, f);
   }
-  const open = findings.filter((f) => isObject(f) && f.status === 'open');
-  base.outstanding = open.map((f) => f.id);
+  for (const [id, d] of ledger) {
+    const f = attById.get(id);
+    const same = f && f.severity === RANK_NAME[d.rank] && f.status === (d.open ? 'open' : 'resolved') && (d.open || (f.closed_by === 'counterpart' && f.closed_round === d.closed_round));
+    if (!same) add('debate_attestation_invalid', `the attestation ledger entry for ${id} does not equal the ledger derived from the response objects (${RANK_NAME[d.rank]}, ${d.open ? 'open' : `closed in round ${d.closed_round}`})`);
+  }
+  for (const id of attById.keys()) if (!ledger.has(id)) add('debate_attestation_invalid', `the attestation ledger holds ${id}, which no verified response object opened`);
+  const open = [...ledger].filter(([, d]) => d.open);
+  base.outstanding = open.map(([id]) => id);
   const last = rounds.at(-1);
   const final = att.final;
   // ---- outcomes (independent of the carrier)
@@ -589,38 +624,37 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
     else {
       if (final.plan_digest !== digest) add('debate_digest_mismatch', `the final AGREE confirms ${final.plan_digest}, but the frozen narrative digest is ${digest} (edited after the confirmation, or another plan)`);
       if (att.plan_digest !== final.plan_digest) add('debate_attestation_invalid', 'plan_digest and final.plan_digest differ');
-      if (!last || last.status !== 'completed' || last.verdict !== 'AGREE' || last.request_id !== final.request_id || last.plan_version !== final.plan_version || last.plan_digest !== final.plan_digest) {
-        add('debate_request_mismatch', 'the final AGREE is not the verified response of the last round for the same request_id, plan_version and plan_digest');
+      if (!last || last.status !== 'completed' || perRound.get(last.n)?.response?.verdict !== 'AGREE' || last.request_id !== final.request_id || last.plan_version !== final.plan_version || last.plan_digest !== final.plan_digest) {
+        add('debate_request_mismatch', 'the final AGREE is not the verified response object of the last round for the same request_id, plan_version and plan_digest');
       }
     }
-    if (open.some((f) => f.severity === 'blocker' || f.severity === 'major')) add('debate_open_finding', `CONVERGED with an open blocker or major: ${open.filter((f) => f.severity !== 'minor').map((f) => f.id).join(', ')}`);
+    if (open.some(([, d]) => d.rank >= RANK.major)) add('debate_open_finding', `CONVERGED with an open blocker or major in the derived ledger: ${open.filter(([, d]) => d.rank >= RANK.major).map(([id]) => id).join(', ')}`);
     if (!['done', 'not_applicable'].includes(att.contract_recheck)) add('debate_outcome_invalid', 'CONVERGED needs contract_recheck done or not_applicable (changed-contract compatibility rechecked)');
     if (att.limit !== null && att.limit !== undefined) add('debate_outcome_invalid', 'CONVERGED carries no limit');
   } else {
     if (att.plan_digest !== digest) add('debate_digest_mismatch', `the attestation binds ${att.plan_digest}, but the frozen narrative digest is ${digest}`);
     if (outcome === 'UNRESOLVED') {
-      if (!open.length || open.some((f) => !nonEmpty(f.host_position) || !nonEmpty(f.counterpart_position))) add('debate_outcome_invalid', 'UNRESOLVED needs at least one outstanding canonical finding, each with both positions');
+      if (!open.length || open.some(([id]) => !nonEmpty(attById.get(id)?.host_position) || !nonEmpty(attById.get(id)?.counterpart_position))) add('debate_outcome_invalid', 'UNRESOLVED needs at least one outstanding canonical finding, each with both positions');
       if (!completedNumbers.size) add('debate_outcome_invalid', 'UNRESOLVED needs at least one verified counterpart response; a debate that never got one is LIMIT_REACHED');
       if (final !== null && final !== undefined) add('debate_outcome_invalid', 'UNRESOLVED carries no final confirmation');
     } else if (outcome === 'LIMIT_REACHED') {
       if (att.final !== null) add('debate_outcome_invalid', 'LIMIT_REACHED is never converted to CONVERGED: final must be null');
       checkLimit(att, last, last ? perRound.get(last.n)?.diag : null, add);
-      if (!findings.length && att.incomplete_review !== true) add('debate_limit_invalid', 'a limit reached with no findings must say incomplete_review: true');
+      if (!ledger.size && att.incomplete_review !== true) add('debate_limit_invalid', 'a limit reached with no findings must say incomplete_review: true');
     } else if (outcome === 'SKIPPED') {
       if (rounds.length || findings.length || (final !== null && final !== undefined)) add('debate_outcome_invalid', 'SKIPPED records no round, finding or confirmation');
-      if (!exceptionOk(sec, 'SKIPPED')) add('debate_exception_missing', 'SKIPPED needs the owner exception frozen in section 7 "Debate carrier and exceptions requested": exception: SKIPPED, a reason, scope: this ticket and the exact acknowledgement');
+      if (!exceptionOk(D, 'SKIPPED')) add('debate_exception_missing', `SKIPPED needs the owner exception in the ${DISPO_TOKEN} line: {kind: SKIPPED, a reason, scope: this ticket and the exact acknowledgement}`);
     }
   }
-  const resolveId = (id) => ids.get(id) ?? id;
-  const byId = new Map([...rows].map(([id, row]) => [resolveId(id), row]));
+  const byId = new Map(asList(D?.dispositions).map((row) => [row.id, row]));
   const need = [...base.outstanding, ...(outcome === 'LIMIT_REACHED' ? ['LIMIT'] : [])];
-  base.pending = outcome === 'CONVERGED' || outcome === 'SKIPPED' ? [] : need.filter((id) => dispositionProblem(id, byId.get(id), sec, rounds, digest));
+  base.pending = outcome === 'CONVERGED' || outcome === 'SKIPPED' ? [] : need.filter((id) => dispositionProblem(id, byId.get(id), D, rounds, digest));
   base.debate_qualified = outcome === 'CONVERGED' && errors.length === 0;
   const m = (k, v) => (v === null || v === undefined ? [] : [`${k}=${v}`]);
   base.run_log_metrics = [...m('debate_outcome', outcome.toLowerCase()), ...m('debate_carrier', carrier.agent), ...m('debate_carrier_degraded', carrier.degraded),
     ...m('debate_rounds', metrics.rounds), ...m('debate_calls', metrics.calls), ...m('debate_minutes', metrics.minutes),
     ...m('plan_debate_started_at', metrics.started_at), ...m('plan_debate_ended_at', metrics.ended_at), ...(typeof metrics.tokens === 'number' ? [`debate_tokens=${metrics.tokens}`] : [])];
-  return done({ attestation: att, line: got.line, byId, sec, rounds });
+  return done({ attestation: att, line: got.line, byId, D, rounds });
 }
 
 const PROVIDER_RE = /\b(429|quota|rate.?limit\w*|usage limit\w*)\b/i;
@@ -636,13 +670,16 @@ function entryClass(text, dispatchClass = null) {
   return p && !r ? 'provider' : r && !p ? 'resource' : 'ambiguous';
 }
 /**
- * The diagnostic entries of a relay result: its `error` text and the error events of events.jsonl (`type: error`,
- * `turn.failed`, an item of type `error`). Counterpart output (agent messages, reasoning, the final message) never counts.
+ * The diagnostic entries of a relay result, ONE per whole source (approved amendment B3): the relay `error` field, and
+ * each error event of events.jsonl (`type: error`, `turn.failed`, an item of type `error`) as a whole. An entry keeps its
+ * string leaves and is classified from all of them together, so one event naming both EPERM and a 429 is ambiguous.
+ * Counterpart output (agent messages, reasoning, the final message) never counts.
  */
 function diagnosticEntries(res, eventsText) {
   const out = [];
-  const push = (t) => { if (typeof t === 'string' && t.trim()) out.push({ text: t, cls: entryClass(t) }); };
-  push(res.error);
+  const leaves = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(leaves) : isObject(v) ? Object.values(v).flatMap(leaves) : []);
+  const push = (ls) => { const kept = ls.filter((t) => t.trim()); if (kept.length) out.push({ leaves: kept, cls: entryClass(kept.join('\n')) }); };
+  push(leaves(res.error));
   for (const l of normalise(eventsText).split('\n')) {
     let e;
     try { e = JSON.parse(l); } catch { continue; }
@@ -650,9 +687,7 @@ function diagnosticEntries(res, eventsText) {
     const item = isObject(e.item) ? e.item : null;
     const isError = e.type === 'error' || e.type === 'turn.failed' || item?.type === 'error';
     if (!isError) continue;
-    push(e.message);
-    push(typeof e.error === 'string' ? e.error : e.error?.message);
-    push(item?.message ?? item?.text);
+    push(leaves([e.message, e.error, item ? [item.message, item.text] : []]));
   }
   return out;
 }
@@ -675,7 +710,7 @@ function checkLimit(att, last, lastDiag, add) {
   } else if (!last || last.status === 'completed') add('debate_limit_invalid', `${L.kind} needs a last attempt with its actual status (failed, timeout, aborted or unavailable) and diagnostics`);
   else {
     const ev = L.evidence.trim();
-    const hits = asList(lastDiag).filter((e) => e.text.includes(ev));
+    const hits = asList(lastDiag).filter((e) => e.leaves.some((t) => t.includes(ev)));
     const providerish = hits.some((e) => e.cls === 'provider');
     const resourceish = hits.some((e) => e.cls === 'resource');
     if (!hits.length) add('debate_limit_invalid', 'the limit evidence is not quoted from one retained diagnostic entry of the last attempt (the relay error, an error event or the dispatch error; never a counterpart message)');
@@ -689,15 +724,18 @@ function checkLimit(att, last, lastDiag, add) {
 /**
  * One round's retained evidence, by carrier kind. Failed or limited attempts keep their actual status; a success is
  * never fabricated: a completed relay round needs exit code 0 in the record and the result, every round is read-only,
- * and a completed round carries a non-empty session id bound to the result. Returns { diag, concessions }.
+ * and a completed round carries a non-empty session id bound to the result. Its response is the counterpart-response-v1
+ * object, bound to the round's request_id, plan_version and plan_digest (also those of the brief that was sent).
+ * Returns { diag, response }.
  */
 function verifyRound(r, att, bundleDir, add) {
-  const out = { diag: [], concessions: new Set() };
+  const out = { diag: [], response: null };
   const kind = att.carrier.kind;
   const files = isObject(r.files) ? r.files : {};
   const hashes = isObject(r.sha256) ? r.sha256 : {};
   if (r.read_only !== true) add('debate_carrier_invalid', `round ${r.n} is not recorded read_only: true`);
   if (r.status === 'completed' && !nonEmpty(r.session_id)) add('debate_carrier_invalid', `round ${r.n}: a completed round needs its non-empty session or thread id`);
+  if (r.status === 'completed' && !DIGEST_FORMAT.test(String(r.plan_digest))) add('debate_attestation_invalid', `round ${r.n}: a completed round records the plan_digest its brief carried`);
   const read = (name) => {
     const rel = files[name];
     if (!relativeEvidence(rel)) { add('debate_attestation_invalid', `round ${r.n} ${name}: evidence paths are bundle-relative (no absolute path, no ..); out_dir is provenance only`); return null; }
@@ -715,12 +753,13 @@ function verifyRound(r, att, bundleDir, add) {
   if (r.status !== 'completed' && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
-    else out.diag = [{ text: e.text, cls: entryClass(e.text, e.class) }];
+    else out.diag = [{ leaves: [e.text], cls: entryClass(e.text, e.class) }];
   }
-  let text = null;
+  const expect = { request_id: r.request_id, plan_version: r.plan_version, plan_digest: r.plan_digest };
+  let parsed = null;
   if (got.result) {
     let res;
-    try { res = JSON.parse(got.result.toString('utf8')); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not JSON`); return out; }
+    try { res = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(got.result)); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not UTF-8 JSON`); return out; }
     out.diag = diagnosticEntries(res, got.events ? got.events.toString('utf8') : '');
     const status = /_unavailable$/.test(String(res.status)) ? 'unavailable' : res.status;
     if (status !== r.status) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
@@ -735,23 +774,20 @@ function verifyRound(r, att, bundleDir, add) {
       if (r.auth_method !== 'claude.ai') add('debate_carrier_invalid', `round ${r.n}: the Claude relay needs verified subscription authentication (authMethod claude.ai), not ${r.auth_method}`);
     }
     if (resolve(String(res.workdir)) !== resolve(String(att.workdir))) add('debate_carrier_invalid', `round ${r.n}: the relay ran in ${res.workdir}, not the debate workdir ${att.workdir}`);
-    text = typeof res.finalMessage === 'string' ? res.finalMessage : '';
-  } else if (got.message) {
-    text = got.message.toString('utf8');
+    if (r.status === 'completed') parsed = parseResponse(typeof res.finalMessage === 'string' ? res.finalMessage : null, expect);
+  } else if (got.message && r.status === 'completed') {
+    parsed = parseResponseBytes(got.message, expect);
   }
   if (got.brief) {
     const b = briefFields(got.brief.toString('utf8'));
-    if (b.request_id !== r.request_id || b.plan_version !== r.plan_version || (r.plan_digest && b.plan_digest !== r.plan_digest)) {
-      add('debate_request_mismatch', `round ${r.n}: the brief that was sent carries request_id ${b.request_id}, plan_version ${b.plan_version}${r.plan_digest ? `, plan_digest ${b.plan_digest}` : ''}`);
+    if (b.request_id !== r.request_id || b.plan_version !== r.plan_version || b.plan_digest !== r.plan_digest) {
+      add('debate_request_mismatch', `round ${r.n}: the brief that was sent carries request_id ${b.request_id}, plan_version ${b.plan_version}, plan_digest ${b.plan_digest}`);
     }
   }
-  if (r.status !== 'completed' || text === null) return out;
-  const echoed = parseHeader(text);
-  if (!echoed.ok) { add('debate_echo_invalid', `round ${r.n}: ${echoed.why}`); return out; }
-  if (echoed.verdict !== r.verdict) add('debate_echo_invalid', `round ${r.n} records verdict ${r.verdict}, the response says ${echoed.verdict}`);
-  if (echoed.request_id !== r.request_id) add('debate_request_mismatch', `round ${r.n}: the response echoes request_id ${echoed.request_id}, not ${r.request_id} (a stale or foreign response)`);
-  if (echoed.plan_version !== r.plan_version || (r.plan_digest && echoed.plan_digest !== r.plan_digest)) add('debate_request_mismatch', `round ${r.n}: the response echoes another plan_version or plan_digest`);
-  out.concessions = echoed.concessions;
+  if (!parsed) return out;
+  if (!parsed.ok) { add(parsed.code, `round ${r.n}: ${parsed.why}`); return out; }
+  if (parsed.obj.verdict !== r.verdict) add('debate_attestation_invalid', `round ${r.n} records verdict ${r.verdict}, the response object says ${parsed.obj.verdict}`);
+  out.response = parsed.obj;
   return out;
 }
 
@@ -797,7 +833,7 @@ function debateStartCheck(planText, start, { bundleDir, repo, digest, add }) {
   if (added || v.outcome === 'CONVERGED' || v.outcome === 'SKIPPED') return;
   const need = [...v.outstanding, ...(v.outcome === 'LIMIT_REACHED' ? ['LIMIT'] : [])];
   for (const id of need) {
-    const p = dispositionProblem(id, v.byId.get(id), v.sec, v.rounds, digest);
+    const p = dispositionProblem(id, v.byId.get(id), v.D, v.rounds, digest);
     if (p) add(p[0], p[1]);
   }
 }
@@ -900,6 +936,8 @@ function resultClass(res) {
  * claude.ai. A dispatch that fails before a child process starts is a dispatch failure, and a failed process listing is
  * a failure, never a cancellation pass.
  */
+/** The binding of the probe's no-op dispatch: a counterpart-response-v1 AGREE for a request_id derived from the nonce. */
+const probeExpect = (nonce) => ({ request_id: `probe-${nonce}`, plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}` });
 export function classifyProbe(o) {
   const pass = (detail) => ({ result: 'pass', detail });
   const no = (cls, detail) => ({ result: 'fail', class: cls, detail });
@@ -927,7 +965,7 @@ export function classifyProbe(o) {
   const notReached = () => no(dispatch.class, `not reached: dispatch failed (${dispatch.class})`);
   const id = idOf(d.result);
   const fresh_result = !reached ? notReached()
-    : nonEmpty(id) && readOnly(d.result) && String(d.result.finalMessage ?? '').includes(`probe-ok ${o.nonce}`) ? pass(`readable result.json, status completed, read-only, new ${claude ? 'sessionId' : 'threadId'} ${id}`)
+    : nonEmpty(id) && readOnly(d.result) && parseResponse(typeof d.result.finalMessage === 'string' ? d.result.finalMessage : null, probeExpect(o.nonce)).ok ? pass(`readable result.json, status completed, read-only, new ${claude ? 'sessionId' : 'threadId'} ${id}`)
       : no('relay', `result.json lacks a ${claude ? 'sessionId' : 'threadId'}, is not read-only, or does not answer this probe's nonce`);
   const rs = o.resume ?? {};
   const resume = fresh_result.result !== 'pass' ? no(fresh_result.class, 'not reached: no fresh result to resume')
@@ -1076,7 +1114,8 @@ export async function runProbe({ relay, repo, outDir, carrier = 'codex', cli = n
       obs.login = a.error ? { error: a.error } : { status: a.status, authMethod: method };
     } else { const a = probeCmd(['login', 'status']); obs.login = a.error ? { error: a.error } : { status: a.status }; }
     const before = coverageSnapshot(repo);
-    const noop = `This is a ship-ticket PLAN carrier probe. Do not read, run or change anything. Reply with exactly one line: probe-ok ${nonce}\n`;
+    const want = probeExpect(nonce);
+    const noop = `request_id: ${want.request_id}\nplan_version: ${want.plan_version}\nplan_digest: ${want.plan_digest}\n\nThis is a ship-ticket PLAN carrier probe. Do not read, run or change anything. Reply with exactly this one JSON object and nothing else (no prose, no code fence, no whitespace before or after it):\n${JSON.stringify({ v: 1, ...want, verdict: 'AGREE', findings: [] })}\n`;
     const busy = 'This is a ship-ticket cancellation probe. Do not change any file. Run the read-only shell command `sleep 600`, then reply `done`.\n';
     const flags = ['--cd', repo, '--read-only', '--effort', 'high'];
     const authOk = obs.login.status === 0 && (!claude || obs.login.authMethod === 'claude.ai');
@@ -1484,8 +1523,9 @@ export function main(argv) {
       return r.ok ? 0 : 1;
     }
     if (command === 'debate-serialize') {
-      const { opts, positional } = parseFlags(rest, ['attestation']);
-      if (!opts.attestation || positional.length) throw Object.assign(new Error('debate-serialize needs --attestation and takes no other argument'), { usage: true });
+      const { opts, positional } = parseFlags(rest, ['attestation', 'dispositions']);
+      if (Boolean(opts.attestation) === Boolean(opts.dispositions) || positional.length) throw Object.assign(new Error('debate-serialize needs exactly one of --attestation or --dispositions'), { usage: true });
+      if (opts.dispositions) { process.stdout.write(`${serializeDispositions(readJson(opts.dispositions, 'dispositions'))}\n`); return 0; }
       const line = serializeAttestation(readJson(opts.attestation, 'attestation'));
       process.stdout.write(`${line}\ndebate-attestation-sha256 ${sha256Of(Buffer.from(line, 'utf8'))}\n`);
       return 0;
@@ -1509,7 +1549,7 @@ export function main(argv) {
       return runProbe({ relay: resolve(opts.relay), repo: resolve(opts.repo), outDir: resolve(opts['out-dir']), carrier, cli: opts.cli ?? null, busyTimeout: opts['busy-timeout'] ?? '30s', probeTimeout: opts['probe-timeout'] ?? '20m' })
         .then((r) => { process.stdout.write(`${JSON.stringify(r)}\n`); return r.ok ? 0 : 1; });
     }
-    throw Object.assign(new Error('usage: brief.mjs plan-digest --plan <plan.md> | brief.mjs start-check --plan <plan.md> --run-id <id> [--repo <dir>] | brief.mjs debate-check --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-serialize --attestation <json> | brief.mjs debate-retain --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--carrier codex|claude] [--cli <bin>] [--busy-timeout <dur>] [--probe-timeout <dur>] | brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
+    throw Object.assign(new Error('usage: brief.mjs plan-digest --plan <plan.md> | brief.mjs start-check --plan <plan.md> --run-id <id> [--repo <dir>] | brief.mjs debate-check --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-serialize --attestation <json> | brief.mjs debate-serialize --dispositions <json> | brief.mjs debate-retain --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--carrier codex|claude] [--cli <bin>] [--busy-timeout <dur>] [--probe-timeout <dur>] | brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
   } catch (err) {
     if (!err.briefError && !err.usage) throw err;
     if (command === 'start-check' && /^plan_invalid/.test(err.message)) {

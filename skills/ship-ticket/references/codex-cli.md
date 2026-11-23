@@ -82,7 +82,7 @@ separately as pass or fail with a class (`permission_denied`, `auth`, `provider`
 | Capability | Pass when |
 |---|---|
 | `dispatch` | the relay file exists, the version and authentication checks exit 0 (`codex login status`; `claude auth status` reporting `authMethod: claude.ai`), and a no-op read-only dispatch writes a `result.json` with `status: completed` |
-| `fresh_result` | that `result.json` is readable, read-only (`sandbox: read-only` for Codex, `readOnly: true` for Claude), has a new non-empty `threadId` (Codex) or `sessionId` (Claude) and answers the probe's nonce |
+| `fresh_result` | that `result.json` is readable, read-only (`sandbox: read-only` for Codex, `readOnly: true` for Claude), has a new non-empty `threadId` (Codex) or `sessionId` (Claude) and has a `finalMessage` that is exactly the counterpart-response-v1 AGREE object for request_id `probe-<nonce>` |
 | `resume` | a second no-op turn with `--session <id>` completes, stays read-only and returns the same id |
 | `cancellation` | a busy brief with a valid `--timeout` (default `30s`): a child of the relay that leads its own process group is observed (the relay's ordinary helpers in the relay's group do not count), the relay reports `status: timeout`, and no process of that child's process group survives; a relay that returns before a child starts is a dispatch failure, and a failed process listing (`ps`) is a failure, never a cancellation pass |
 | `coverage` | `candidate-id.mjs` identity (tracked diff, untracked file content, modes, symlinks) and the `git status --porcelain --ignored` listing are unchanged before and after; reported as "candidate identity and untracked-content hash unchanged; ignored files out of coverage" |
@@ -94,9 +94,15 @@ real relay by hand, run the same dispatches yourself and read each `result.json`
 
 ```bash
 R="<installed-codex-delegate>/scripts/relay.mjs"; O="<session scratch>/plan-probe-manual"
-echo 'Do not read or change anything. Reply with exactly: probe-ok manual' | \
-  node "$R" --cd "<target-repo>" --read-only --effort high --timeout 5m --out-dir "$O/dispatch"
-echo 'Reply with exactly: probe-ok manual' | node "$R" --cd "<target-repo>" --read-only \
+Z=sha256:0000000000000000000000000000000000000000000000000000000000000000
+B="request_id: probe-manual
+plan_version: v1
+plan_digest: $Z
+
+Do not read or change anything. Reply with exactly this one JSON object and nothing else:
+{\"v\":1,\"request_id\":\"probe-manual\",\"plan_version\":\"v1\",\"plan_digest\":\"$Z\",\"verdict\":\"AGREE\",\"findings\":[]}"
+printf '%s\n' "$B" | node "$R" --cd "<target-repo>" --read-only --effort high --timeout 5m --out-dir "$O/dispatch"
+printf '%s\n' "$B" | node "$R" --cd "<target-repo>" --read-only \
   --effort high --timeout 5m --session "<threadId from $O/dispatch/result.json>" --out-dir "$O/resume"
 echo 'Do not change any file. Run the read-only shell command `sleep 600`, then reply done.' | \
   node "$R" --cd "<target-repo>" --read-only --effort high --timeout 30s --out-dir "$O/cancel" &
@@ -104,8 +110,8 @@ sleep 10; ps -A -o pid=,ppid=,pgid=,command= | awk -v p=$! '$2 == p'   # the cod
 wait; ps -A -o pid=,pgid= | awk -v g=<that pgid> '$2 == g'           # must print nothing
 ```
 
-Expect `status: completed` and a `threadId` in dispatch, the same `threadId` in
-resume, `status: timeout` in cancel with a child seen during the run and none of
+Expect `status: completed`, a `threadId` and a `finalMessage` that is exactly that
+one JSON object in dispatch, the same `threadId` in resume, `status: timeout` in cancel with a child seen during the run and none of
 its process group left afterwards, and an unchanged `candidate-id.mjs --repo
 <target-repo> --base HEAD` before and after. To check coverage
 against an existing untracked file, create one before the probe and confirm the

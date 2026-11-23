@@ -439,7 +439,11 @@ native approval handoff: `ExitPlanMode` on Claude, the host-prescribed final pla
 format on Codex. A wave uses one `ExitPlanMode`. Hold `WAIT_FOR_USER` until
 answered. Chat text, an `AskUserQuestion` answer and a typed "approve" are not
 plan approval; `AskUserQuestion` may only resolve planning questions before
-`ExitPlanMode`. Do not exit Plan Mode before the debate has been reconciled and
+`ExitPlanMode`. Every counterpart answer is exactly one counterpart-response-v1 JSON
+object, and free text is never approval evidence: a non-conforming answer fails the
+round, and the host re-asks with a new `request_id`. The owner-approved dispositions
+are one `debate-dispositions-v1:` narrative line, never section 7 Markdown. Do not exit
+Plan Mode before the debate has been reconciled and
 `brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` or
 `LIMIT_REACHED` plan is presented for the owner's disposition; see
 [references/cross-model.md](references/cross-model.md) "PLAN debate"); state the
