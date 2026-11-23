@@ -37,6 +37,11 @@ need git  "Install git, then re-run this command."
 need node "Install Node.js 22 or newer (https://nodejs.org), then re-run this command."
 
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+case "$NODE_MAJOR" in
+  ''|*[!0-9]*)
+    echo "❌ could not read the Node major version (got '$NODE_MAJOR'); this needs 22 or newer." >&2
+    exit 1 ;;
+esac
 if [ "$NODE_MAJOR" -lt 22 ]; then
   echo "❌ Node $(node -v) is too old; this needs 22 or newer." >&2
   exit 1

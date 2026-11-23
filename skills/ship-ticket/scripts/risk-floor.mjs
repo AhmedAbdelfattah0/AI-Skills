@@ -22,8 +22,8 @@
  * repeated flag, positional argument or unknown command is an error. Files are read as strict UTF-8 (UTF-16/32 BOMs, NUL, invalid bytes rejected).
  * REUSE: real tree paths are enumerated by git itself (diff, ls-files). Matching is ONE custom engine that serves PLANNED and ACTUAL paths alike
  * (so `check` and `reassess` classify a given path identically; the only intended difference is the conservative reading of planned directory-like entries). Evaluated and rejected: git pathspec magic (`:(glob,icase)`: a second engine whose trailing `/**`,
- * ASCII-only icase and raw-name matching disagree with the normalised matcher), node:path.matchesGlob and fs.glob (experimental on Node 22, so not a
- * stable contract to build on), picomatch/minimatch (would need vendoring: skills install without npm install).
+ * ASCII-only icase and raw-name matching disagree with the normalised matcher), node:path.matchesGlob and fs.glob (experimental or absent in the earlier supported 22.x:
+ * fs.glob is stable from 22.17, path.matchesGlob from 22.20, so the floor cannot rely on them), picomatch/minimatch (would need vendoring: skills install without npm install).
  * Glob grammar (deliberately small): literal characters, `*` (any run inside ONE path segment), a WHOLE-segment `**`, a trailing `/`.
  * EVERY other metacharacter (`? [ ] { } ! \ ( )`), a `**` that is not a whole segment, and leading/trailing whitespace in a segment make the
  * declaration invalid (fail closed), never a silent non-match. Directory semantics (git-style): a pattern matches a path if it matches the

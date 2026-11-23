@@ -140,15 +140,15 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
   `~/.gemini/antigravity/skills` is the legacy path: `install` no longer writes there, but a plain
   `update` still refreshes an install it finds there, so an existing one is not orphaned. The legacy
   directory is deliberately not a `--target` value.
-- **Supported runtime: Node >= 22** (owner decision OD-Q5, 2026-11-23; Node 18 compatibility is not a
+- **Supported runtime: Node >= 22** (owner decision OD-Q5, 2026-11-23; older Node versions are not a
   requirement). `package.json` `engines`, the `install.sh` guard and the README must state the same
-  floor; `scripts/cli.test.mjs` pins that agreement. Older `.specs/` records that say "Node 18" are
+  floor; `scripts/cli.test.mjs` pins that agreement. Older `.specs/` records that name an older Node are
   history and are not rewritten.
 - **CI is Node, not bash** — `.github/workflows/validate.yml` runs `node scripts/cli.mjs validate` on
   ubuntu. Keep `cli.mjs`'s validator and `validate.sh` in sync if you touch validation logic; the Node
   one is authoritative.
 - **The CLI has its own tests,** `scripts/cli.test.mjs`, run by CI on ubuntu, macOS and Windows
-  on Node 22 (the supported floor; the matrix still carries a Node 18 cell until it is removed). Every test runs a temp copy of `cli.mjs` and `autoupdate.mjs` against a temp home
+  on Node 22 (the supported floor; the matrix still carries an older-Node cell until it is removed). Every test runs a temp copy of `cli.mjs` and `autoupdate.mjs` against a temp home
   directory, so no test can reach a real skills directory, a scheduler or this checkout (`update`
   would otherwise `git pull` it). Keep it that way: never point a test at the real CLI's `install`,
   `update` or `autoupdate`.

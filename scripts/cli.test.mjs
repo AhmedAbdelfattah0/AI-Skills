@@ -875,18 +875,57 @@ test('the supported Node floor is the same in package.json, install.sh and READM
   assert.match(readme, new RegExp(`Needs \`git\` and Node ${NODE_FLOOR}\\+`));
 });
 
-test('install.sh refuses a Node below the floor and names the floor', (t) => {
+test('no support claim in README, AGENTS.md, install.sh or package.json names a Node below the floor', () => {
+  // "Node 18", "Node.js](url) >= 18", "Node >= 18", "≥ 18": every number after such a lead must be the floor or more.
+  const claim = /node(?:\.js)?(?:\]\([^)]*\))?["':\s]*(?:≥|>=)?\s*"?(\d{1,2})(?!\d)/gi;
+  let seen = 0;
+  for (const f of ['README.md', 'AGENTS.md', 'install.sh', 'package.json']) {
+    const text = readFileSync(join(REPO, f), 'utf8');
+    for (const m of text.matchAll(claim)) {
+      seen += 1;
+      assert.ok(Number(m[1]) >= NODE_FLOOR, `${f} claims Node ${m[1]}: ${JSON.stringify(m[0])}`);
+    }
+  }
+  assert.ok(seen >= 4, `the scan found the claims it is meant to police (${seen})`);
+});
+
+// Runs the real install.sh with a stand-in `node` and a `git` that records any call and fails. The
+// clone target is an existing non-git directory, so a regressed guard is refused by install.sh itself.
+function installWith(t, nodeMajorOutput) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'ais-nodefloor-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, 'bin');
-  // A stand-in `node` that reports the major one below the floor, whatever it is asked.
-  const fake = `#!/bin/sh\ncase "$1" in -v) echo v${NODE_FLOOR - 1}.0.0;; *) echo ${NODE_FLOOR - 1};; esac\n`;
-  put(join(bin, 'node'), fake);
-  spawnSync('chmod', ['755', join(bin, 'node')]);
+  const gitLog = join(root, 'git-called');
+  put(join(bin, 'node'), `#!/bin/sh\ncase "$1" in -v) echo v0.0.0;; *) echo '${nodeMajorOutput}';; esac\n`);
+  put(join(bin, 'git'), `#!/bin/sh\necho "$@" >> '${gitLog}'\nexit 1\n`);
+  for (const b of ['node', 'git']) spawnSync('chmod', ['755', join(bin, b)]);
+  const target = join(root, 'target');
+  mkdirSync(target);
+  const home = join(root, 'home');
+  mkdirSync(home);
   const r = spawnSync('bash', [join(REPO, 'install.sh')], {
     encoding: 'utf8',
-    env: { PATH: `${bin}:${process.env.PATH}`, HOME: join(root, 'home') },
+    timeout: 20000,
+    env: childEnv({
+      PATH: `${bin}:${process.env.PATH}`, HOME: home, USERPROFILE: home,
+      AI_SKILLS_HOME: target, AI_SKILLS_NO_AUTOUPDATE: '1',
+    }),
   });
+  return { r, gitCalled: existsSync(gitLog) };
+}
+
+test('install.sh refuses a Node below the floor and names the floor', (t) => {
+  const { r, gitCalled } = installWith(t, String(NODE_FLOOR - 1));
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stderr, new RegExp(`too old; this needs ${NODE_FLOOR} or newer`));
+  assert.equal(gitCalled, false, 'the guard fires before any git call');
 });
+
+for (const [label, out] of [['empty', ''], ['non-numeric', 'abc'], ['partly numeric', '22x']]) {
+  test(`install.sh refuses (fails closed) when the Node major is ${label}`, (t) => {
+    const { r, gitCalled } = installWith(t, out);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /could not read the Node major version/);
+    assert.equal(gitCalled, false, 'the guard fires before any git call');
+  });
+}
