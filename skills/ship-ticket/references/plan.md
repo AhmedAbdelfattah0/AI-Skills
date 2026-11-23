@@ -86,6 +86,14 @@ unmerged dependency) is left out of this approval and becomes its own later wave
 never start BUILD on a wave ticket whose plan was not in an approved
 `ExitPlanMode`.
 
+For N tickets, analyse all of them first and write ONE unified plan that records
+the dependencies and file/resource conflicts between tickets, each ticket's
+security risks and its gates. The one approval covers the whole plan, then
+independent tickets run in parallel; each ticket keeps its own tests,
+independent review and gates. The single approval never waives a security
+check or a per-ticket review. No wave driver exists: `scripts/wave.mjs verify|status --wave <manifest>` and `scripts/host-admit.mjs`
+are optional helpers only.
+
 Remain in Plan Mode while drafting and throughout the host/counterpart debate.
 Reconcile its result there. For a policy-2 plan with an execution DAG, run
 `scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`

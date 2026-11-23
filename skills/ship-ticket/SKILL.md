@@ -129,6 +129,12 @@ A *safety refusal* is not: missing approval evidence returns to approval,
 unproven subscription billing is **WAIT_FOR_USER** for the user's billing
 decision, and an ownership violation fails that node into bounded repair.
 
+**Before HEAVY work** (full suites, builds, mutation runs) run
+`node <SHIP_TICKET_SKILL>/scripts/host-admit.mjs --class heavy [--running N]` and reduce parallelism
+or wait while it holds (exit 1); on non-macOS it prints `platform_unsupported`
+(exit 2), which is not an allow: apply the manual rule (check memory and load
+yourself, run one heavy job at a time). Details in execution-harness.md.
+
 ## Dependency-driven orchestration
 
 Treat each phase as a directed acyclic graph, not a prose checklist. A node is
@@ -419,6 +425,14 @@ becomes a plan risk, **WAIT_FOR_USER**, or **FAIL**; it does not create another 
 Load [references/plan.md](references/plan.md); cross-model.md is already loaded
 from UNDERSTAND.
 
+**Before planning, settle two things with the owner.** Read the repository's
+CLAUDE.md (or AGENTS.md) for the base branch (for example `main` or `qa`); if it
+is unclear, ASK the owner before planning, never guess. At the START of the
+ticket or wave, ask ONCE whether auto-merge is allowed after the reviews and CI
+are green: yes means merge after every gate has passed; no means prepare the PR
+and wait for the owner's "merge". Deploy is a separate decision and is never
+implied. Push, PR and merge stay manual unless the owner opted in.
+
 In an interactive session the orchestrator owns the Plan Mode lifecycle; follow
 the host-specific procedure in the plan reference. On Claude, `EnterPlanMode` and
 `ExitPlanMode` are deferred tools: the first action of PLAN is to load them, when
@@ -590,6 +604,13 @@ On every ticket, start the mandatory second opinion (Codex, else Fable)
 concurrently in a fresh session when resources allow. Keep the planning debate
 out of the bounded code review.
 
+The orchestrator runs the independent reviewers itself: it opens a shell, calls
+the Codex CLI and a separate subagent with the standard brief, triages findings
+by evidence, fixes, then runs the targeted confirmation. If the confirmation
+fails: STOP, write the root-cause assessment and re-plan; there is no third
+cycle (see
+[references/review.md](references/review.md) "Two-cycle limit").
+
 Reconcile once. A clean primary PASS continues directly to SHIP. Accepted
 findings receive one consolidated repair batch and one targeted confirmation by
 the primary reviewer. A material elevated-review disagreement gets the same
@@ -756,6 +777,13 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   unproven subscription-billing route, or credentials, permissions and external
   authority only the user can provide.
 
+**When the engine refuses a step**, read the refusal and the code, then decide
+whether the cause is the work, the run data or the gate. Fix the work or the run
+data inside the approved plan and retry, at most 2 re-issues of the same refusal
+for the same candidate. Never bypass or waive a gate. STOP and return to the
+owner for an owner-reserved class (security, approval, ownership, spent budget,
+RETRY authority) or when the same problem repeats.
+
 Everything else inside the approved scope takes the recommended default and is
 recorded: for example, a fixable input refusal is corrected and rerun, a Codex
 outage switches to Fable, and on a STANDARD run a degraded harness is recorded
@@ -870,4 +898,5 @@ ship threshold opened; if an in-scope residue is found after merge, ship the fix
 then report it.
 
 The user merges the PR and runs any requested context compaction; this skill
-does neither.
+does neither, unless the owner opted in to auto-merge at the start (see PLAN):
+then merge only after every review and CI gate is green. Deploy is never implied.
