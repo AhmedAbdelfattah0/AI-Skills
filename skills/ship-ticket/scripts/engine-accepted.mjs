@@ -9,8 +9,10 @@
  *         exit 0 for run/dispatch, 2 for stop; 1 on a usage error (stderr `engine-accepted: <message>`).
  *   A stop with code `acceptance_unknown` carries `facts.settle_with`: the existing engine command whose output
  *   settles that phase (`drive`, or `gate red` while RED is owed), to be run and passed back with --last. It is
- *   null when no command can settle it (security-addendum RED slots): then it is a real stop. Every other stop
- *   is a real stop for the orchestrator or the owner (`stop_class`).
+ *   null when no command can settle it (security-addendum RED slots): then it is a real stop. A moved binding
+ *   (plan narrative or DAG bytes) is never `acceptance_unknown`: it is the owner stop approval_mismatch /
+ *   dag_mismatch at INIT, read directly or from a drive output's binding judgment. Every other stop is a real
+ *   stop for the orchestrator or the owner (`stop_class`).
  *
  * What it reads: the raw state, the engine's own read-only `status` (its load() guards and composed judgments),
  * the raw state again (a state that moved during the read is refused as `state_moved`), the engine log (each
@@ -122,6 +124,9 @@ function lastDrive(last, S, freshness) {
   // the outcome must be the one drive computes from its own fields (run-engine.mjs drive)
   const finished = Object.values(d.nodes).every(n => ['done', 'cancelled'].includes(n.state)) && d.repairs.every(r => !['pending', 'running'].includes(r.state));
   if ((d.outcome === 'judgment') !== (d.judgments.length > 0) || (d.outcome === 'done' && !finished)) return no(`outcome ${d.outcome} is inconsistent with its judgments, nodes and repairs`);
+  // A refusal that carries a binding judgment is taken as is, never as stale: drive returns it before doing any work
+  // (run-engine.mjs drive -> verifyBinding), and it can only make next STOP (INIT not_accepted, owner), never accept anything.
+  if (d.judgments.some(j => BINDING.has(j.code))) return { usable: true, file: last.file, outcome: d.outcome, judgments: d.judgments.map(j => ({ code: j.code, node: typeof j.node === 'string' ? j.node : null })) };
   const stale = freshnessProblems(freshness);
   if (stale.length) return no(`changed since: ${stale.join('; ')}`);
   return { usable: true, file: last.file, outcome: d.outcome, judgments: d.judgments.map(j => ({ code: j.code, node: typeof j.node === 'string' ? j.node : null })) };
@@ -148,7 +153,10 @@ function phases(R) {
   const UNSETTLED = 'pass the JSON of a fresh `run-engine.mjs drive` with --last; its result is not persisted';
   const out = [];
 
+  const f = isObj(R.freshness) ? R.freshness : {};
+  const moved = [...(f.plan === false ? ['approval_mismatch'] : []), ...(f.dag === false ? ['dag_mismatch'] : [])];
   out.push(binding.length ? P('INIT', 'not_accepted', `the drive output reports a binding judgment: ${binding.map(j => j.code).join(', ')}`, lastEv, { code: binding[0].code })
+    : moved.length ? P('INIT', 'not_accepted', `the approval binding moved: ${moved.join(', ')} (plan narrative or DAG bytes differ from the digests bound at init)`, [at(['plan_digest'], S.plan_digest), at(['dag_digest'], S.dag_digest)], { code: moved[0] })
     : L.usable ? P('INIT', 'accepted', 'a fresh drive output re-verified the approval binding (no binding judgment)', [at(['run_id'], S.run_id), ...lastEv])
     : P('INIT', 'unknown', `the binding (plan narrative, DAG digest, trusted START) is verified only inside drive/resume/gate (${L.reason}); ${UNSETTLED}`, [at(['run_id'], S.run_id)], { settle: 'drive' }));
 
@@ -292,7 +300,7 @@ export function acceptedView(input) {
   const runners = Object.entries(S.config?.testCommands ?? {}).filter(([, e]) => e?.format && !e.evidence).map(([k]) => k);
   return { ...base, exists: true, candidate: { id: X, ...(X ? {} : { reason: input.candidate?.reason ?? null }) }, last: L,
     freshness: { problems: freshnessProblems(input.freshness) }, blockers,
-    phases: phases({ S, X, at, L, statusOut, sec: input.sec }),
+    phases: phases({ S, X, at, L, statusOut, sec: input.sec, freshness: input.freshness }),
     gates: Object.fromEntries(['red', 'reassess', 'review', 'ship-ready'].map(g => [g, refusalOf(S, g, ix)])),
     facts: { excluded_reviewers: [...new Set((S.builders ?? []).map(x => x.identity))], red_runners: runners, freeze: S.freeze?.candidate ?? null } };
 }
@@ -381,12 +389,12 @@ async function readSecurity(S) {
 }
 
 /** Read the run and return the accepted-view. */
-export async function readRun({ repoRoot, ticket, runId, lastFile }) {
+export async function readRun({ repoRoot, ticket, runId, lastFile, statusFn = status }) {
   if (!SAFE_ID.test(ticket ?? '') || !SAFE_ID.test(runId ?? '') || typeof repoRoot !== 'string') throw new Error('repo, a safe ticket and run id are required');
   const files = { state: gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.state.json`), log: gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.engine.jsonl`) };
   const input = { ticket, runId, files, S: null, raw: null, statusOut: null, logText: '', candidate: null, last: null };
   const before = existsSync(files.state) ? readFileSync(files.state, 'utf8') : null;
-  try { input.statusOut = await status({ repoRoot, ticket, runId }); } catch (e) { input.statusError = { code: e.code ?? 'status_failed', message: e.message }; }
+  try { input.statusOut = await statusFn({ repoRoot, ticket, runId }); } catch (e) { input.statusError = { code: e.code ?? 'status_failed', message: e.message }; }
   if (input.statusError) return acceptedView(input);
   input.raw = readFileSync(files.state, 'utf8');
   // status read the file itself: a commit between the two reads would mix two states

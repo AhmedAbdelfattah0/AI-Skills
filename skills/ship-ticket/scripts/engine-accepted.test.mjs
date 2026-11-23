@@ -25,7 +25,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
-import { acceptedView, nextStep, PHASES } from './engine-accepted.mjs';
+import { acceptedView, nextStep, readRun, PHASES } from './engine-accepted.mjs';
+import { status } from './run-engine.mjs';
 import * as SP from './security-plan.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
@@ -363,7 +364,7 @@ test('T5 a caller-chosen review_execution is never the subject, with the audit r
 
 // ------------------------------------------------------------------ freshness: a stale --last never advances (Round 1 E1/E1b/E2/E3)
 
-test('T9 a drive output stops settling INIT/BUILD once the plan narrative, the DAG bytes or a node-owned file changed after it: next never dispatches a reviewer or names ship-ready then', { skip: WIN_SKIP }, async (t) => {
+test('T9 after the drive, a moved plan narrative or DAG is an owner stop and a drifted node file is unknown (settle with drive): next never dispatches a reviewer or names ship-ready then', { skip: WIN_SKIP }, async (t) => {
   const fx = happy(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
   drive(fx);
@@ -372,26 +373,27 @@ test('T9 a drive output stops settling INIT/BUILD once the plan narrative, the D
   assert.equal(d.r.out.outcome, 'done');
   assert.equal(step(next(fx, { last: d.file })).action, 'dispatch', 'control: fresh, the reviewer dispatch is named');
   const edit = (file, from, to) => { const before = readFileSync(file); writeFileSync(file, before.toString('utf8').replace(from, to)); return () => writeFileSync(file, before); };
-  const cases = [
-    ['E1 plan narrative edited after approval', () => edit(fx.planFile, 'Approved narrative.', 'Edited after approval.'), 'INIT', /changed since: the plan narrative/],
-    ['E2 DAG bytes edited', () => edit(fx.dagFile, '"width": 2', '"width": 1'), 'INIT', /changed since: .*DAG bytes/],
-    ['E3 a node-owned file edited after the drive', () => edit(join(fx.repo, 'src', 'p.txt'), 'p1', 'hand edit'), 'INIT', /changed since: .*fingerprints drifted: p/],
-  ];
-  for (const [name, apply, phase, why] of cases) {
+  for (const [name, apply, code] of [['E1 plan narrative edited after approval', () => edit(fx.planFile, 'Approved narrative.', 'Edited after approval.'), 'approval_mismatch'],
+    ['E2 DAG bytes edited', () => edit(fx.dagFile, '"width": 2', '"width": 1'), 'dag_mismatch']]) {
     const undo = apply();
     const n = next(fx, { last: d.file });
-    stopped(n, 'acceptance_unknown', phase);
-    assert.match(n.out.reason, why, name);
-    assert.equal(n.out.facts.settle_with.cmd, 'drive', name);
+    stopped(n, code, 'INIT');
+    assert.equal(n.out.stop_class, 'owner', name);
     assert.equal(view(fx, { last: d.file }).out.last.usable, false, name);
     undo();
   }
+  const undoDrift = edit(join(fx.repo, 'src', 'p.txt'), 'p1', 'hand edit'); // E3
+  const drifted = next(fx, { last: d.file });
+  stopped(drifted, 'acceptance_unknown', 'INIT');
+  assert.match(drifted.out.reason, /changed since: node input\/output fingerprints drifted: p/);
+  assert.equal(drifted.out.facts.settle_with.cmd, 'drive', 'node drift is settled by a drive (it re-runs the stale closure)');
+  undoDrift();
   assert.equal(step(next(fx, { last: d.file })).action, 'dispatch', 'restored: fresh again');
 
   ok(fx.gate('review', passReview('rx-1', fx.candidate())));
   assert.equal(step(next(fx, { last: d.file })).cmd, 'gate ship-ready');
   const undo = edit(fx.planFile, 'Approved narrative.', 'Edited after review.'); // E1b
-  stopped(next(fx, { last: d.file }), 'acceptance_unknown', 'INIT');
+  stopped(next(fx, { last: d.file }), 'approval_mismatch', 'INIT');
   undo();
 });
 
@@ -426,7 +428,7 @@ test('T9 --last hardening: oversize, malformed and inconsistent drive outputs ar
 
 // ------------------------------------------------------------------ hard stops on the real engine
 
-test('T6 hard stops: run mismatch, a binding judgment in the drive output, and a candidate moved after review (RETRY authority)', { skip: WIN_SKIP }, async (t) => {
+test('T6 hard stops: run mismatch, a candidate moved after review (RETRY authority), and the binding judgment of a FRESH drive output after a plan or DAG edit (an owner stop, never a drive loop)', { skip: WIN_SKIP }, async (t) => {
   const fx = flagged(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
   const n0 = next(fx, { runId: 'run-2' });
@@ -442,10 +444,29 @@ test('T6 hard stops: run mismatch, a binding judgment in the drive output, and a
   assert.equal(moved.out.stop_class, 'owner');
   rmSync(join(fx.repo, 'src', 'extra.txt'));
 
-  writeFileSync(fx.planFile, readFileSync(fx.planFile, 'utf8').replace('Approved narrative.', 'Edited after approval.'));
-  const unbound = drive(fx);
-  assert.equal(unbound.r.out?.outcome, 'judgment');
-  assert.equal(view(fx, { last: unbound.file }).out.last.usable, false, 'the edited plan also fails the freshness check');
+  for (const [file, from, to, code] of [[fx.planFile, 'Approved narrative.', 'Edited after approval.', 'approval_mismatch'], [fx.dagFile, '"width": 2', '"width": 1', 'dag_mismatch']]) {
+    const before = readFileSync(file);
+    writeFileSync(file, before.toString('utf8').replace(from, to));
+    const unbound = drive(fx); // drive without --dag reads the bound DAG file
+    assert.equal(unbound.r.out?.outcome, 'judgment');
+    assert.ok(unbound.r.out.judgments.some(j => j.code === code), unbound.r.stdout);
+    assert.equal(view(fx, { last: unbound.file }).out.last.usable, true, 'a refusal carrying a binding judgment is never read as stale');
+    const n = next(fx, { last: unbound.file });
+    stopped(n, code, 'INIT');
+    assert.equal(n.out.stop_class, 'owner');
+    writeFileSync(file, before);
+  }
+});
+
+test('T6 a state committed between the two state reads (around status) is refused as state_moved, never mixed', { skip: WIN_SKIP }, async (t) => {
+  const fx = flagged(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const control = await readRun({ repoRoot: fx.repo, ticket: 'T-1', runId: 'run-1' });
+  assert.equal(control.error, undefined, 'control: an undisturbed read');
+  const racing = async (ctx) => { const out = await status(ctx); fx.editState((S) => { S.seq += 1; }); return out; };
+  const v = await readRun({ repoRoot: fx.repo, ticket: 'T-1', runId: 'run-1', statusFn: racing });
+  assert.equal(v.error?.code, 'state_moved');
+  assert.equal(nextStep(v).action, 'stop');
 });
 
 test('T6 an open engine judgment (a failed node) STOPs with its code', { skip: WIN_SKIP }, async (t) => {
@@ -648,13 +669,22 @@ test('T8 pure core: blockers are ordered owner > judgment > unknown > off_happy_
   assert.equal(pureNext((i) => { all(i); i.runId = 'run-1'; i.statusOut.judgments = []; }).code, 'attempts_live');
 });
 
-test('T8 pure core: a drive output of another run or ticket, or a stale binding, settles nothing', () => {
-  for (const over of [(i) => { i.last.value.run_id = 'run-2'; }, (i) => { i.last.value.ticket = 'T-2'; }, (i) => { i.freshness = { plan: false, dag: true, drifted: [] }; },
-    (i) => { i.freshness = { plan: true, dag: false, drifted: [] }; }, (i) => { i.freshness = { plan: true, dag: true, drifted: ['a'] }; }, (i) => { i.freshness = undefined; }]) {
+test('T8 pure core: a drive output of another run or ticket, drifted nodes or unread freshness settle nothing; a moved plan or DAG is an owner stop', () => {
+  for (const over of [(i) => { i.last.value.run_id = 'run-2'; }, (i) => { i.last.value.ticket = 'T-2'; },
+    (i) => { i.freshness = { plan: true, dag: true, drifted: ['a'] }; }, (i) => { i.freshness = undefined; }]) {
     const n = pureNext(over);
     assert.equal(n.code, 'acceptance_unknown', String(over));
     assert.equal(n.phase, 'INIT');
   }
+  for (const [code, freshness] of [['approval_mismatch', { plan: false, dag: true, drifted: [] }], ['dag_mismatch', { plan: true, dag: false, drifted: [] }]]) {
+    for (const last of [true, false]) {
+      const n = pureNext((i) => { i.freshness = freshness; if (!last) i.last = null; });
+      assert.equal(n.code, code, `${code} with${last ? '' : 'out'} --last`);
+      assert.equal(n.stop_class, 'owner');
+    }
+  }
+  const stale = pureNext((i) => { i.freshness = { plan: false, dag: false, drifted: ['a'] }; i.last.value.outcome = 'judgment'; i.last.value.judgments = [{ code: 'dag_mismatch', node: null }]; });
+  assert.equal(stale.code, 'dag_mismatch', 'a binding judgment is taken even when freshness also fails');
 });
 
 test('T8 pure core: a RED slot owed by an addendum is unknown with NO settle_with (no drive settles it); a refused RED gate is a stop', () => {
