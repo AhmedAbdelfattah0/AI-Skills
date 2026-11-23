@@ -819,8 +819,8 @@ const MUTANTS = [
     (t) => ({ x: limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted' }, over: { limit: { kind: 'provider_limit', evidence: 'EPERM: operation not permitted' } } }), code: 'debate_limit_invalid' })],
   ['dispositions-line outcome matches the attestation', "if (D && D.outcome !== outcome) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
     (t) => ({ x: converged(t, { narr: withResult(narrative(), 'UNRESOLVED') }), code: 'debate_outcome_invalid' })],
-  ['whole-event diagnostic classification', 'push(leaves([e.message, e.error, item ? [item.message, item.text] : []]));', 'for (const x of leaves([e.message, e.error, item ? [item.message, item.text] : []])) push([x]);',
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn failed', events: '{"type":"error","message":"EPERM: operation not permitted","error":"usage limit reached (429)"}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
+  ['diagnostics: no field selection (the whole event is read)', '    push(e);\n', '    push([e.message, e.error]);\n',
+    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn failed', events: '{"type":"error","message":"usage limit reached (429)","code":"EPERM"}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
   ['{-leading attestation refused', "if (R.events.some((e) => Object.hasOwn(e, 'debate-attestation-v1') || Object.hasOwn(e, 'debate_id'))) {", 'if (false) {',
     (t) => { const x = converged(t); return { x, text: planText(x.narr, [JSON.stringify({ debate_id: DEBATE_ID, outcome: 'CONVERGED' })]), code: 'debate_attestation_invalid' }; }],
 ];
@@ -828,6 +828,15 @@ const PROBE_OK = { relay_present: true, codex_version: { status: 0, version: 'co
   dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', codexVersion: 'codex-cli 1.0.0', finalMessage: PROBE_MSG('n') } },
   resume: { result: { status: 'completed', threadId: 't', sandbox: 'read-only' } }, cancel: { child_seen: true, result: { status: 'timeout' }, survivors: [] }, coverage: { before: 'c', after: 'c', ignored_before: 'i', ignored_after: 'i' } };
 const OTHER_MUTANTS = [
+  ['diagnostics: object keys are leaves', 'Object.entries(v).flatMap(([k, x]) => [k, ...valueLeaves(x, d + 1)])', 'Object.values(v).flatMap((x) => valueLeaves(x, d + 1))',
+    (mod) => mod.diagnosticEntries({}, '{"type":"error","message":"usage limit reached (429)","meta":{"EPERM":"seen"}}\n')[0].cls === 'ambiguous'],
+  ['diagnostics: array elements are leaves', 'Array.isArray(v) ? v.flatMap((x) => valueLeaves(x, d + 1))', 'Array.isArray(v) ? []',
+    (mod) => mod.diagnosticEntries({}, '{"type":"error","message":"usage limit reached (429)","details":["context","EPERM"]}\n')[0].cls === 'ambiguous'],
+  ['diagnostics: no depth cap', 'const valueLeaves = (v, d = 0) => (typeof v', 'const valueLeaves = (v, d = 0) => (d > 3 ? [] : typeof v',
+    (mod) => mod.diagnosticEntries({}, `${JSON.stringify({ type: 'error', message: 'usage limit reached (429)', deep6: { nested: { nested: { nested: { nested: { nested: { leaf: 'EPERM' } } } } } } })}\n`)[0].cls === 'ambiguous'],
+  ['probe: fresh_result needs an explicit AGREE', "probeExpect(o.nonce)).obj?.verdict === 'AGREE' ?", 'probeExpect(o.nonce)).ok ?',
+    (mod) => mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only',
+      finalMessage: JSON.stringify({ v: 1, request_id: 'probe-n1', plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}`, verdict: 'CHANGES_REQUESTED', findings: [{ id: 'P1', status: 'new', severity: 'major' }] }) } } }).fresh_result.result === 'fail'],
   ...[
     ['response: v is 1', 'if (o.v !== 1) return bad(', (o) => ({ ...o, v: 2 })],
     ['response: request_id format', "if (typeof o.request_id !== 'string' || !SAFE_SEGMENT.test(o.request_id)) return bad(", (o) => ({ ...o, request_id: '../x' })],
@@ -1545,4 +1554,53 @@ test('[da9] debate-serialize --dispositions prints the canonical line; one of --
   assert.equal(r.stdout, `${B.serializeDispositions(obj)}\n`);
   assert.equal(run('debate-serialize', '--dispositions', f, '--attestation', f).status, 2);
   assert.equal(run('debate-serialize').status, 2);
+});
+
+// ================================================================== Round 1 (new attempt) repair: B3 whole-value diagnostics
+// Each diagnostic source (the relay result's error value; each error event) is classified from ALL its string leaves:
+// values AND object keys, at every depth, in arrays, numbers rendered as strings. No field list exists to forget a field.
+test('[r1a-B3] the Codex inputs: a code field or item.error carrying EPERM makes a 429 event ambiguous', (t) => {
+  const ev1 = '{"type":"error","message":"usage limit reached (429)","code":"EPERM"}\n';
+  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: ev1 }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'), 'code field');
+  const ev2 = '{"type":"turn.failed","message":"usage limit reached (429)","item":{"type":"error","error":"EPERM"}}\n';
+  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: ev2 }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'), 'item.error');
+});
+
+const P_MARKS = ['usage limit reached (429)', 'quota exceeded', 'rate limit', 429];
+const R_MARKS = ['EPERM', 'ENOMEM', 'operation timed out'];
+const POSITIONS = ['message', 'code', 'error', 'item.error', 'array', 'key', 'deep1', 'deep2', 'deep3', 'deep4', 'deep5', 'deep6'];
+/** Place `mark` at `pos` in the event `e` (distinct roots per position, so two placements never collide). */
+function place(e, mark, pos) {
+  const m = typeof mark === 'number' && ['key'].includes(pos) ? String(mark) : mark;
+  if (pos === 'message') e.message = m; else if (pos === 'code') e.code = m; else if (pos === 'error') e.error = m;
+  else if (pos === 'item.error') e.item = { type: 'error', error: m };
+  else if (pos === 'array') e.details = ['context', m];
+  else if (pos === 'key') e.meta = { [m]: 'seen' };
+  else { const d = Number(pos.slice(4)); let node = { leaf: m }; for (let k = 1; k < d; k += 1) node = { nested: node }; e[`deep${d}`] = node; }
+  return e;
+}
+test('[r1a-B3] generated: every provider x resource marker pair in different positions is ambiguous; one marker anywhere classifies by it', () => {
+  let pairs = 0, singles = 0;
+  const cls = (e) => { const out = B.diagnosticEntries({}, `${JSON.stringify(e)}\n`); assert.equal(out.length, 1, JSON.stringify(e)); return out[0].cls; };
+  for (const pm of P_MARKS) for (const rm of R_MARKS) for (const a of POSITIONS) for (const b of POSITIONS) {
+    if (a === b) continue;
+    assert.equal(cls(place(place({ type: 'error' }, pm, a), rm, b)), 'ambiguous', `${pm}@${a} + ${rm}@${b}`);
+    pairs += 1;
+  }
+  for (const pos of POSITIONS) {
+    for (const pm of P_MARKS) { assert.equal(cls(place({ type: 'error' }, pm, pos)), 'provider', `${pm}@${pos}`); singles += 1; }
+    for (const rm of R_MARKS) { assert.equal(cls(place({ type: 'error' }, rm, pos)), 'resource', `${rm}@${pos}`); singles += 1; }
+  }
+  assert.equal(cls({ type: 'error', message: 'something else' }), 'unclassified');
+  // the result.json error value is one whole source too, whatever its shape
+  assert.equal(B.diagnosticEntries({ error: place(place({}, 429, 'deep3'), 'EPERM', 'key') }, '')[0].cls, 'ambiguous');
+  assert.equal(B.diagnosticEntries({}, '{"type":"item.completed","item":{"type":"agent_message","text":"usage limit reached (429)"}}\n').length, 0, 'message events never count');
+  assert.equal(pairs, P_MARKS.length * R_MARKS.length * POSITIONS.length * (POSITIONS.length - 1));
+  assert.ok(singles > 70, `singles ${singles}`);
+});
+
+test('[r1a-probe] fresh_result needs an explicit AGREE: a schema-valid CHANGES_REQUESTED no-op answer is a failure', () => {
+  const cr = JSON.stringify({ v: 1, request_id: 'probe-n1', plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}`, verdict: 'CHANGES_REQUESTED', findings: [{ id: 'P1', status: 'new', severity: 'major' }] });
+  const obs = { relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only', finalMessage: cr } } };
+  assert.equal(B.classifyProbe(obs).fresh_result.result, 'fail');
 });

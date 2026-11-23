@@ -190,9 +190,9 @@ repository override is honoured, and reaching a configured budget is a
 its own `--timeout` (initial 10 minutes, delta 5 minutes, configurable), and one
 `--session` resume is allowed per timeout; a timeout alone is never a debate limit.
 
-The ledger tracks canonical outstanding findings: one shared ledger, where a
-renamed or split finding keeps an alias to its canonical ID, and aliases survive
-fresh sessions. A round is productive when it changes a decision, resolves an
+The ledger tracks canonical outstanding findings in one shared ledger, derived from
+the counterpart's response objects. A renamed or split finding may carry an alias
+for display only; an alias never opens or closes a finding. A round is productive when it changes a decision, resolves an
 uncertainty with evidence, or adds a concrete discriminating check or result
 relevant to an open canonical finding; a quoted line that changes none of these is
 not evidence. Two consecutive non-productive rounds on the same canonical finding are a diagnostic trigger, never a stop. Climb this ladder: (1) an evidence task
@@ -201,7 +201,7 @@ prototype and attaches the result); (2) a fresh counterpart session carrying the
 delta and the ledger, recording which strategies already failed; (3) if rounds are
 still non-productive, escalate as `UNRESOLVED` with both positions. A legitimately
 maintained finding may take more than two exchanges while rounds stay productive.
-A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text.
+A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text. An owner disposition never closes a finding in the derived ledger: the finding stays outstanding, and the disposition only authorizes START for a non-CONVERGED outcome.
 
 The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval. Escalate only for a
 genuine unresolved decision, stagnation after a strategy change, or an actual
@@ -217,10 +217,10 @@ challenge feasibility, correctness, requirements, security, contract compatibili
 and safe concurrency. Require evidence and concrete alternatives. Do not redo
 mechanical prechecks without a specific contrary observation.
 
-Every brief starts with three lines the checker reads, each exactly once:
-`request_id: <fresh id>`, `plan_version: <v>` and, for the confirmation round,
-`plan_digest: <brief.mjs plan-digest of the frozen plan file>`. A `request_id` is
-never reused.
+Every brief, in every round, starts with three lines the checker reads, each exactly
+once: `request_id: <fresh id>`, `plan_version: <v>` and
+`plan_digest: <brief.mjs plan-digest of the plan file the round reviews>`; every
+response object echoes all three. A `request_id` is never reused.
 
 ### Host response and focused rebuttal
 
@@ -330,7 +330,7 @@ because the relay result does not record HEAD. It prints `outcome`, `debate_qual
 by owner decision D-15 as optional telemetry outside closure), `attestation_sha256`
 and `run_log_metrics`. A refusal is fixed inside Plan Mode. Because the RUN-STATE body is outside the
 digest, state `attestation_sha256` in the text accompanying `ExitPlanMode`; START
-records it as `debate_attestation_sha256` and `start-check` re-verifies it. The ExitPlanMode text also quotes the `debate-dispositions-v1:` line verbatim beside that hash, so the owner approves exactly the bytes the checker reads. A debate_policy 2 narrative may hold only single-line HTML comments: every `<!--` outside the RUN-STATE body must close with `-->` on the same line (`debate_narrative_hidden_markup`), so no comment can hide another line; the mandated `<!-- security-plan: ... -->` line is single-line. Residual: other ways to hide text in a rendered Markdown view (collapsed HTML, styling) are not scanned; the verbatim quote in the approval text and the host's native presentation are the control. Present
+records it as `debate_attestation_sha256` and `start-check` re-verifies it. The ExitPlanMode text also quotes the `debate-dispositions-v1:` line verbatim beside that hash, so the owner approves exactly the bytes the checker reads. A debate_policy 2 narrative may hold only single-line HTML comments: every `<!--` outside the RUN-STATE body must close with `-->` on the same line (`debate_narrative_hidden_markup`), so no comment can hide another line; the mandated `<!-- security-plan: ... -->` line is single-line. Residual: other ways to hide text in a rendered Markdown view (collapsed HTML, styling) are not scanned; the verbatim quote in the approval text and the host's native presentation are the control. Named vectors include collapsed HTML (`<details>`), `<div hidden>`, `<style>`, and a pure-Markdown multi-line link-reference title (`[x]: /u '` … `'`) that can hide a column-1 line in a rendered view. Present
 outstanding choices through the normal native approval; unresolved product,
 security or scope decisions must be explicit in that request. Never invent
 consensus or promise an objectively best plan.

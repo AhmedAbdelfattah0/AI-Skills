@@ -681,26 +681,36 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
 const PROVIDER_RE = /\b(429|quota|rate.?limit\w*|usage limit\w*)\b/i;
 const RESOURCE_RE = /\b(EPERM|EACCES|ENOMEM|ENOSPC|EMFILE|out of memory|killed|timed? ?out)\b/i;
 /**
- * The class of one whole diagnostic entry: a structured dispatch class when there is one, otherwise read from the entry's
- * full text: provider when only provider/quota/rate-limit words occur, resource when only permission/resource/kill/
- * timeout words occur, ambiguous when both or neither do (an ambiguous entry supports no limit kind).
+ * The class of one whole diagnostic string: provider when only provider/quota/rate-limit markers occur, resource when
+ * only permission/resource/kill/timeout markers occur, ambiguous when both do, unclassified when neither does. Only
+ * provider and resource support a limit kind. A dispatch error's structured class must agree with its text.
  */
 function entryClass(text, dispatchClass = null) {
-  if (dispatchClass) return dispatchClass === 'provider' ? 'provider' : ['permission_denied', 'resource'].includes(dispatchClass) ? 'resource' : 'ambiguous';
   const p = PROVIDER_RE.test(text), r = RESOURCE_RE.test(text);
-  return p && !r ? 'provider' : r && !p ? 'resource' : 'ambiguous';
+  const fromText = p && !r ? 'provider' : r && !p ? 'resource' : p && r ? 'ambiguous' : 'unclassified';
+  if (!dispatchClass) return fromText;
+  const structured = dispatchClass === 'provider' ? 'provider' : ['permission_denied', 'resource'].includes(dispatchClass) ? 'resource' : 'ambiguous';
+  return fromText === 'unclassified' || fromText === structured ? structured : 'ambiguous';
 }
 /**
- * The diagnostic entries of a relay result, ONE per whole source (approved amendment B3): the relay `error` field, and
- * each error event of events.jsonl (`type: error`, `turn.failed`, an item of type `error`) as a whole. An entry keeps its
- * string leaves and is classified from all of them together, so one event naming both EPERM and a 429 is ambiguous.
- * Counterpart output (agent messages, reasoning, the final message) never counts.
+ * Every string leaf of a JSON value: string values, object KEYS, numbers and booleans rendered as strings, at every
+ * depth and inside arrays. There is no depth cap and no field list (`d` only tracks depth; nothing is cut).
  */
-function diagnosticEntries(res, eventsText) {
+const valueLeaves = (v, d = 0) => (typeof v === 'string' ? [v]
+  : typeof v === 'number' || typeof v === 'boolean' ? [String(v)]
+    : Array.isArray(v) ? v.flatMap((x) => valueLeaves(x, d + 1))
+      : isObject(v) ? Object.entries(v).flatMap(([k, x]) => [k, ...valueLeaves(x, d + 1)]) : []);
+/**
+ * The diagnostic sources of a relay result, ONE per whole source: the result's `error` value, and each error event of
+ * events.jsonl (`type: error`, `turn.failed`, or an item of type `error`), each read IN FULL from the canonical string
+ * leaves of its whole JSON value (no field is selected, so no field can be missed). Message events (agent messages,
+ * reasoning, the final message) never count. Each source's string is classified as a whole: an event naming both a
+ * 429 and EPERM, in any fields, is ambiguous and supports neither kind. Exported for the generated position test.
+ */
+export function diagnosticEntries(res, eventsText) {
   const out = [];
-  const leaves = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(leaves) : isObject(v) ? Object.values(v).flatMap(leaves) : []);
-  const push = (ls) => { const kept = ls.filter((t) => t.trim()); if (kept.length) out.push({ leaves: kept, cls: entryClass(kept.join('\n')) }); };
-  push(leaves(res.error));
+  const push = (v) => { const text = valueLeaves(v).join('\n'); if (text.trim()) out.push({ text, cls: entryClass(text) }); };
+  if (res?.error !== undefined && res.error !== null) push(res.error);
   for (const l of normalise(eventsText).split('\n')) {
     let e;
     try { e = JSON.parse(l); } catch { continue; }
@@ -708,7 +718,7 @@ function diagnosticEntries(res, eventsText) {
     const item = isObject(e.item) ? e.item : null;
     const isError = e.type === 'error' || e.type === 'turn.failed' || item?.type === 'error';
     if (!isError) continue;
-    push(leaves([e.message, e.error, item ? [item.message, item.text] : []]));
+    push(e);
   }
   return out;
 }
@@ -731,7 +741,7 @@ function checkLimit(att, last, lastDiag, add) {
   } else if (!last || last.status === 'completed') add('debate_limit_invalid', `${L.kind} needs a last attempt with its actual status (failed, timeout, aborted or unavailable) and diagnostics`);
   else {
     const ev = L.evidence.trim();
-    const hits = asList(lastDiag).filter((e) => e.leaves.some((t) => t.includes(ev)));
+    const hits = asList(lastDiag).filter((e) => e.text.includes(ev));
     const providerish = hits.some((e) => e.cls === 'provider');
     const resourceish = hits.some((e) => e.cls === 'resource');
     if (!hits.length) add('debate_limit_invalid', 'the limit evidence is not quoted from one retained diagnostic entry of the last attempt (the relay error, an error event or the dispatch error; never a counterpart message)');
@@ -773,7 +783,7 @@ function verifyRound(r, att, bundleDir, add) {
   if (r.status !== 'completed' && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
-    else out.diag = [{ leaves: [e.text], cls: entryClass(e.text, e.class) }];
+    else out.diag = [{ text: e.text, cls: entryClass(e.text, e.class) }];
   }
   const expect = { request_id: r.request_id, plan_version: r.plan_version, plan_digest: r.plan_digest };
   let parsed = null;
@@ -985,7 +995,7 @@ export function classifyProbe(o) {
   const notReached = () => no(dispatch.class, `not reached: dispatch failed (${dispatch.class})`);
   const id = idOf(d.result);
   const fresh_result = !reached ? notReached()
-    : nonEmpty(id) && readOnly(d.result) && parseResponse(typeof d.result.finalMessage === 'string' ? d.result.finalMessage : null, probeExpect(o.nonce)).ok ? pass(`readable result.json, status completed, read-only, new ${claude ? 'sessionId' : 'threadId'} ${id}`)
+    : nonEmpty(id) && readOnly(d.result) && parseResponse(typeof d.result.finalMessage === 'string' ? d.result.finalMessage : null, probeExpect(o.nonce)).obj?.verdict === 'AGREE' ? pass(`readable result.json, status completed, read-only, new ${claude ? 'sessionId' : 'threadId'} ${id}`)
       : no('relay', `result.json lacks a ${claude ? 'sessionId' : 'threadId'}, is not read-only, or does not answer this probe's nonce`);
   const rs = o.resume ?? {};
   const resume = fresh_result.result !== 'pass' ? no(fresh_result.class, 'not reached: no fresh result to resume')
