@@ -181,6 +181,14 @@ test('GitError refuses unknown codes and records only a closed-shape op id', () 
   assert.equal(new GitError('git_failed').message, 'git_failed');
   assert.ok(GIT_CODES.includes('git_op_invalid') && Object.isFrozen(GIT_CODES));
 });
+test('S-02a0c: GIT_CODES is the a0b twelve plus exactly the seventeen v3.1 store-backed codes, in order', () => {
+  assert.deepEqual([...GIT_CODES], ['git_env_too_large', 'git_unavailable', 'git_launch_failed', 'git_timeout', 'git_signal',
+    'git_output_truncated', 'git_failed', 'git_stderr', 'git_output_not_utf8', 'path_not_utf8', 'filter_name_not_utf8', 'git_op_invalid',
+    'context_disposed', 'context_tampered', 'grafts_present', 'alternates_present', 'shallow_unsupported', 'object_corrupt',
+    'owned_dir_invalid', 'repo_owner_mismatch', 'repo_layout_unsupported', 'platform_unsupported', 'tree_path_unsafe',
+    'worktree_entry_unsupported', 'worktree_unstable', 'worktree_budget_exceeded', 'lane_divergent', 'lane_remove_failed', 'object_too_large']);
+  for (const c of GIT_CODES) assert.equal(new GitError(c).code, c);
+});
 
 test('a real failing child: stderr, argv and bin path never reach the serialised error', { skip: NOFAKE }, (t) => {
   const marker = 'tok3n-' + 'z'.repeat(8);
@@ -643,6 +651,65 @@ test('run() normalises the status map before spawn: an accessor entry is refused
   for (const bad of [{ 0: 1 }, { 0: undefined }, { x: 'ok' }, null, 'ok']) assert.throws(() => g.run({ ...ok, status: bad }), code('git_op_invalid'), JSON.stringify(bad));
   const r = g.run({ ...ok, status: { 0: 'ok', 1: 'other' } });
   assert.deepEqual([r.outcome, r.status, Object.isFrozen(r)], ['ok', 0, true]);
+});
+
+// ------------------------------------------------------------------ R3 (S-02a0c): the one bounded stdin capability
+// `run({ stdin: { kind: 'oid-lines', bytes } })`: bytes is a Buffer of at most 4096 bytes made only of
+// `<40 lowercase hex>\n` lines. It is the child's stdin for that call only; every other call keeps stdin 'ignore'.
+// `input` stays an unknown run key. The child echoes what it read on stdin.
+const OIDL = (n, c = 'a') => Buffer.from(`${c.repeat(40)}\n`.repeat(n));
+const ECHO_STDIN = "let b=[];process.stdin.on('data',(d)=>b.push(d));process.stdin.on('end',()=>process.stdout.write(Buffer.concat(b)))";
+const stdinRun = (t, stdin, o = {}) => { const { cwd, runner } = fakeRunner(t); return runner.run({ args: ['-e', ECHO_STDIN], cwd, env: env0(), op: 'test.stdin', stdin, ...o }); };
+
+test('R3: oid lines reach the child on stdin, byte for byte, up to the 4096-byte bound (99 lines)', { skip: NOFAKE }, (t) => {
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: OIDL(1) }).stdout, OIDL(1));
+  const max = OIDL(99);
+  assert.equal(max.length, 4059);
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: max }).stdout, max, 'the largest whole number of lines under the bound');
+  const mixed = Buffer.from(`${'0123456789abcdef'.repeat(2)}01234567\n${'f'.repeat(40)}\n`);
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: mixed }).stdout, mixed);
+});
+test('R3: without stdin the child reads an empty stdin (ignored), never the parent stdin', { skip: NOFAKE }, (t) => {
+  const r = stdinRun(t, undefined);
+  assert.equal(r.stdout.length, 0);
+});
+test('R3: over the bound, a non-Buffer, a wrong kind, extra keys or non-oid-line bytes are refused before any spawn', (t) => {
+  const g = gitRunner();
+  const cwd = tmp(t);
+  const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
+  assert.match(decodeStrict(g.run({ ...ok, stdin: { kind: 'oid-lines', bytes: OIDL(2) } }).stdout), /^git version /, 'control: a valid stdin runs');
+  const getter = { kind: 'oid-lines' };
+  Object.defineProperty(getter, 'bytes', { enumerable: true, get: () => OIDL(1) });
+  const bad = [
+    ['4100 bytes (100 lines)', { kind: 'oid-lines', bytes: OIDL(100) }],
+    ['4097 bytes', { kind: 'oid-lines', bytes: Buffer.concat([OIDL(99), Buffer.from('a'.repeat(38))]) }],
+    ['a string', { kind: 'oid-lines', bytes: OIDL(1).toString('latin1') }],
+    ['a String object', { kind: 'oid-lines', bytes: new String(OIDL(1).toString('latin1')) }],
+    ['a Uint8Array', { kind: 'oid-lines', bytes: new Uint8Array(OIDL(1)) }],
+    ['an array', { kind: 'oid-lines', bytes: [...OIDL(1)] }],
+    ['empty', { kind: 'oid-lines', bytes: Buffer.alloc(0) }],
+    ['a raw Buffer (no declaration)', OIDL(1)],
+    ['a string stdin', 'x'],
+    ['kind missing', { bytes: OIDL(1) }],
+    ['another kind', { kind: 'bytes', bytes: OIDL(1) }],
+    ['an extra key', { kind: 'oid-lines', bytes: OIDL(1), encoding: 'utf8' }],
+    ['an accessor bytes', getter],
+    ['upper-case hex', { kind: 'oid-lines', bytes: OIDL(1, 'A') }],
+    ['39 hex', { kind: 'oid-lines', bytes: Buffer.from(`${'a'.repeat(39)}\n`) }],
+    ['41 hex', { kind: 'oid-lines', bytes: Buffer.from(`${'a'.repeat(41)}\n`) }],
+    ['no final newline', { kind: 'oid-lines', bytes: Buffer.from('a'.repeat(40)) }],
+    ['CRLF', { kind: 'oid-lines', bytes: Buffer.from(`${'a'.repeat(40)}\r\n`) }],
+    ['an option line', { kind: 'oid-lines', bytes: Buffer.from('--all\n') }],
+    ['null', null],
+  ];
+  for (const [what, stdin] of bad) assert.throws(() => g.run({ ...ok, stdin }), code('git_op_invalid'), what);
+  assert.throws(() => g.run({ ...ok, input: OIDL(1) }), code('git_op_invalid'), '`input` stays an unknown run key');
+});
+test('R3: a stdin call keeps the timeout and overflow outcomes (no partial stdout)', { skip: NOFAKE }, (t) => {
+  const { cwd, runner } = fakeRunner(t);
+  const stdin = { kind: 'oid-lines', bytes: OIDL(3) };
+  assert.throws(() => runner.run({ args: ['-e', 'setInterval(()=>{},1e6)'], cwd, env: env0(), op: 'test.stdin', stdin, timeoutMs: 300 }), code('git_timeout'));
+  assert.throws(() => runner.run({ args: ['-e', 'process.stdout.write("x".repeat(1<<20))'], cwd, env: env0(), op: 'test.stdin', stdin, maxBuffer: 1024 }), code('git_output_truncated'));
 });
 
 // ------------------------------------------------------------------ T4a: decode-site check on the AST (AC4)
@@ -1281,7 +1348,7 @@ const GRAMMAR_MEMBERS = new Set([
   'isAbsolute', 'isDirectory', 'isExecutableFile', 'isFile', 'join', 'keys', 'lastIndexOf', 'length', 'map',
   'maxBuffer', 'name', 'neutralisation', 'noLazyFetch', 'op', 'pairs', 'partialClone', 'path', 'platform', 'policy',
   'posix', 'prerelease', 'push', 'reduce', 'relative', 'replace', 'resolve', 'selection', 'sep', 'set', 'signal',
-  'slice', 'some', 'sort', 'split', 'startsWith', 'status', 'stderr', 'stdout', 'subarray', 'test', 'timeoutMs',
+  'slice', 'some', 'sort', 'split', 'startsWith', 'status', 'stderr', 'stdin', 'stdout', 'subarray', 'test', 'timeoutMs',
   'toLowerCase', 'toUpperCase', 'total', 'trimEnd', 'value', 'version', 'win32'
 ]);
 /** Destructuring keys that are data fields here but name a decoder method elsewhere (`decode`): readable ONLY as a

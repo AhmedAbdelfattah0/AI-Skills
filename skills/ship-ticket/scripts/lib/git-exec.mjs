@@ -36,8 +36,12 @@ import { statSync } from 'node:fs';
 import { probeGit } from './git-capability.mjs';
 
 const DECODE_CODES = ['git_output_not_utf8', 'path_not_utf8', 'filter_name_not_utf8'];
+// S-02a0c adds the store-backed codes (S02-REDESIGN-v3 §3 plus v3.1 lane_remove_failed and object_too_large).
 export const GIT_CODES = Object.freeze(['git_env_too_large', 'git_unavailable', 'git_launch_failed', 'git_timeout', 'git_signal',
-  'git_output_truncated', 'git_failed', 'git_stderr', ...DECODE_CODES, 'git_op_invalid']);
+  'git_output_truncated', 'git_failed', 'git_stderr', ...DECODE_CODES, 'git_op_invalid',
+  'context_disposed', 'context_tampered', 'grafts_present', 'alternates_present', 'shallow_unsupported', 'object_corrupt',
+  'owned_dir_invalid', 'repo_owner_mismatch', 'repo_layout_unsupported', 'platform_unsupported', 'tree_path_unsafe',
+  'worktree_entry_unsupported', 'worktree_unstable', 'worktree_budget_exceeded', 'lane_divergent', 'lane_remove_failed', 'object_too_large']);
 // stderr lives in a module-private WeakMap: no property of the error (enumerable, hidden or symbol-keyed)
 // carries it, so no inspect option, spread or serialiser can reach it. Stored bytes are capped.
 const STDERR = new WeakMap();
@@ -250,6 +254,24 @@ const statusMap = (m) => {
   return entries.every(([k, v]) => /^\d+$/.test(k) && typeof v === 'string' && /^[a-z_]+$/.test(v)) ? Object.freeze({ __proto__: null, ...Object.fromEntries(entries) }) : null;
 };
 
+/**
+ * The one stdin form (S-02a0c, v3.1 R3): own data `{ kind: 'oid-lines', bytes }` and nothing else, where bytes is a
+ * Buffer of 1..4096 bytes made only of `<40 lowercase hex>\n` lines. Returns a copy of the bytes, else null.
+ */
+const STDIN_CAP = 4096;
+const oidLines = (s) => {
+  if (!s || typeof s !== 'object' || Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;
+  const b = ownValue(s, 'bytes');
+  if (!Buffer.isBuffer(b) || b.length === 0 || b.length > STDIN_CAP) return null;
+  let col = 0;
+  for (let i = 0; i < b.length; i++) {
+    const c = b[i];
+    if (col === 40 ? c !== 10 : !((c >= 48 && c <= 57) || (c >= 97 && c <= 102))) return null;
+    col = col === 40 ? 0 : col + 1;
+  }
+  return col === 0 ? Buffer.from(b) : null;
+};
+
 /** Conservative Windows environment-block bound in UTF-16 units (the real limit is UNVERIFIED, design R-A5). */
 const WIN_ENV_LIMIT = 32767;
 /** UTF-16 units of the block `k=v\0...\0`: own keys and values of a null-prototype env (no inherited reads). */
@@ -263,23 +285,25 @@ const envUnits = (env) => Object.entries(env).reduce((n, [k, v]) => n + k.length
  * equal the platform the env was composed for. A missing cwd is refused before spawn as git_launch_failed
  * (spawn would report ENOENT, indistinguishable from a missing binary). `run` executes `args` once with an env from composeEnv: `status` maps accepted exit
  * codes to outcome names, `stderr` is 'forbid' (default) or 'allow', `decode` is a decode code or absent
- * (stdout stays a Buffer). Option-free argv building is S-02a0c's (closed OPS).
+ * (stdout stays a Buffer). Option-free argv building is S-02a0c's (closed OPS). `stdin` is absent (the child's stdin
+ * is ignored) or the one oid-lines form above, which becomes the child's stdin for that call only; `input` is no key.
  */
 export function gitRunner({ platform = process.platform, envLimit, ...probeOptions } = {}) {
   if (envLimit !== undefined && !Number.isSafeInteger(envLimit)) throw invalid();
   const gi = probeGit(probeOptions);
   const run = ({ args, cwd, env, op, status = { 0: 'ok' }, stderr = 'forbid', decode, timeoutMs = 60_000, maxBuffer = 64 * 1024 * 1024,
-    ...unknown } = {}) => {
+    stdin, ...unknown } = {}) => {
     const accepted = statusMap(status);
+    const input = stdin === undefined ? undefined : oidLines(stdin);
     if (Object.keys(unknown).length || !isAbs(cwd, platform) || COMPOSED.get(env) !== platform || !Array.isArray(args) || !args.every(isStr)
       || !accepted || !['forbid', 'allow'].includes(stderr) || (decode !== undefined && !DECODE_CODES.includes(decode))
-      || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxBuffer) || maxBuffer <= 0) throw invalid();
+      || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxBuffer) || maxBuffer <= 0 || input === null) throw invalid();
     const spec = { op, status: accepted, stderr, decode };
     if (envUnits(env) > (envLimit ?? (platform === 'win32' ? WIN_ENV_LIMIT : Infinity))) return classify({ envTooLarge: true }, spec);
     let isDir = false;
     try { isDir = statSync(cwd).isDirectory(); } catch { /* refused below */ }
     if (!isDir) return classify({ error: { code: 'ECWD' } }, spec);
-    const r = spawnSync(gi.path, [...args], { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer });
+    const r = spawnSync(gi.path, [...args], { cwd, env, shell: false, windowsHide: true, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], input, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer });
     return classify({ error: r.error ? { code: r.error.code } : null, signal: r.signal, status: r.status, stdout: r.stdout, stderr: r.stderr }, spec);
   };
   return Object.freeze({ info: gi, run });
