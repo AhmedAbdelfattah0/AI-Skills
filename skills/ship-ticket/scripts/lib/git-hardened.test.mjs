@@ -1202,7 +1202,8 @@ test('[M65] STRICT INVARIANT: every public operation at every expiry position: z
   for (let i = 0; i < 3; i++) mkdirSync(join(top, 'u', `e${i}`), { recursive: true });
   const lane = tmp(t);
   sh(top, ['--work-tree', lane, 'checkout', h2, '--', 'a.txt', 'd']);
-  const T = 1000;
+  // T is large so integer fake steps resolve every position: some k puts the deadline inside the LAST call.
+  const T = 100_000;
   const tmpRoot = tmp(t, 'gh-ctx-');
   const ctx = withEnv({ TMPDIR: tmpRoot }, () => ctxOf(t, { timeoutMs: T }));
   const { store, source, dir } = storeOf(t, ctx, top, [h2, head]);
@@ -1241,7 +1242,8 @@ test('[M65] STRICT INVARIANT: every public operation at every expiry position: z
   let runs = 0;
   for (const [name, o] of Object.entries(ops)) {
     const prep0 = o.prep?.();
-    const calls = traced({}, (tr) => { o.run(prep0); return tr.log.filter((c) => !EXEMPT.has(c.k)).length; });
+    // Every clock-advancing call counts (closes advance the clock too), so some k lands the deadline inside the LAST call.
+    const calls = traced({}, (tr) => { o.run(prep0); return tr.log.filter((c) => c.k !== 'Dir#closeSync').length; });
     for (let k = 1; k <= calls + 1; k++) {
       const arg = o.prep?.();
       traced({ step: Math.floor(T / k) + 1 }, (tr) => {
@@ -1284,7 +1286,7 @@ test('[M65] rollback after expiry: one shared grace window (deadline + timeoutMs
   const { top, head } = makeRepo(t, { a: 'a', b: 'b' });
   const ctx = ctxOf(t, { timeoutMs: 1000 });
   const source = H.openSource(ctx, { toplevel: top });
-  const n = traced({}, (tr) => { H.initStore(ctx, { dir: join(tmp(t), 'dry'), source, oids: [head] }); return tr.log.length; });
+  const n = traced({}, (tr) => { H.initStore(ctx, { dir: join(tmp(t), 'dry'), source, oids: [head] }); return tr.log.filter((c) => c.k !== 'Dir#closeSync').length; });
   const seen = new Set();
   for (let k = 1; k <= n + 1; k++) {
     const parent = tmp(t);
@@ -1296,12 +1298,13 @@ test('[M65] rollback after expiry: one shared grace window (deadline + timeoutMs
       if (got === 'git_timeout' && tr.log.some((c) => c.phase === 'recovery')) {
         assert.equal(existsSync(join(parent, 'store')), false, `@${k}: not left at its own name`);
         assert.deepEqual(existsSync(q) ? readdirSync(q) : [], [], `@${k}: quarantined, then removed within the window`);
+        seen.add('recovered');
       }
       if (got !== 'ok') assert.throws(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] }), (e) => e instanceof GitError, `@${k}: never reused`);
       seen.add(got);
     });
   }
-  assert.ok(seen.has('git_timeout'), `the timeout outcome with full recovery occurs (outcomes seen: ${[...seen]}; the dry run above is the ok case)`);
+  assert.ok(seen.has('recovered'), `an expiry followed by a full recovery in its window occurs (outcomes seen: ${[...seen]}; the dry run above is the ok case)`);
 });
 test('[M71] an expiry between the exclusive mkdir and its lstat leaves the empty dir untouched (no identity, nothing removed) and refuses git_timeout', { skip: POSIX }, (t) => {
   const { top, head } = makeRepo(t, { a: 'a' });
@@ -1375,11 +1378,11 @@ test('[M76] CPU: exclusions are ticked (many exclusions x many entries refuse wi
   const { top, head } = makeRepo(t, files);
   const ctx = ctxOf(t, { timeoutMs: 1000 });
   const { store, source } = storeOf(t, ctx, top, [head]);
-  const exclusions = Array.from({ length: 40_000 }, (_, i) => `x/${i}`);
+  const exclusions = Array.from({ length: 200_000 }, (_, i) => `x/${i}`);
   const t0 = Date.now();
   const got = outcome(() => H.verifyWorktree(ctx, { source, store, oid: head, exclusions }));
   const ms = Date.now() - t0;
-  t.diagnostic(`40,000 exclusions x 3,000 entries: ${got} in ${ms} ms`);
+  t.diagnostic(`200,000 exclusions x 3,000 entries: ${got} in ${ms} ms`);
   assert.equal(got, 'worktree_budget_exceeded');
   assert.ok(ms < 1000 + 1500, `refused close to the deadline: ${ms} ms`);
 });
@@ -1480,7 +1483,7 @@ test('[M66] LINT (development guardrail, not a security boundary): git-hardened.
       // A finally body may only close (quiet by construction) or run a guarded rollback: nothing that could replace the error in flight unchecked.
       if (n.type === 'TryStatement' && n.finalizer && !inFactory(n)) {
         const body = src.slice(n.finalizer.start, n.finalizer.end).replace(/\s+/g, ' ');
-        const okFinally = /^\{ (?:d\.close\(\);|fx\.close\(fd\);|depth--;) \}$/.test(body) || /^\{ \/\/[^]*?if \((?:handle === null && created !== null|rst !== null && !fx\.ok\(\))\) (?:discard|removeTree)\(/.test(body) || /^\{ if \((?:handle === null && created !== null|rst !== null && !fx\.ok\(\))\) (?:discard|removeTree)\(/.test(body);
+        const okFinally = /^\{ (?:d\.close\(\);|fx\.close\(fd\);|depth--;) \}$/.test(body) || /^\{ \/\/[^]*?if \((?:handle === null && created !== null|rst !== null && !made)\) (?:discard|removeTree)\(/.test(body) || /^\{ if \((?:handle === null && created !== null|rst !== null && !made)\) (?:discard|removeTree)\(/.test(body);
         if (!okFinally) off.push(`finally at line ${n.loc.start.line} is not a close or a guarded rollback: ${body.slice(0, 80)}`);
       }
       if (n.type === 'ImportExpression' || (n.type === 'Identifier' && ['require', 'createRequire'].includes(n.name))) off.push(`loader ${n.type} at line ${n.loc.start.line}`);

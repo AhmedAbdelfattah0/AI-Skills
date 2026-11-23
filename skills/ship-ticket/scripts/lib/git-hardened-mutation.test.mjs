@@ -109,7 +109,7 @@ export const MUTANTS = [
   ['M65', 'openSource: no terminal check (MA)', '  fx.writeNew(excludeCopy, exBytes);\n  fx.done();\n', '  fx.writeNew(excludeCopy, exBytes);\n'],
   ['M65', 'storeHandle (openStore, initStore): no terminal check (MB)', '  const stat = fx.lstat(D);\n  fx.done();\n', '  const stat = fx.lstat(D);\n'],
   ['M65', 'verifyWorktree: no terminal check (MC)', '  live(st, fx, op);\n  fx.done();\n  return Object.freeze({', '  live(st, fx, op);\n  return Object.freeze({'],
-  ['M65', 'createContext: no terminal check', "    fx.writeNew(join(R, B('empty.gitconfig')), '');\n    fx.done();\n", "    fx.writeNew(join(R, B('empty.gitconfig')), '');\n"],
+  ['M65', 'createContext: no terminal check', "    fx.writeNew(join(R, B('empty.gitconfig')), '');\n    fx.done();\n    made = true;\n", "    fx.writeNew(join(R, B('empty.gitconfig')), '');\n    made = true;\n"],
   ['M65', 'dispose: no terminal check', '  removeTree(fx, st.root, st.rootStat.dev, st.removeEntries);\n  fx.done();\n}', '  removeTree(fx, st.root, st.rootStat.dev, st.removeEntries);\n}'],
   ['M73', 'the Dir read is unchecked (MD)', 'read: () => { check(); return d.readSync(); }', 'read: () => d.readSync()'],
   ['M75', 'reads without O_NONBLOCK (ME)', '  const RD_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;', '  const RD_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;'],

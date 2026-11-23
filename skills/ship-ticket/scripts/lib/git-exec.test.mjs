@@ -1406,7 +1406,7 @@ const GRAMMAR_MEMBERS = new Set([
   'isDirectory', 'isExecutableFile', 'isFIFO', 'isFile', 'isSocket', 'isSymbolicLink', 'join', 'keys', 'kind',
   'lastIndexOf', 'length', 'lstat', 'lstatOrNull', 'makeTemp', 'map', 'maxBuffer', 'maxBytes', 'maxFiles',
   'maxObjectBytes', 'maxObjects', 'maxTotalObjectBytes', 'message', 'mkdir', 'mode', 'name', 'neutralisation', 'node',
-  'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'ok', 'op', 'open', 'openDir', 'os',
+  'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'op', 'open', 'openDir', 'os',
   'outcome', 'pairs', 'partialClone', 'PATH', 'path', 'platform', 'policy', 'posix', 'prerelease', 'push', 'raw',
   'read', 'readLink', 'readSync', 'realPath', 'reduce', 'relative', 'removeEntries', 'rename', 'replace', 'resolve',
   'reverse', 'rmdir', 'root', 'rootPath', 'rootStat', 'run', 'runner', 'selection', 'sep', 'set', 'shift', 'signal',

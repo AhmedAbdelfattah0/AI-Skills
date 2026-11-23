@@ -155,7 +155,6 @@ function fsx({ deadline, code, op }) {
   // A failed close never replaces the error in flight (a deadline sentinel or a typed refusal): it is recorded, and the
   // success path's terminal `done()` refuses on it.
   let closeFailed = false;
-  let finished = false;
   const quietClose = (f) => { try { f(); } catch { closeFailed = true; } };
   const RD_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
   const check = () => { if (Date.now() >= deadline) { const e = fail(code, op); EXPIRED.add(e); throw e; } };
@@ -165,8 +164,7 @@ function fsx({ deadline, code, op }) {
   return Object.freeze({
     deadline, code, op, check,
     /** The terminal check before a public success return: the deadline, and no descriptor that failed to close. */
-    done: () => { check(); if (closeFailed) throw fail('worktree_entry_unsupported', 'close'); finished = true; },
-    ok: () => finished,
+    done: () => { check(); if (closeFailed) throw fail('worktree_entry_unsupported', 'close'); },
     tick: () => { ticks = ticks + 1; if (ticks > 1023) { ticks = 0; check(); } },
     derive: (o) => fsx(o),
     lstat: guard((p) => lstatSync(p)),
@@ -224,15 +222,17 @@ export function createContext({ timeoutMs = DEFAULTS.timeoutMs, maxFiles = DEFAU
   const fx = fsx({ deadline: Date.now() + timeoutMs, code: 'git_timeout', op: 'context.create' });
   const R = fx.makeTemp(fx.realPath(tmp), 'ship-ticket-git-');
   let rst = null;
+  let made = false;
   try {
     rst = fx.lstat(R);
     if (!fx.realPath(R).equals(R) || !rst.isDirectory() || rst.uid !== uid()) throw fail('owned_dir_invalid', 'context.create');
     for (const d of ['hooks', 'home', 'cwd', 'template']) fx.mkdir(join(R, B(d)));
     fx.writeNew(join(R, B('empty.gitconfig')), '');
     fx.done();
+    made = true;
   } finally {
     // A refused context removes the R it made, on its recovery window (only when R's identity is known).
-    if (rst !== null && !fx.ok()) removeTree(fx.derive({ deadline: fx.deadline + timeoutMs, code: 'lane_remove_failed', op: 'context.create' }), R, rst.dev, DEFAULTS.removeEntries);
+    if (rst !== null && !made) removeTree(fx.derive({ deadline: fx.deadline + timeoutMs, code: 'lane_remove_failed', op: 'context.create' }), R, rst.dev, DEFAULTS.removeEntries);
   }
   const Rs = str(R);
   const env = composeEnv({ ambient: process.env, gitInfo: runner.info, hooksDir: `${Rs}/hooks`, policy: hermeticPolicy({ home: `${Rs}/home`, globalConfig: `${Rs}/empty.gitconfig` }) });
