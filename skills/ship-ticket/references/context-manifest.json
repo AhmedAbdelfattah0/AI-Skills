@@ -1,0 +1,45 @@
+{
+  "schema": "ship-ticket-context-manifest-v1",
+  "phases": {
+    "understand": [
+      "references/observability.md",
+      "references/understand.md",
+      "references/cross-model.md"
+    ],
+    "plan": [
+      "references/plan.md",
+      "references/cross-model.md"
+    ],
+    "build": [
+      "references/execution-harness.md",
+      "references/brief.md"
+    ],
+    "prove": [
+      "references/prove.md"
+    ],
+    "review": [
+      "references/review.md"
+    ],
+    "ship": [
+      "references/ship.md"
+    ]
+  },
+  "files": {
+    "references/brief.md": "sha256:a50633380405bc9d184f57ae94b7d39249c1708f81e29e11071b357fc1925b7e",
+    "references/codex-cli.md": "sha256:f4f67aaa45604c486df08aa152a20635eef866b869ddff62c279820a298ac6b9",
+    "references/cross-model.md": "sha256:a615c0193504f12fa1d8bc349a73ff6701b913c4b95dbacb6b6f8437f2b76c35",
+    "references/design-parity.md": "sha256:ef87e1e8146000470d2e0a270aaad8e350b0057223d2a99628f97efb2543be63",
+    "references/execution-harness.md": "sha256:0e0ea9b6866911173d824627d5917f4de070e7006fc634d58e3647d8de5f9da2",
+    "references/harness-internals.md": "sha256:c91eadf8a8ad8fac812b44560086b5f48b4bcb53eadde23babc3c3b81dd77c9a",
+    "references/observability.md": "sha256:e16936f1b261c0c6cab4298fa2ad3c2e0790cccb6f55fc76ab02ce346b0cd442",
+    "references/plan.md": "sha256:121314446b6525e89bf76b4856b105f899febb1d18ae936a1a358e3c74247c03",
+    "references/prove.md": "sha256:6059740454c9d57b9f6caa04b3ce7f0b7e2e13c73fee4c7f6288304a4aaa4a61",
+    "references/review.md": "sha256:bf12d17819216302ff7d3703896dda36ac30f83a3a38394029ccbba27db68b82",
+    "references/risk-paths.example.json": "sha256:89c8bf3fe19fd2c7159e6aae8198c576129eb96d728cc8d9559c1322160f7600",
+    "references/security-risk.md": "sha256:9a34cc13f3426ea6dc1cb6bece8243be15605f9035d2c907b5a5aa640c7f4700",
+    "references/ship.md": "sha256:7908513c997d0099f5bf829e9f10992d81b463bea38c100a42e8dac14dbcaebe",
+    "references/test-kinds.md": "sha256:62c20fb2cb666a489d0abbe27ad91a38f2c7d0d28d94df1d2db2f66a07c54ca2",
+    "references/understand.md": "sha256:052c6927e501bd30db4c0c2caf5499b4f23782b0db73fe1374976fca53eb55bd",
+    "references/units.md": "sha256:861fcd89e80de5fb980b4267fde953635caf4f46cc48daca00e293b87b02e590"
+  }
+}

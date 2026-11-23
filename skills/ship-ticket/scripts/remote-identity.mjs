@@ -5,10 +5,12 @@
  * (lines 283-294), configAll, remoteIdentity and resolveBaseRef from a890b0d skills/ship-ticket/scripts/engine-identity.mjs
  * (lines 50-87 and 112-118). Changed by S-12 Round 1: a push URL is checked whatever the fetch URL is, remoteUrl is new, and
  * resolveBaseRef ends its options with `--` (it is given a URL). Callers run all of it under engine-base-read.mjs underHardenedGit. Left out on purpose: the release-identity tuple (publicationOf,
- * verifyReleaseBinding, identityRecord), which is S-28a's, and resolveTool/pinnedTool, which wait for their first consumer
- * (S-28a, S-15). This module lives beside the engine, not in lib/: lib/ holds the hardened git runner and its directory scans.
+ * verifyReleaseBinding, identityRecord), which is S-28a's. S-28b b0 adds resolveTool and pinnedTool (a890b0d engine-ci.mjs 253-282, unchanged). This module lives beside the engine, not in lib/: lib/ holds the hardened git runner and its directory scans.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { authGit } from './engine-base.mjs';
 
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -90,4 +92,33 @@ export function resolveBaseRef(S, repoRoot, remote) {
   if (r.status !== 0) return no('base_remote_unavailable', `git ls-remote --symref ${remote} HEAD failed (${(r.stderr || r.error?.message || `exit ${r.status}`).trim()}): the default branch cannot be resolved`);
   const m = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(r.stdout);
   return m ? { ok: true, ref: m[1] } : no('base_remote_unavailable', `remote ${remote} names no default branch (ls-remote --symref HEAD): bind config.base`);
+}
+
+/**
+ * R0-S N4 (ported from a890b0d engine-ci.mjs:253-282, S-28b b0): the absolute path and sha256 of the first executable `name` on
+ * PATH (realpath), or null. `enroll` (S-28b b1) pins `gh` this way and later runs exactly that file: a stub put earlier on PATH
+ * changes nothing. The resolution at pin time itself trusts that moment's PATH (residual).
+ */
+export function resolveTool(name, env = process.env) {
+  const names = process.platform === 'win32' ? [`${name}.exe`, `${name}.cmd`, name] : [name];
+  for (const dir of String(env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean)) {
+    for (const n of names) {
+      try {
+        const p = join(dir, n);
+        if (!statSync(p).isFile()) continue;
+        const real = realpathSync(p);
+        return { path: real, sha256: 'sha256:' + createHash('sha256').update(readFileSync(real)).digest('hex') };
+      } catch { /* not here */ }
+    }
+  }
+  return null;
+}
+
+/** The pinned tool, verified: { ok: true, path } | { ok: false, code: '<name>_unpinned' | '<name>_drift', reason }. */
+export function pinnedTool(pin, name = 'gh') {
+  if (!pin?.path) return { ok: false, code: `${name}_unpinned`, reason: `no ${name} was pinned at enroll (none on PATH then): start a new run with ${name} installed` };
+  let digest = null;
+  try { digest = 'sha256:' + createHash('sha256').update(readFileSync(pin.path)).digest('hex'); } catch { digest = null; }
+  if (digest !== pin.sha256) return { ok: false, code: `${name}_drift`, reason: `${pin.path} is not the ${name} this run pinned at enroll (${pin.sha256}, now ${digest ?? 'missing'}): restore it or start a new run` };
+  return { ok: true, path: pin.path };
 }
