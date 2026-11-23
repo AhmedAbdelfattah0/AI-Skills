@@ -321,79 +321,138 @@ export function resourceSnapshot() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// FR-2b host admission. admitHost is PURE: it decides from an injected snapshot and an injected
-// history, performs no I/O and never terminates running work. hostSnapshot() is the only reader.
+// FR-2b host admission. admitHost is PURE and FAIL-SAFE: it decides from an injected snapshot and
+// an injected history, performs no I/O and never terminates running work. Anything unknown,
+// invalid or malformed HOLDS. hostSnapshot() is the only reader.
 // Thresholds are the recorded TEMPORARY operating policy (STAB-followups-register FR-2).
 // ---------------------------------------------------------------------------------------------
 export const HOST_POLICY = Object.freeze({
-  pressure_hold_level: 2,        // macOS kern.memorystatus_vm_pressure_level >= 2 holds (1 = normal)
+  pressure_levels: Object.freeze([1, 2, 4]), // documented kern.memorystatus_vm_pressure_level values
+  pressure_hold_level: 2,        // any sample in the window >= 2 holds
   load_fraction: 0.6,            // any of load1/5/15 >= 60% of cores holds
-  swap_min_span_ms: 15000,       // swapout growth is only judged across >= 15 s of samples
-  clean_samples_to_resume: 2,    // hysteresis: two consecutive clean samples after any hold
+  sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
+  sample_gap_max_ms: 30000,      // a larger gap is stale (held_resample)
+  max_snapshot_age_ms: 30000,    // snapshot.now_ms - latest.t_ms must be 0..30 s (freshness bound)
+  max_samples: 16,
+  max_cores: 4096,
+  clean_samples_to_resume: 2,    // hysteresis: two clean samples with distinct, strictly increasing t_ms
   heavy_slots_healthy: 2,
   heavy_slots_default: 1,
 });
-export const HOST_HOLD_REASONS = Object.freeze(['held_pressure', 'held_swap', 'held_load', 'held_provider', 'held_heavy', 'held_hysteresis', 'held_resample', 'snapshot_unavailable']);
-const HEAVY_PATTERNS = [/--test\b/, /\.test\.mjs/, /\bjest\b/, /\bvitest\b/, /\bstryker\b/, /\bxcodebuild\b/, /\bdocker (build|compose)\b/];
+export const HOST_HOLD_REASONS = Object.freeze(['held_pressure', 'held_swap', 'held_load', 'held_provider', 'held_heavy', 'held_hysteresis', 'held_resample', 'snapshot_unavailable', 'invalid_args']);
+const PROVIDER_KINDS = ['429', 'quota', 'timeout'];
+const HISTORY_KEYS = ['state', 'clean_streak', 'last_admit_t_ms', 'last_sample_t_ms'];
+const isInt = (n) => Number.isSafeInteger(n) && n >= 0;
+const isPlain = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+const HELD_HISTORY = Object.freeze({ state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null });
+
+function providerCount(pe) {
+  if (isInt(pe)) return pe;
+  if (Array.isArray(pe) && pe.every(e => isPlain(e) && PROVIDER_KINDS.includes(e.kind) && Number.isFinite(e.t_ms))) return pe.length;
+  return null;
+}
+function validHistory(h) {
+  if (h === undefined || h === null) return { ...HELD_HISTORY, state: 'open' };
+  if (!isPlain(h) || Object.keys(h).some(k => !HISTORY_KEYS.includes(k))) return null;
+  const x = { state: h.state ?? 'open', clean_streak: h.clean_streak ?? 0, last_admit_t_ms: h.last_admit_t_ms ?? null, last_sample_t_ms: h.last_sample_t_ms ?? null };
+  if (x.state !== 'open' && x.state !== 'held') return null;
+  if (!isInt(x.clean_streak) || (x.state === 'held' && x.clean_streak >= HOST_POLICY.clean_samples_to_resume)) return null;
+  for (const k of ['last_admit_t_ms', 'last_sample_t_ms']) if (x[k] !== null && !isInt(x[k])) return null;
+  return x;
+}
+function validSample(x) {
+  return isPlain(x) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swapouts)
+    && ['load1', 'load5', 'load15'].every(k => typeof x[k] === 'number' && Number.isFinite(x[k]) && x[k] >= 0);
+}
 
 /**
- * snapshot: { platform, cores, samples: [{t_ms, pressure_level, swapouts, load1, load5, load15}],
- *             heavy_processes, provider_errors: [{kind, t_ms}] }   (samples oldest first)
- * opts:     { cls: 'HEAVY'|'LIGHT', running: {total, heavy}, history: {state, clean_streak, last_admit_t_ms} }
- * Returns { admit, reason, reasons, signals, history, terminate: [] }. `history` is the value the caller
- * must pass back next time. Admit-one-then-resample: after an admit, no further admit until a sample newer
- * than history.last_admit_t_ms exists. Hysteresis: after any hold, two consecutive clean samples are needed.
+ * admitHost(snapshot, cls, running, history)  -- the approved positional contract.
+ *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swapouts, load1, load5, load15}] (oldest first),
+ *               heavy_processes (count of distinct heavy suite roots, or null = unknown), provider_errors (count or [{kind,t_ms}]) }
+ *   cls: 'HEAVY'|'LIGHT'   running: {total, heavy} nonneg safe ints, heavy <= total
+ *   history: undefined | {state:'open'|'held', clean_streak, last_admit_t_ms, last_sample_t_ms} as returned last time
+ * Returns { admit, reason, reasons, signals, history, terminate: [] }. A wrong-shaped call HOLDS with `invalid_args`.
+ * A sample whose t_ms is not newer than history.last_sample_t_ms is a replay: held_resample, history unchanged.
  */
-export function admitHost(snapshot, opts = {}) {
-  assert(snapshot && typeof snapshot === 'object', 'admitHost snapshot must be an object');
-  const cls = opts.cls ?? 'LIGHT';
-  assert(cls === 'HEAVY' || cls === 'LIGHT', 'cls must be HEAVY or LIGHT');
-  const running = { total: opts.running?.total ?? 0, heavy: opts.running?.heavy ?? 0 };
-  assert(Number.isInteger(running.total) && running.total >= 0 && Number.isInteger(running.heavy) && running.heavy >= 0, 'running counts must be nonnegative integers');
-  const prev = { state: opts.history?.state ?? 'open', clean_streak: opts.history?.clean_streak ?? 0, last_admit_t_ms: opts.history?.last_admit_t_ms ?? null };
+export function admitHost(snapshot, cls, running, history) {
+  const hold = (reason, h, extra = {}) => ({ admit: false, reason, reasons: [reason], signals: { available: false, ...extra }, history: h, terminate: [] });
+  const hist = validHistory(history);
+  const run = running === undefined ? { total: 0, heavy: 0 } : running;
+  if ((cls !== 'HEAVY' && cls !== 'LIGHT') || !isPlain(run) || !isInt(run.total) || !isInt(run.heavy) || run.heavy > run.total
+    || hist === null || !isPlain(snapshot)) return hold('invalid_args', { ...HELD_HISTORY });
   const samples = Array.isArray(snapshot.samples) ? snapshot.samples : [];
-  const latest = samples[samples.length - 1];
+  const providers = providerCount(snapshot.provider_errors);
+  const heavyKnown = isInt(snapshot.heavy_processes);
   const cores = snapshot.cores;
-  const usable = snapshot.platform === 'darwin' && latest && Number.isFinite(latest.pressure_level) && Number.isFinite(cores) && cores > 0
-    && ['load1', 'load5', 'load15'].every(k => Number.isFinite(latest[k]));
-  // Fail-safe: no trustworthy snapshot (non-darwin, sysctl failed) -> at most ONE task, never permissive.
-  if (!usable) {
-    const admit = running.total === 0;
-    return { admit, reason: 'snapshot_unavailable', reasons: ['snapshot_unavailable'], signals: { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 },
-      history: { state: 'held', clean_streak: 0, last_admit_t_ms: admit ? (latest?.t_ms ?? prev.last_admit_t_ms) : prev.last_admit_t_ms }, terminate: [] };
+  const last = samples[samples.length - 1];
+  const fieldsOk = snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
+    && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
+  // Unusable timestamps are a hard hold (never the LIGHT fallback): the sample cannot be ordered or aged.
+  if (snapshot.platform === 'darwin' && samples.some(x => !isPlain(x) || !isInt(x.t_ms))) return hold('held_resample', { ...hist, state: 'held', clean_streak: 0 }, { available: false, timestamps_ok: false });
+  if (!fieldsOk) {
+    // Fail-safe fallback: at most ONE LIGHT task and only when no stop signal is known. Never HEAVY, never while anything runs.
+    const stop = [];
+    const knownPressure = samples.filter(x => isPlain(x) && HOST_POLICY.pressure_levels.includes(x.pressure_level)).map(x => x.pressure_level);
+    if (knownPressure.some(p => p >= HOST_POLICY.pressure_hold_level)) stop.push('held_pressure');
+    if (providers !== null && providers > 0) stop.push('held_provider');
+    const admit = stop.length === 0 && cls === 'LIGHT' && run.total === 0;
+    const reasons = admit ? ['snapshot_unavailable'] : [...stop, 'snapshot_unavailable'];
+    return { admit, reason: reasons[0], reasons, signals: { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 },
+      history: { ...hist, state: 'held', clean_streak: 0, last_admit_t_ms: admit && isInt(last?.t_ms) ? last.t_ms : hist.last_admit_t_ms }, terminate: [] };
   }
+  const latest = last;
+  const glitch = { ...hist, state: 'held', clean_streak: 0 };
+  // Replay of an already-counted sample: one sample, never two. History is returned unchanged.
+  if (hist.last_sample_t_ms !== null && latest.t_ms <= hist.last_sample_t_ms) return hold('held_resample', hist, { available: true, replay: true });
+  const gapsOk = samples.every((x, i) => i === 0 || (x.t_ms - samples[i - 1].t_ms >= HOST_POLICY.sample_gap_min_ms && x.t_ms - samples[i - 1].t_ms <= HOST_POLICY.sample_gap_max_ms));
+  const age = snapshot.now_ms - latest.t_ms;
+  const fresh = Number.isFinite(snapshot.now_ms) && age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
+  if (!fresh || (samples.length > 1 && !gapsOk)) return hold('held_resample', glitch, { available: true, fresh, gaps_ok: gapsOk });
   const holds = [];
-  if (latest.pressure_level >= HOST_POLICY.pressure_hold_level) holds.push('held_pressure');
-  // Swap growth across >= 2 samples spanning >= 15 s. Fewer/closer samples cannot show it is flat: hold.
+  if (samples.some(x => x.pressure_level >= HOST_POLICY.pressure_hold_level)) holds.push('held_pressure');
   let swap = 'flat';
-  if (samples.length < 2 || latest.t_ms - samples[0].t_ms < HOST_POLICY.swap_min_span_ms || !samples.every(x => Number.isFinite(x.swapouts))) swap = 'unknown';
+  if (samples.length < 2) swap = 'unknown';
+  else if (samples.slice(1).some((x, i) => x.swapouts < samples[i].swapouts)) swap = 'regressed';
   else if (samples.slice(1).some((x, i) => x.swapouts > samples[i].swapouts)) swap = 'growing';
   if (swap !== 'flat') holds.push('held_swap');
   const loadLimit = HOST_POLICY.load_fraction * cores;
   const loadHigh = ['load1', 'load5', 'load15'].some(k => latest[k] >= loadLimit);
   if (loadHigh) holds.push('held_load');
-  const providerErrors = Array.isArray(snapshot.provider_errors) ? snapshot.provider_errors : [];
-  if (providerErrors.length > 0) holds.push('held_provider');
+  if (providers > 0) holds.push('held_provider');
   const clean = holds.length === 0;
-  const clean_streak = clean ? prev.clean_streak + 1 : 0;
-  const resumed = prev.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
+  const clean_streak = clean ? hist.clean_streak + 1 : 0;
+  const resumed = hist.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
   const healthy = clean && resumed;
   const heavy_slots = healthy ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
   const reasons = [...holds];
   if (clean && !resumed) reasons.push('held_hysteresis');
-  const heavyNow = Math.max(running.heavy, Number.isFinite(snapshot.heavy_processes) ? snapshot.heavy_processes : 0);
-  if (cls === 'HEAVY' && heavyNow >= heavy_slots) reasons.push('held_heavy');
-  if (prev.last_admit_t_ms !== null && latest.t_ms <= prev.last_admit_t_ms) reasons.push('held_resample');
+  const heavyNow = Math.max(run.heavy, heavyKnown ? snapshot.heavy_processes : 0);
+  // Unknown heavy count is conservative: a HEAVY request is held, never counted as 0.
+  if (cls === 'HEAVY' && (!heavyKnown || heavyNow >= heavy_slots)) reasons.push('held_heavy');
   const admit = reasons.length === 0;
   return { admit, reason: admit ? 'admitted' : reasons[0], reasons,
-    signals: { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providerErrors.length,
-      clean, clean_streak, healthy, heavy_slots, heavy_running: heavyNow },
-    history: { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : prev.last_admit_t_ms }, terminate: [] };
+    signals: { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
+      clean, clean_streak, healthy, heavy_slots, heavy_running: heavyNow, heavy_known: heavyKnown },
+    history: { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms }, terminate: [] };
 }
 
+const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat', ps: '/bin/ps' });
 /**
- * The only I/O reader for admitHost. Every source is injectable so it is testable without a host.
- * Takes `samples` readings `intervalMs` apart (default 2 x 15 s) so swap growth is observable.
+ * Count distinct heavy SUITE ROOTS: a matching process whose parent is not itself a matching process
+ * (one `node --test` suite spawns many matching children). Input is `ps -axo pid=,ppid=,command=`.
+ */
+export function countHeavyRoots(psOutput, patterns = HEAVY_PATTERNS) {
+  const rows = String(psOutput).split('\n').map(l => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean)
+    .map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] })).filter(r => patterns.some(re => re.test(r.cmd)));
+  const pids = new Set(rows.map(r => r.pid));
+  return rows.filter(r => !pids.has(r.ppid)).length;
+}
+const HEAVY_PATTERNS = [/--test\b/, /\.test\.mjs/, /\bjest\b/, /\bvitest\b/, /\bstryker\b/, /\bxcodebuild\b/, /\bdocker (build|compose)\b/];
+
+/**
+ * The only I/O reader for admitHost. Every source is injectable. Takes `samples` readings `intervalMs`
+ * apart (default 2 x 20 s, inside the accepted 15..30 s window). Strict parsing: garbled output yields
+ * null fields, which admitHost treats as snapshot_unavailable.
  */
 export async function hostSnapshot(probe = {}) {
   const platform = probe.platform ?? process.platform;
@@ -401,20 +460,21 @@ export async function hostSnapshot(probe = {}) {
   const now = probe.now ?? Date.now;
   const sleep = probe.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
   const count = probe.samples ?? 2;
-  const intervalMs = probe.intervalMs ?? 15000;
-  const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000 }); return r.status === 0 ? r.stdout : null; });
+  const intervalMs = probe.intervalMs ?? 20000;
+  const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024 }); return r.status === 0 ? r.stdout : null; });
   const loadavg = probe.loadavg ?? loadavgOs;
-  const base = { schema: 'ship-ticket-host-snapshot-v1', platform, cores, samples: [], heavy_processes: null, provider_errors: probe.providerErrors ?? [] };
+  const base = { schema: 'ship-ticket-host-snapshot-v1', platform, cores, now_ms: null, samples: [], heavy_processes: null, provider_errors: probe.providerErrors ?? [] };
   if (platform !== 'darwin') return base;
   for (let i = 0; i < count; i++) {
     if (i > 0) await sleep(intervalMs);
-    const p = Number.parseInt(String(run('sysctl', ['-n', 'kern.memorystatus_vm_pressure_level']) ?? '').trim(), 10);
-    const m = /Swapouts:\s+(\d+)/.exec(run('vm_stat', []) ?? '');
+    const p = /^\d+$/.exec(String(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level']) ?? '').trim());
+    const m = /^Swapouts:\s+(\d+)\.\s*$/m.exec(run(BIN.vm_stat, []) ?? '');
     const [l1, l5, l15] = loadavg();
-    base.samples.push({ t_ms: now(), pressure_level: Number.isFinite(p) ? p : null, swapouts: m ? Number(m[1]) : null, load1: l1, load5: l5, load15: l15 });
+    base.samples.push({ t_ms: now(), pressure_level: p ? Number(p[0]) : null, swapouts: m ? Number(m[1]) : null, load1: l1, load5: l5, load15: l15 });
   }
-  const ps = run('ps', ['-axo', 'command=']);
-  base.heavy_processes = ps === null ? null : ps.split('\n').filter(l => HEAVY_PATTERNS.some(re => re.test(l))).length;
+  const ps = run(BIN.ps, ['-axo', 'pid=,ppid=,command=']);
+  base.heavy_processes = ps === null || ps === undefined ? null : countHeavyRoots(ps);
+  base.now_ms = now();
   return base;
 }
 
