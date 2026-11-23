@@ -10,7 +10,7 @@ const withLatest = (o) => snap({ samples: [S(), S({ t_ms: T0 + 20000, ...o })] }
 // The n-th later snapshot (distinct, strictly increasing timestamps).
 const NEXT = (n, o = {}) => snap({ now_ms: T0 + 21000 + n * 20000, samples: [S({ t_ms: T0 + n * 20000 }), S({ t_ms: T0 + 20000 + n * 20000, ...o })] });
 // H0: a host that has already resumed (open) at an earlier counted sample. history `null`/omitted-to-admitHost = cold start (held).
-const H0 = { state: 'open', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 - 20000 };
+const H0 = { state: 'open', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 };
 const LIGHT = (s, running, history = H0) => admitHost(s, 'LIGHT', running, history);
 const HEAVY = (s, running, history = H0) => admitHost(s, 'HEAVY', running, history);
 const R = (total, heavy = 0) => ({ total, heavy });
@@ -191,7 +191,7 @@ test('heavy: 2 concurrent only when healthy; the third is held_heavy', () => {
 });
 
 test('heavy: recovering hosts and unhealthy hosts have cap 1 and report held_heavy', () => {
-  const rec = HEAVY(snap(), R(1, 1), { state: 'held', clean_streak: 0 });
+  const rec = HEAVY(snap(), R(1, 1), { state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null });
   assert.equal(rec.signals.heavy_slots, 1);
   assert.deepEqual(rec.reasons, ['held_hysteresis', 'held_heavy']);
   const bad = HEAVY(withLatest({ pressure_level: 2 }), R(1, 1));
@@ -199,13 +199,110 @@ test('heavy: recovering hosts and unhealthy hosts have cap 1 and report held_hea
   assert.deepEqual(bad.reasons, ['held_pressure', 'held_heavy']);
 });
 
-test('heavy count: external processes count, LIGHT is not held; an UNKNOWN count (null/NaN/negative) holds HEAVY and is never treated as 0', () => {
+test('heavy count: external processes count, LIGHT is not held; explicit null (hostSnapshot unknown marker) holds HEAVY and is never 0; MALFORMED values are snapshot_unavailable', () => {
   assert.deepEqual(HEAVY(snap({ heavy_processes: 2 }), R(0)).reasons, ['held_heavy']);
   assert.equal(LIGHT(snap({ heavy_processes: 2 }), R(0)).admit, true);
-  for (const unknown of [null, undefined, NaN, -1, 1.5, '0']) {
-    const r = HEAVY(snap({ heavy_processes: unknown }), R(0));
-    assert.deepEqual(r.reasons, ['held_heavy'], String(unknown));
-    assert.equal(LIGHT(snap({ heavy_processes: unknown }), R(0)).admit, true, 'LIGHT ' + String(unknown));
+  assert.deepEqual(HEAVY(snap({ heavy_processes: null }), R(0)).reasons, ['held_heavy']);
+  assert.equal(LIGHT(snap({ heavy_processes: null }), R(0)).admit, true);
+  for (const bad of [undefined, NaN, -1, 1.5, '0', 'garbage', [], {}, Infinity]) for (const call of [LIGHT, HEAVY]) {
+    const r = call(snap({ heavy_processes: bad }), R(0));
+    assert.equal(r.admit, false, String(bad));
+    assert.deepEqual(r.reasons, ['snapshot_unavailable'], String(bad));
+  }
+});
+
+test('stop signals are evaluated BEFORE replay handling: clean -> bad at +1 ms -> clean never preserves the streak', () => {
+  const cold = admitHost(snap(), 'LIGHT', R(0), null);          // streak 1, last_sample T0+20000
+  const near = (o, n = 1) => snap({ now_ms: T0 + 21000 + n, samples: [S({ t_ms: T0 + n }), S({ t_ms: T0 + 20000 + n, ...o })] });
+  const bads = [{ pressure_level: 4 }, { load5: 50 }, { swapouts: 101 }];
+  for (const bad of bads) {
+    const hit = admitHost(near(bad), 'LIGHT', R(0), cold.history);
+    assert.equal(hit.admit, false);
+    assert.equal(hit.history.clean_streak, 0, JSON.stringify(bad));
+    assert.equal(hit.history.state, 'held');
+    assert.ok(hit.reasons.includes('held_resample'));
+    const next = admitHost(NEXT(1), 'LIGHT', R(0), hit.history);
+    assert.equal(next.admit, false, JSON.stringify(bad));
+    assert.deepEqual(next.reasons, ['held_hysteresis']);
+  }
+  const quota = admitHost(near({}, 1), 'LIGHT', R(0), cold.history);
+  assert.deepEqual(quota.history, cold.history);                // a CLEAN near-duplicate stays unchanged
+  const q = admitHost({ ...near({}), provider_errors: [{ kind: 'quota', t_ms: 1 }] }, 'LIGHT', R(0), cold.history);
+  assert.equal(q.history.clean_streak, 0);
+  assert.deepEqual(q.reasons, ['held_provider', 'held_resample']);
+});
+
+test('a gap of more than 30 s since the last counted sample restarts the streak; exactly 30 s and 15 s still count', () => {
+  const first = admitHost(snap(), 'LIGHT', R(0), null);       // last_sample T0 + 20000
+  const gapped = (g) => admitHost(snap({ now_ms: T0 + 20000 + g + 1000, samples: [S({ t_ms: T0 + g }), S({ t_ms: T0 + 20000 + g })] }), 'LIGHT', R(0), first.history);
+  assert.equal(gapped(0 + 30000).admit, true);                  // latest = last + 30000 -> counts, second clean sample
+  assert.equal(gapped(30001).admit, false);                     // > 30 s: restart, only streak 1
+  assert.equal(gapped(30001).history.clean_streak, 1);
+  assert.deepEqual(gapped(30001).reasons, ['held_hysteresis']);
+  const open = LIGHT(snap(), R(0));                             // open history
+  const stale = admitHost(snap({ now_ms: T0 + 20000 + 30001 + 1000, samples: [S({ t_ms: T0 + 30001 }), S({ t_ms: T0 + 50001 })] }), 'LIGHT', R(0), open.history);
+  assert.equal(stale.admit, false);
+  assert.equal(stale.history.state, 'held');
+});
+
+test('liveness: a healthy host is admitted after a cold start plus one clean sample 15 s and 20 s later; 14999 ms is held', () => {
+  const c1 = admitHost(snap(), 'LIGHT', R(0), null);
+  const second = (g) => admitHost(snap({ now_ms: T0 + 20000 + g + 1000, samples: [S({ t_ms: T0 + g }), S({ t_ms: T0 + 20000 + g })] }), 'LIGHT', R(0), c1.history);
+  assert.equal(second(15000).admit, true);
+  assert.equal(second(20000).admit, true);
+  assert.deepEqual(second(14999).reasons, ['held_resample']);
+});
+
+test('history must carry all four keys with an EXACT state: null/undefined/other state or missing keys is invalid_args (no defaulting)', () => {
+  const full = { state: 'open', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 };
+  for (const bad of [{ ...full, state: null }, { ...full, state: undefined }, { ...full, state: 'Open' }, { clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 },
+    { state: 'open', last_admit_t_ms: null, last_sample_t_ms: T0 }, { state: 'held' }, { state: 'held', clean_streak: 0 }, {}]) {
+    const r = LIGHT(snap(), R(0), bad);
+    assert.equal(r.admit, false, JSON.stringify(bad));
+    assert.equal(r.reason, 'invalid_args', JSON.stringify(bad));
+  }
+});
+
+test('running is REQUIRED: missing/undefined/null running is invalid_args even for HEAVY (never defaults to 0)', () => {
+  for (const call of [() => admitHost(snap(), 'HEAVY'), () => admitHost(snap(), 'HEAVY', undefined, H0), () => admitHost(snap(), 'LIGHT', null, H0), () => admitHost(snap(), 'HEAVY', undefined)]) {
+    const r = call();
+    assert.equal(r.admit, false);
+    assert.equal(r.reason, 'invalid_args');
+  }
+});
+
+test('known stop signals keep precedence when other fields are malformed (bad timestamps, a quota row beside a malformed row)', () => {
+  const p4 = LIGHT(snap({ samples: [S({ pressure_level: 4, t_ms: undefined }), S({ t_ms: T0 + 20000 })] }), R(0));
+  assert.deepEqual(p4.reasons, ['held_pressure', 'held_resample']);
+  const mixed = LIGHT(snap({ provider_errors: [{ kind: 'quota', t_ms: 1 }, { kind: 'weird', t_ms: 2 }] }), R(0));
+  assert.equal(mixed.admit, false);
+  assert.deepEqual(mixed.reasons, ['held_provider', 'snapshot_unavailable']);
+  const badTs = LIGHT(snap({ now_ms: undefined, provider_errors: 2 }), R(0));
+  assert.deepEqual(badTs.reasons, ['held_provider', 'held_resample']);
+});
+
+test('unknown snapshot / sample properties are REJECTED (stricter): snapshot_unavailable', () => {
+  assert.equal(LIGHT({ ...snap(), extra: 1 }, R(0)).reason, 'snapshot_unavailable');
+  assert.equal(LIGHT(withLatest({ bonus: 1 }), R(0)).reason, 'snapshot_unavailable');
+  assert.equal(LIGHT({ ...snap(), schema: 'ship-ticket-host-snapshot-v1' }, R(0)).admit, true);
+});
+
+test('countHeavyRoots: duplicate pids, self-parent, ppid cycles and oversize/garbled tables are UNKNOWN (null), never 0; kernel pid 0 self-parent is legal', () => {
+  assert.equal(countHeavyRoots(' 10 1 node --test a.test.mjs\n 10 1 node --test b.test.mjs\n'), null);
+  assert.equal(countHeavyRoots(' 10 10 node --test a.test.mjs\n'), null);
+  assert.equal(countHeavyRoots(' 10 11 node --test a.test.mjs\n 11 10 node --test b.test.mjs\n'), null);
+  assert.equal(countHeavyRoots(' 12 10 node a.test.mjs\n 10 11 node --test b.test.mjs\n 11 12 launchd\n'), null);
+  assert.equal(countHeavyRoots(' 0 0 kernel_task\n 1 0 launchd\n 10 1 node --test a.test.mjs\n'), 1);
+});
+
+test('hostSnapshot: over-1MB, cyclic, self-parent or duplicate ps tables give an UNKNOWN count so HEAVY holds', async () => {
+  const mk = (ps) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], { ps }), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
+  const big = Array.from({ length: 100000 }, (_, i) => ' ' + (i + 2) + ' 1 /usr/bin/x').join('\n') + '\n';   // > 1 MiB, a perfectly consistent table
+  assert.ok(big.length > 1024 * 1024);
+  for (const ps of [big, ' 10 10 node --test a.test.mjs\n', ' 10 11 node --test a\n 11 10 node --test b\n', ' 10 1 x\n 10 1 y\n']) {
+    const s = await mk(ps);
+    assert.equal(s.heavy_processes, null);
+    assert.deepEqual(HEAVY(s, R(0), null).reasons.slice(-1), ['held_heavy']);
   }
 });
 
@@ -218,7 +315,7 @@ test('countHeavyRoots counts suite roots, not processes: one suite with children
 test('never kills: input is not mutated, terminate is always empty, even when unhealthy', () => {
   const s = withLatest({ pressure_level: 4, swapouts: 9999 });
   const running = { total: 5, heavy: 3 };
-  const history = { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 - 20000 };
+  const history = { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 };
   const before = JSON.stringify([s, running, history]);
   const r = admitHost(s, 'HEAVY', running, history);
   assert.equal(JSON.stringify([s, running, history]), before);
@@ -276,8 +373,8 @@ test('history validation: every malformed history HOLDS with invalid_args and ne
     { ...ok, clean_streak: Infinity }, { ...ok, clean_streak: '1' }, { ...ok, clean_streak: 1.5 }, { ...ok, clean_streak: -1 }, { ...ok, clean_streak: NaN },
     { ...ok, state: 'HELD' }, { ...ok, state: 'resumed' }, { state: 'held', clean_streak: 5, last_admit_t_ms: null, last_sample_t_ms: null },
     { ...ok, last_admit_t_ms: NaN }, { ...ok, last_admit_t_ms: 'x' }, { ...ok, last_sample_t_ms: Infinity }, { ...ok, extra: 1 }, 'open', 7, [],
-    { state: 'open', clean_streak: 5, last_admit_t_ms: null, last_sample_t_ms: null }, { state: 'open', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: T0 - 20000 },
-    { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: null }, { ...H0, last_admit_t_ms: T0 },
+    { state: 'open', clean_streak: 5, last_admit_t_ms: null, last_sample_t_ms: null }, { state: 'open', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: T0 },
+    { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: null }, { ...H0, last_admit_t_ms: T0 + 1 },
   ];
   for (const h of bad) {
     const r = LIGHT(snap(), R(0), h);

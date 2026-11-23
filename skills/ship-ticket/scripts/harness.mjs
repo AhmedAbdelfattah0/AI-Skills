@@ -351,11 +351,24 @@ function providerCount(pe) {
   if (Array.isArray(pe) && pe.every(e => isPlain(e) && PROVIDER_KINDS.includes(e.kind) && Number.isFinite(e.t_ms))) return pe.length;
   return null;
 }
+// Provider stop signal from the VALID part of the field only (a quota row beside a malformed row still counts).
+function partialProviders(pe) {
+  if (isInt(pe)) return pe;
+  return Array.isArray(pe) ? pe.filter(e => isPlain(e) && PROVIDER_KINDS.includes(e.kind) && Number.isFinite(e.t_ms)).length : 0;
+}
+function knownStops(samples, pe) {
+  const stop = [];
+  if (samples.some(x => isPlain(x) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && x.pressure_level >= HOST_POLICY.pressure_hold_level)) stop.push('held_pressure');
+  if (partialProviders(pe) > 0) stop.push('held_provider');
+  return stop;
+}
 function validHistory(h) {
   // Missing history is a conservative COLD START: held, so admission needs two clean samples.
   if (h === undefined || h === null) return { ...HELD_HISTORY };
   if (!isPlain(h) || Object.keys(h).some(k => !HISTORY_KEYS.includes(k))) return null;
-  const x = { state: h.state ?? 'held', clean_streak: h.clean_streak ?? 0, last_admit_t_ms: h.last_admit_t_ms ?? null, last_sample_t_ms: h.last_sample_t_ms ?? null };
+  // Machine-issued history: all four keys must be present and exact; nothing is defaulted.
+  if (!HISTORY_KEYS.every(k => Object.hasOwn(h, k))) return null;
+  const x = { state: h.state, clean_streak: h.clean_streak, last_admit_t_ms: h.last_admit_t_ms, last_sample_t_ms: h.last_sample_t_ms };
   if (x.state !== 'open' && x.state !== 'held') return null;
   if (!isInt(x.clean_streak) || (x.state === 'held' && x.clean_streak >= HOST_POLICY.clean_samples_to_resume)) return null;
   for (const k of ['last_admit_t_ms', 'last_sample_t_ms']) if (x[k] !== null && !isInt(x[k])) return null;
@@ -366,8 +379,12 @@ function validHistory(h) {
   if (x.last_admit_t_ms !== null && (x.last_sample_t_ms === null || x.last_admit_t_ms > x.last_sample_t_ms)) return null;
   return x;
 }
+const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'heavy_processes', 'provider_errors'];
+const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swapouts', 'load1', 'load5', 'load15'];
+// Unknown properties are rejected (stricter): an unrecognised field could be a signal this version does not understand.
+const onlyKeys = (o, keys) => Object.keys(o).every(k => keys.includes(k));
 function validSample(x) {
-  return isPlain(x) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swapouts)
+  return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swapouts)
     && ['load1', 'load5', 'load15'].every(k => typeof x[k] === 'number' && Number.isFinite(x[k]) && x[k] >= 0);
 }
 
@@ -385,37 +402,30 @@ function validSample(x) {
 export function admitHost(snapshot, cls, running, history) {
   const result = (admit, reasons, signals, h) => ({ admit, reason: admit ? 'admitted' : reasons[0], reasons, signals, history: h, terminate: [] });
   const hist = validHistory(history);
-  const run = running === undefined ? { total: 0, heavy: 0 } : running;
+  const run = running;
   if ((cls !== 'HEAVY' && cls !== 'LIGHT') || !isPlain(run) || !isInt(run.total) || !isInt(run.heavy) || run.heavy > run.total
     || hist === null || !isPlain(snapshot)) return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
   const samples = Array.isArray(snapshot.samples) ? snapshot.samples : [];
   const providers = providerCount(snapshot.provider_errors);
   const heavyKnown = isInt(snapshot.heavy_processes);
+  // heavy_processes: integer, or explicit null = hostSnapshot's own 'unknown' marker (HEAVY holds). Anything else is malformed.
+  const heavyOk = heavyKnown || snapshot.heavy_processes === null;
   const cores = snapshot.cores;
   const recovering = { ...hist, state: 'held', clean_streak: 0 };
   // Unusable timestamps are a hard hold: samples cannot be ordered or aged.
   if (samples.some(x => !isPlain(x) || !isInt(x.t_ms)) || (samples.length > 0 && !isInt(snapshot.now_ms)))
-    return result(false, ['held_resample'], { available: false, timestamps_ok: false }, recovering);
+    return result(false, [...knownStops(samples.filter(isPlain), snapshot.provider_errors), 'held_resample'], { available: false, timestamps_ok: false }, recovering);
   // ONE admit path. Any invalid field holds the whole call; valid stop signals still get their specific reason first.
-  const fieldsOk = snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
+  const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && heavyOk && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
     && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
   if (!fieldsOk) {
-    const stop = [];
-    if (samples.some(x => HOST_POLICY.pressure_levels.includes(x.pressure_level) && x.pressure_level >= HOST_POLICY.pressure_hold_level)) stop.push('held_pressure');
-    if (providers !== null && providers > 0) stop.push('held_provider');
+    const stop = knownStops(samples, snapshot.provider_errors);
     return result(false, [...stop, 'snapshot_unavailable'], { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 }, recovering);
   }
   const latest = samples[samples.length - 1];
   // History timestamps must not be in the future relative to the snapshot clock.
   if ((hist.last_sample_t_ms !== null && hist.last_sample_t_ms > snapshot.now_ms) || (hist.last_admit_t_ms !== null && hist.last_admit_t_ms > snapshot.now_ms))
     return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
-  // A sample counts only if it is >= 15 s after the last counted one; replays and near-duplicates are ONE sample, history unchanged.
-  if (hist.last_sample_t_ms !== null && latest.t_ms - hist.last_sample_t_ms < HOST_POLICY.sample_gap_min_ms)
-    return result(false, ['held_resample'], { available: true, replay: true }, hist);
-  const gapsOk = samples.every((x, i) => i === 0 || (x.t_ms - samples[i - 1].t_ms >= HOST_POLICY.sample_gap_min_ms && x.t_ms - samples[i - 1].t_ms <= HOST_POLICY.sample_gap_max_ms));
-  const age = snapshot.now_ms - latest.t_ms;
-  const fresh = age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
-  if (!fresh || (samples.length > 1 && !gapsOk)) return result(false, ['held_resample'], { available: true, fresh, gaps_ok: gapsOk }, recovering);
   const holds = [];
   if (samples.some(x => x.pressure_level >= HOST_POLICY.pressure_hold_level)) holds.push('held_pressure');
   let swap = 'flat';
@@ -427,9 +437,23 @@ export function admitHost(snapshot, cls, running, history) {
   const loadHigh = ['load1', 'load5', 'load15'].some(k => latest[k] >= loadLimit);
   if (loadHigh) holds.push('held_load');
   if (providers > 0) holds.push('held_provider');
+  // A sample counts only if it is >= 15 s after the last counted one; replays and near-duplicates are ONE sample.
+  // But a real stop signal in such a snapshot is never hidden: it resets the clean streak (stop signals are evaluated first).
+  const sinceLast = hist.last_sample_t_ms === null ? null : latest.t_ms - hist.last_sample_t_ms;
+  if (sinceLast !== null && sinceLast < HOST_POLICY.sample_gap_min_ms) {
+    const stops = holds.filter(h => !(h === 'held_swap' && swap === 'unknown'));
+    if (stops.length > 0) return result(false, [...stops, 'held_resample'], { available: true, replay: true }, { ...hist, state: 'held', clean_streak: 0 });
+    return result(false, ['held_resample'], { available: true, replay: true }, hist);
+  }
+  const gapsOk = samples.every((x, i) => i === 0 || (x.t_ms - samples[i - 1].t_ms >= HOST_POLICY.sample_gap_min_ms && x.t_ms - samples[i - 1].t_ms <= HOST_POLICY.sample_gap_max_ms));
+  const age = snapshot.now_ms - latest.t_ms;
+  const fresh = age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
+  if (!fresh || (samples.length > 1 && !gapsOk)) return result(false, [...holds.filter(h => h !== 'held_swap'), 'held_resample'], { available: true, fresh, gaps_ok: gapsOk }, recovering);
+  // More than 30 s since the last counted sample: the streak is not consecutive any more, restart it.
+  const base = sinceLast !== null && sinceLast > HOST_POLICY.sample_gap_max_ms ? { ...hist, state: 'held', clean_streak: 0 } : hist;
   const clean = holds.length === 0;
-  const clean_streak = clean ? hist.clean_streak + 1 : 0;
-  const resumed = hist.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
+  const clean_streak = clean ? base.clean_streak + 1 : 0;
+  const resumed = base.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
   const healthy = clean && resumed;
   const heavy_slots = healthy ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
   const reasons = [...holds];
@@ -443,14 +467,23 @@ export function admitHost(snapshot, cls, running, history) {
   { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
 }
 
+const PS_MAX_CHARS = 1024 * 1024;
 const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat', ps: '/bin/ps' });
 /**
  * Count distinct heavy SUITE ROOTS: a matching process whose parent is not itself a matching process
  * (one `node --test` suite spawns many matching children). Input is `ps -axo pid=,ppid=,command=`.
  */
 export function countHeavyRoots(psOutput, patterns = HEAVY_PATTERNS) {
-  const rows = String(psOutput).split('\n').map(l => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean)
-    .map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] })).filter(r => patterns.some(re => re.test(r.cmd)));
+  const all = String(psOutput).split('\n').map(l => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean)
+    .map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] }));
+  // Process-table consistency: duplicate pids, a self-parent (other than kernel pid 0) or a ppid cycle => UNKNOWN (null), never 0.
+  const parent = new Map();
+  for (const r of all) { if (parent.has(r.pid) || (r.pid === r.ppid && r.pid !== 0)) return null; parent.set(r.pid, r.ppid); }
+  for (const start of parent.keys()) {
+    const seen = new Set();
+    for (let p = start; p !== 0 && parent.has(p); p = parent.get(p)) { if (seen.has(p)) return null; seen.add(p); }
+  }
+  const rows = all.filter(r => patterns.some(re => re.test(r.cmd)));
   const pids = new Set(rows.map(r => r.pid));
   return rows.filter(r => !pids.has(r.ppid)).length;
 }
@@ -481,7 +514,7 @@ export async function hostSnapshot(probe = {}) {
   }
   const ps = run(BIN.ps, ['-axo', 'pid=,ppid=,command=']);
   // ps failed, was over the 1 MB bound, or is garbled (any non-blank line not `pid ppid command`) => UNKNOWN, never 0.
-  const psLines = typeof ps === 'string' ? ps.split('\n').filter(l => l.trim() !== '') : [];
+  const psLines = typeof ps === 'string' && ps.length <= PS_MAX_CHARS ? ps.split('\n').filter(l => l.trim() !== '') : [];
   base.heavy_processes = psLines.length > 0 && psLines.every(l => /^\s*\d+\s+\d+\s+\S/.test(l)) ? countHeavyRoots(ps) : null;
   base.now_ms = now();
   return base;
