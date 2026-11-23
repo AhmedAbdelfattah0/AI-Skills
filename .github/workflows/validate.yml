@@ -94,6 +94,7 @@ jobs:
           node --test
           skills/ship-ticket/scripts/harness.test.mjs
           skills/ship-ticket/scripts/harness-host.test.mjs
+          skills/ship-ticket/scripts/host-admit.test.mjs
           skills/ship-ticket/scripts/docker-lifecycle.test.mjs
           skills/ship-ticket/scripts/carrier-usage.test.mjs
           skills/ship-ticket/scripts/candidate-id.test.mjs
