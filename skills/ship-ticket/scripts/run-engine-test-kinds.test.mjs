@@ -356,6 +356,9 @@ test('[AC6] inactive differential: a run that declares nothing gives the same st
     return { outs: normal(outs, fx.root), state: normal(fx.readState(), fx.root), log: normal(readFileSync(fx.engineLog(), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)), fx.root) };
   };
   const before = scenario(mainCli), after = scenario(join(SCRIPTS, 'run-engine.mjs'));
+  // S-14a: status adds advisory keys after every existing one (run-engine-next.test.mjs pins them); origin/main may predate them.
+  const S14A = ['next_action', 'stages', 'unconsumed_results', 'unconsumed_complete', 'ready_work', 'ready_work_capacity', 'liveness'];
+  for (const o of [before.outs.at(-1), after.outs.at(-1)]) for (const k of S14A) delete o[k];
   assert.deepEqual(after.outs, before.outs, 'command outputs (status included)');
   assert.deepEqual(after.state, before.state, 'state: no test_kinds key, policy_version 1, the same attempts and events');
   assert.deepEqual(after.log, before.log, 'engine log');

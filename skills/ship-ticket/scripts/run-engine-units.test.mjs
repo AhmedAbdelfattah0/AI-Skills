@@ -103,11 +103,15 @@ function goldenRun(t, { legacy = false } = {}) {
       fix: { write: { 'src/a.txt': 'fixed' } } } });
   const outs = [];
   const step = (name, r) => { outs.push({ name, status: r.status, out: r.out }); return r; };
+  // S-14a: status adds advisory keys after every existing one; the golden predates them (run-engine-next.test.mjs pins them).
+  const S14A = ['next_action', 'stages', 'unconsumed_results', 'unconsumed_complete', 'ready_work', 'ready_work_capacity', 'liveness'];
+  const statusStep = (name, r) => { assert.deepEqual(Object.keys(r.out ?? {}).slice(-S14A.length).sort(), [...S14A].sort(), `${name}: S-14a keys appended last`);
+    return step(name, { ...r, out: Object.fromEntries(Object.entries(r.out).filter(([k]) => !S14A.includes(k))) }); };
   step('init', fx.cli('init', { dag: fx.dagFile }));
   // S-27-min legacy: a state written before the policy fields existed (both keys absent from the first command on).
   if (legacy) fx.editState((st) => { delete st.policy_version; delete st.skill_commit; });
   step('drive-1', fx.cli('drive'));
-  step('status-1', fx.cli('status'));
+  statusStep('status-1', fx.cli('status'));
   writeFileSync(`${fx.repo}/docs/in.txt`, 'input v2');
   step('drive-stale', fx.cli('drive'));
   step('review-fail', fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
@@ -115,7 +119,7 @@ function goldenRun(t, { legacy = false } = {}) {
   step('confirm', fx.gate('review', confirmReview('rx-1', fx.candidate())));
   step('ship-ready', fx.gate('ship-ready', {}));
   step('resume', fx.cli('resume'));
-  step('status-2', fx.cli('status'));
+  statusStep('status-2', fx.cli('status'));
   return { fx, record: { outputs: outs, state: fx.readState(), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) } };
 }
 
