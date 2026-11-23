@@ -187,7 +187,7 @@ units before comparing scanner results (e.g. unique advisory IDs vs unique
 package/advisory pairs), findings (root causes vs observations), and coverage
 (rows vs files fully read). Fewer findings or more rows alone imply no improvement.
 
-Before REPORT, run the bundled dependency-free Node checker (Node >=18):
+Before REPORT, run the bundled dependency-free Node checker (Node >= 22):
 
 ```text
 node <skill-dir>/scripts/check-continuity.mjs <current-run>/manifest.json [<extra-prior-manifest> ...]

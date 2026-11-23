@@ -1,6 +1,5 @@
 // Tests for scripts/cli.mjs: install, update, the validator and the install targets.
-// Run with: node --test scripts/cli.test.mjs   (needs Node >= 18.17 for t.after; CI's
-// `18` resolves to the latest 18.x. No dependencies.)
+// Run with: node --test scripts/cli.test.mjs   (needs Node >= 22. No dependencies.)
 //
 // ISOLATION (non-negotiable). The CLI writes to the home directory, runs
 // `git pull` in its own checkout and can register a scheduled job, so no test may
@@ -853,4 +852,41 @@ test('a citation whose owning skill is missing from the library fails', (t) => {
   const r = w.validate();
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /cites 'TEST-01', which test-quality does not define\. Its owner skill is missing from the library\./);
+});
+
+// ---- supported-runtime contract (OD-Q5: minimum Node.js is 22) -----------------
+// package.json engines, the install.sh guard and the README must state one floor.
+
+const REPO = join(SCRIPTS, '..');
+const NODE_FLOOR = 22;
+
+test('the supported Node floor is the same in package.json, install.sh and README', () => {
+  const engines = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).engines.node;
+  assert.equal(engines, `>=${NODE_FLOOR}`);
+
+  const sh = readFileSync(join(REPO, 'install.sh'), 'utf8');
+  const guard = sh.match(/"\$NODE_MAJOR" -lt (\d+)/);
+  assert.ok(guard, 'install.sh has a NODE_MAJOR guard');
+  assert.equal(Number(guard[1]), NODE_FLOOR);
+  assert.match(sh, new RegExp(`Install Node\\.js ${NODE_FLOOR} or newer`));
+  assert.match(sh, new RegExp(`this needs ${NODE_FLOOR} or newer`));
+
+  const readme = readFileSync(join(REPO, 'README.md'), 'utf8');
+  assert.match(readme, new RegExp(`Needs \`git\` and Node ${NODE_FLOOR}\\+`));
+});
+
+test('install.sh refuses a Node below the floor and names the floor', (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ais-nodefloor-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  // A stand-in `node` that reports the major one below the floor, whatever it is asked.
+  const fake = `#!/bin/sh\ncase "$1" in -v) echo v${NODE_FLOOR - 1}.0.0;; *) echo ${NODE_FLOOR - 1};; esac\n`;
+  put(join(bin, 'node'), fake);
+  spawnSync('chmod', ['755', join(bin, 'node')]);
+  const r = spawnSync('bash', [join(REPO, 'install.sh')], {
+    encoding: 'utf8',
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: join(root, 'home') },
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, new RegExp(`too old; this needs ${NODE_FLOOR} or newer`));
 });

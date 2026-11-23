@@ -7,7 +7,7 @@
     "ai-skills": "scripts/cli.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "files": [
     "skills",

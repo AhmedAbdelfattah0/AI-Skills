@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       # Node validator is canonical and cross-platform (also runnable on Windows).
       - name: Run skill validator
         run: node scripts/cli.mjs validate

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Portable, advisory execution harness. Node >=18, no dependencies.
+ * Portable, advisory execution harness. Node >= 22, no dependencies.
  * Never executes model calls, starts containers, or deletes resources.
  * PLAN is intentionally excluded from model routing and scheduling.
  */
