@@ -46,6 +46,7 @@
  */
 import { openSync, readSync, closeSync, realpathSync, lstatSync, fstatSync, constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -203,7 +204,7 @@ export const readText = (f) => decodeStrict(readBounded(f));
 export const parsePathsArg = (v) => JSON.parse(v.trim().startsWith('[') ? (v.length > MAX_INPUT ? (() => { throw bad('malformed_input', 'too_large'); })() : v) : readText(v));
 
 // ---- hardened git (mirrors fast-checks.mjs: no GIT_* inherited, replace objects off, literal pathspecs, raw -z paths, no optional locks) ----
-const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; e.GIT_NO_REPLACE_OBJECTS = '1'; e.GIT_LITERAL_PATHSPECS = '1'; e.GIT_OPTIONAL_LOCKS = '0'; return e; };
+const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; e.GIT_NO_REPLACE_OBJECTS = '1'; e.GIT_GRAFT_FILE = devNull; e.GIT_LITERAL_PATHSPECS = '1'; e.GIT_OPTIONAL_LOCKS = '0'; return e; };
 const LIST_CAP = 64 * 1024 * 1024; // bytes git may print for ONE enumeration; excess aborts the child (ENOBUFS) before anything is sorted or hashed
 const gitRaw = (cwd, args, { env = gitEnv(), maxBuffer = 256 * 1024 * 1024 } = {}) => execFileSync('git', ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', ...args], { cwd, env, maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
 const git = (cwd, args) => gitRaw(cwd, args).toString('utf8').replace(/\n$/, '');

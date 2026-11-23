@@ -67,7 +67,7 @@ export function wellFormedBase(B) {
   return B !== null && typeof B === 'object' && !Array.isArray(B)
     && Object.keys(B).sort().join() === 'identity,merge_base,pinned_at_seq,ref,remote,sha'
     && typeof B.remote === 'string' && SAFE_REMOTE.test(B.remote) && (B.identity === null || (typeof B.identity === 'string' && B.identity.length > 0))
-    && typeof B.ref === 'string' && B.ref.length > 0 && SHA.test(B.sha) && SHA.test(B.merge_base) && Number.isInteger(B.pinned_at_seq) && B.pinned_at_seq > 0;
+    && typeof B.ref === 'string' && B.ref.length > 0 && typeof B.sha === 'string' && SHA.test(B.sha) && typeof B.merge_base === 'string' && SHA.test(B.merge_base) && Number.isInteger(B.pinned_at_seq) && B.pinned_at_seq > 0;
 }
 
 /**

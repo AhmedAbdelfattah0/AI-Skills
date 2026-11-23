@@ -96,6 +96,7 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { devNull } from 'node:os';
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep, basename } from 'node:path';
 import { changedPaths } from './risk-floor.mjs';
@@ -115,7 +116,7 @@ export const RUNNER_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
 const sha256 = (...parts) => { const h = createHash('sha256'); for (const p of parts) h.update(p); return h.digest('hex'); };
 
 // ---- git (TEMPORARY fourth copy of the hardened-git helper, as in test-kinds.mjs: TODO(S-02a0b) replace with lib/git-capability.mjs) ----
-const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
+const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull, GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
 const git = (cwd, args, max = 1 << 20, input = undefined) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: max, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
 const topOf = (repo) => (typeof repo !== 'string' ? refuse('test_kinds_error') : realpathSync.native(git(realpathSync.native(repo), ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, ''))); // a primitive string, before the filesystem sees it (no URL-like getter runs)
 const gitRefusal = (e) => (e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable');

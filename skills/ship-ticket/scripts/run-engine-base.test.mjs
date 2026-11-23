@@ -20,7 +20,7 @@ import { POSIX, fixture, withOrigin } from './engine-test-fixture.mjs';
 import * as SP from './security-plan.mjs';
 import { init, status, gate as gateCmd } from './run-engine.mjs';
 import { POLICY_SEMANTICS } from './engine-policy.mjs';
-import { pinBaseRecord } from './engine-base-read.mjs';
+import { pinBaseRecord, wellFormedBase } from './engine-base-read.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const CATALOG = SP.loadCatalog();
@@ -438,6 +438,26 @@ test('[B10] a pinned state whose S.base is malformed (null, false, 0, \'\', [], 
     assert.equal(fx.gate('reassess', {}).out?.code, 'base_state_missing', JSON.stringify(bad));
   }
 });
+
+/** F-110-2: a pin field that is not a STRICT string is base_state_missing (a regexp test coerces an array or an object to the sha it spells). */
+async function strictStringField(t, field) {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.feature();
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const good = fx.readState().base, v = good[field];
+  assert.equal(wellFormedBase(good), true, 'the recorded pin is well formed (the control)');
+  for (const bad of [[v], [[v]]]) { // what state.json can carry
+    fx.editState((s) => { s.base = { ...good, [field]: bad }; });
+    await assert.rejects(status(fx.ctx()), (e) => e.code === 'base_state_missing', JSON.stringify(bad));
+    assert.equal(fx.gate('reassess', {}).out?.code, 'base_state_missing', JSON.stringify(bad));
+  }
+  const nullProto = Object.assign(Object.create(null), { toString: () => v });
+  for (const bad of [[v], new String(v), { toString: () => v }, { valueOf: () => v, toString: () => v }, nullProto, 1, null, undefined]) // what JSON cannot carry, at the validator
+    assert.equal(wellFormedBase({ ...good, [field]: bad }), false, `${field}: ${Object.prototype.toString.call(bad)}`);
+  assert.equal(wellFormedBase({ ...good, [field]: v }), true, `${field}: the plain string passes`);
+}
+test('[B13] F-110-2 S.base sha is a STRICT string (array, String object, toString/valueOf object, number, null-prototype object: base_state_missing)', { skip: WIN_SKIP }, (t) => strictStringField(t, 'sha'));
+test('[B14] F-110-2 S.base merge_base is a STRICT string (same coercible values: base_state_missing)', { skip: WIN_SKIP }, (t) => strictStringField(t, 'merge_base'));
 
 test('[B11] Neg4 a push URL of another repository is refused even when the fetch URL names no GitHub repository (a local path)', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
