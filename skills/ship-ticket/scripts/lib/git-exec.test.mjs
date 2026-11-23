@@ -1397,21 +1397,23 @@ const GRAMMAR_IMPORTS = new Map([
  * of Buffers) is the documented NOT CHECKED class.
  */
 const GRAMMAR_MEMBERS = new Set([
-  'add', 'ambient', 'arch', 'args', 'argv', 'buffer', 'byteOffset', 'bytes', 'checks', 'closeSync', 'code', 'common',
-  'COPYFILE_EXCL', 'ctx', 'cwd', 'deadline', 'delete', 'deletes', 'dev', 'diff', 'digest', 'dir', 'dirname', 'dirs',
-  'endsWith', 'entry', 'env', 'envLimit', 'envTooLarge', 'equals', 'error', 'every', 'exclude', 'excludeCopy',
-  'excludeSha256', 'exclusions', 'exec', 'files', 'filter', 'find', 'flatMap', 'forEach', 'fs', 'get', 'git',
-  'gitInfo', 'globalConfig', 'has', 'home', 'hooksDir', 'id', 'ignored', 'includes', 'indexOf', 'info', 'ino',
-  'isAbsolute', 'isBlockDevice', 'isCharacterDevice', 'isDirectory', 'isExecutableFile', 'isFIFO', 'isFile',
-  'isSocket', 'isSymbolicLink', 'join', 'keys', 'kind', 'lastIndexOf', 'length', 'map', 'maxBuffer', 'maxBytes',
-  'maxFiles', 'maxObjectBytes', 'maxObjects', 'maxTotalObjectBytes', 'message', 'mode', 'name', 'neutralisation',
-  'node', 'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'op', 'os', 'outcome',
-  'pairs', 'partialClone', 'PATH', 'path', 'platform', 'policy', 'posix', 'prerelease', 'push', 'raw', 'readSync',
-  'reduce', 'relative', 'removeEntries', 'replace', 'resolve', 'reverse', 'root', 'rootPath', 'rootStat', 'run',
-  'runner', 'selection', 'sep', 'set', 'shift', 'signal', 'size', 'slice', 'some', 'sort', 'source', 'spendBytes',
-  'spendFiles', 'split', 'startsWith', 'stat', 'status', 'stderr', 'stdin', 'stdout', 'store', 'storeDir', 'storePath',
-  'subarray', 'test', 'timeoutMs', 'TMPDIR', 'toLowerCase', 'top', 'toplevel', 'total', 'toUpperCase', 'trimEnd',
-  'type', 'uid', 'untracked', 'update', 'value', 'version', 'win32', 'workTree'
+  'add', 'ambient', 'arch', 'args', 'argv', 'buffer', 'byteOffset', 'bytes', 'check', 'checks', 'chmod', 'close',
+  'closeSync', 'code', 'common', 'copyFile', 'COPYFILE_EXCL', 'ctx', 'cwd', 'deadline', 'delete', 'deletes', 'derive',
+  'dev', 'diff', 'digest', 'dir', 'dirname', 'dirs', 'endsWith', 'entry', 'env', 'envLimit', 'envTooLarge', 'equals',
+  'error', 'every', 'exclude', 'excludeCopy', 'excludeSha256', 'exclusions', 'exec', 'files', 'filter', 'find',
+  'flatMap', 'forEach', 'fs', 'fstat', 'get', 'git', 'gitInfo', 'globalConfig', 'has', 'home', 'hooksDir', 'id',
+  'ignored', 'includes', 'indexOf', 'info', 'ino', 'isAbsolute', 'isBlockDevice', 'isCharacterDevice', 'isDirectory',
+  'isExecutableFile', 'isFIFO', 'isFile', 'isSocket', 'isSymbolicLink', 'join', 'keys', 'kind', 'lastIndexOf',
+  'length', 'lstat', 'lstatOrNull', 'makeTemp', 'map', 'maxBuffer', 'maxBytes', 'maxFiles', 'maxObjectBytes',
+  'maxObjects', 'maxTotalObjectBytes', 'message', 'mkdir', 'mkdirStat', 'mode', 'name', 'neutralisation', 'node',
+  'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'op', 'open', 'openDir', 'os',
+  'outcome', 'pairs', 'partialClone', 'PATH', 'path', 'platform', 'policy', 'posix', 'prerelease', 'push', 'raw',
+  'read', 'readLink', 'readSync', 'realPath', 'reduce', 'relative', 'removeEntries', 'rename', 'replace', 'resolve',
+  'reverse', 'rmdir', 'root', 'rootPath', 'rootStat', 'run', 'runner', 'selection', 'sep', 'set', 'shift', 'signal',
+  'size', 'slice', 'some', 'sort', 'source', 'spendBytes', 'spendFiles', 'split', 'startsWith', 'stat', 'status',
+  'stderr', 'stdin', 'stdout', 'store', 'storeDir', 'storePath', 'subarray', 'test', 'tick', 'timeoutMs', 'TMPDIR',
+  'toLowerCase', 'top', 'toplevel', 'total', 'toUpperCase', 'trimEnd', 'type', 'uid', 'unlink', 'untracked', 'update',
+  'value', 'version', 'win32', 'workTree', 'writeNew'
 ]);
 /** Destructuring keys that are data fields here but name a decoder method elsewhere (`decode`): readable ONLY as a
  * destructuring key, never as a member expression (round 7). */
@@ -1862,7 +1864,7 @@ const ALLOWED_SITES = [
   ['git-exec.mjs', '<module>', 'decoder-api', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
   ['git-exec.mjs', '<module>', 'encoding-literal', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'its label'],
   ['git-hardened.mjs', 'hexKey', 'decoder-api', 0, "b.toString('hex')", "const hexKey = (b) => b.toString('hex');", 'a lossless hex Map key for path bytes (hex is not a text decode); never displayed or compared with text (S-02a0c)'],
-  ['git-hardened.mjs', 'mkdir0700', 'mkdir-site', 0, 'mkdirSync(p, 0o700)', 'const mkdir0700 = (p) => mkdirSync(p, 0o700);', 'the lib\'s one directory create: non-recursive (returns undefined, never a path string), mode 0700, exclusive (EEXIST throws) (S-02a0c)'],
+  ['git-hardened.mjs', 'fsx.mkdir0700', 'mkdir-site', 0, 'mkdirSync(p, 0o700)', 'const mkdir0700 = (p) => mkdirSync(p, 0o700);', 'the lib\'s one directory create: non-recursive (returns undefined, never a path string), mode 0700, exclusive (EEXIST throws) (S-02a0c)'],
   ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync.native(p)', 'return realpathSync.native(p);', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
   ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd()', 'cwd = process.cwd()', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
   ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath(d)', 'const banned = [cwd, ...exclude].flatMap((d) => [P.resolve(d), fs.realpath(d)]).filter(Boolean);', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],

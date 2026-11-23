@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import cp, { spawnSync } from 'node:child_process';
 import { Dir, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import fs from 'node:fs';
@@ -1101,6 +1101,260 @@ test('[M63] R2: the produced pack is capped on its own (incompressible data: pac
   const parent = tmp(t);
   assert.throws(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] }), code('object_too_large'), `inflated ${inflated} + 64 admits the sizes, the pack is larger`);
   assert.equal(existsSync(join(parent, 'store')), false);
+});
+
+// ------------------------------------------------------------------ attempt 3 (owner-approved fsx design, v2 note), test-first
+
+/**
+ * The fs trace harness: EVERY node:fs *Sync export (realpathSync.native included) and Dir#readSync / Dir#closeSync are
+ * wrapped (syncBuiltinESMExports, so the lib's own named imports and git-exec's see them). Each call is logged with the
+ * fake time at which it BEGINS, then advances the fake clock by `step` (+ `slow[name]`). Date.now returns the fake time.
+ * Open descriptors and open Dirs are counted so a leak on refusal is visible.
+ */
+const FS_SYNC = Object.keys(fs).filter((k) => /Sync$/.test(k) && typeof fs[k] === 'function');
+function traced({ step = 0, slow = {} }, fn) {
+  const realNow = Date.now;
+  let now = realNow();
+  const log = [];
+  const open = { fd: 0, dir: 0 };
+  const saved = {};
+  // Only the OUTERMOST fs call is logged and timed: Node's own nested calls (writeFileSync -> openSync/writeSync) are one call.
+  let depth = 0;
+  const wrap = (k, real) => function tracedFs(...a) {
+    const p = a.length && (typeof a[0] === 'string' || Buffer.isBuffer(a[0])) ? Buffer.from(a[0]).toString('latin1') : '';
+    if (depth === 0) {
+      log.push({ k, t: now, p });
+      now += step + (typeof slow[k] === 'function' ? slow[k](p) : (slow[k] ?? 0));
+    }
+    depth++;
+    let r;
+    try { r = real.apply(this, a); } finally { depth--; }
+    if (k === 'openSync') open.fd++;
+    if (k === 'closeSync') open.fd--;
+    if (k === 'opendirSync') open.dir++;
+    return r;
+  };
+  for (const k of FS_SYNC) {
+    saved[k] = fs[k];
+    fs[k] = wrap(k, saved[k]);
+    if (k === 'realpathSync') fs[k].native = wrap('realpathSync.native', saved[k].native);
+  }
+  const dirRead = Dir.prototype.readSync;
+  const dirClose = Dir.prototype.closeSync;
+  Dir.prototype.readSync = wrap('Dir#readSync', dirRead);
+  Dir.prototype.closeSync = function tracedClose(...a) { open.dir--; log.push({ k: 'Dir#closeSync', t: now, p: '' }); return dirClose.apply(this, a); };
+  syncBuiltinESMExports();
+  Date.now = () => now;
+  const start = now;
+  try { return fn({ start, log, open, now: () => now }); } finally {
+    Date.now = realNow; Object.assign(fs, saved); Dir.prototype.readSync = dirRead; Dir.prototype.closeSync = dirClose; syncBuiltinESMExports();
+  }
+}
+const EXEMPT = new Set(['closeSync', 'Dir#closeSync']);
+/** Outcome of fn under a trace: {code} for a GitError, 'ok' otherwise; anything else is rethrown (a raw error fails the test). */
+const outcome = (fn) => { try { fn(); return 'ok'; } catch (e) { if (e instanceof GitError) return e.code; throw e; } };
+/** The invariant on one traced run: no non-exempt fs call BEGINS after `bound`; descriptors and Dirs all closed. */
+function invariant(tr, bound, what) {
+  const late = tr.log.filter((c) => !EXEMPT.has(c.k) && c.t > bound);
+  assert.deepEqual(late.slice(0, 3).map((c) => `${c.k} ${c.p.slice(-40)}`), [], `${what}: ${late.length} fs call(s) began after the deadline`);
+  assert.deepEqual(tr.open, { fd: 0, dir: 0 }, `${what}: every descriptor and Dir was closed`);
+}
+
+test('[M65] INVARIANT: no public operation begins an fs call after its deadline, at any expiry position, and every refusal has its operation code', { skip: POSIX }, (t) => {
+  const { top: sub, head: subHead } = makeRepo(t, { s: 's' });
+  const { top, head } = makeRepo(t, { 'a.txt': 'a\n', 'c.txt': 'x\ny\n', 'd/b': 'b', l: { link: 'a.txt' } });
+  sh(top, ['update-index', '--add', '--cacheinfo', `160000,${subHead},sub`]);
+  sh(top, ['commit', '-q', '-m', 'g']);
+  const h2 = out(top, ['rev-parse', 'HEAD']);
+  mkdirSync(join(top, 'sub'));
+  writeFileSync(join(top, 'sub', 'f'), '');
+  writeFileSync(join(top, 'c.txt'), 'x\r\ny\r\n');
+  for (let i = 0; i < 5; i++) mkdirSync(join(top, 'u', `e${i}`), { recursive: true });
+  void sub;
+  const T = 1000;
+  const ctx = ctxOf(t, { timeoutMs: T });
+  const { store, source, dir } = storeOf(t, ctx, top, [h2, head]);
+  const stores = tmp(t);
+  let seq = 0;
+  const ops = {
+    openSource: { codes: ['git_timeout'], grace: 0, run: () => H.openSource(ctx, { toplevel: top }) },
+    openStore: { codes: ['git_timeout'], grace: 0, run: () => H.openStore(ctx, { dir }) },
+    'op tree.list': { codes: ['git_timeout'], grace: 0, run: () => H.op(store, 'tree.list', [h2]) },
+    'op blob.read': { codes: ['git_timeout'], grace: 0, run: () => H.op(store, 'blob.read', [out(top, ['rev-parse', `${h2}:a.txt`])]) },
+    // git_timeout here is a GENUINE subprocess timeout (a spawn given the few ms that remained), distinct from host expiry.
+    'verify source': { codes: ['worktree_budget_exceeded', 'lane_remove_failed', 'git_timeout'], grace: T, run: () => H.verifyWorktree(ctx, { source, store, oid: h2 }) },
+    initStore: { codes: ['git_timeout', 'lane_remove_failed'], grace: 2 * T, run: () => H.initStore(ctx, { dir: join(stores, `st${seq++}`), source, oids: [h2] }) },
+  };
+  let runs = 0;
+  for (const [name, o] of Object.entries(ops)) {
+    const calls = traced({ step: 0 }, (tr) => { o.run(); return tr.log.filter((c) => !EXEMPT.has(c.k)).length; });
+    for (let k = 1; k <= calls + 1; k += name === 'initStore' ? 3 : 1) {
+      traced({ step: Math.floor(T / k) + 1 }, (tr) => {
+        const got = outcome(o.run);
+        assert.ok(got === 'ok' || o.codes.includes(got), `${name} @${k}/${calls}: refused ${got}, expected one of ${o.codes} (never a tamper/invalid remap)`);
+        invariant(tr, tr.start + T + o.grace + 2 * (Math.floor(T / k) + 1), `${name} @${k}`);
+        runs++;
+      });
+    }
+  }
+  t.diagnostic(`${runs} traced runs`);
+});
+test('[M65] INVARIANT on wide and empty-directory trees with slow lstat, opendir, chmod, unlink and reads (dispose, verify, rollback)', { skip: POSIX }, (t) => {
+  for (const slow of [{ lstatSync: 5 }, { opendirSync: 5 }, { 'Dir#readSync': 5 }, { chmodSync: 5 }, { unlinkSync: 5 }, { rmdirSync: 5 }]) {
+    const what = Object.keys(slow)[0];
+    // dispose of an R holding 2,000 empty dirs (mode 0500, so each needs a chmod)
+    const tmpRoot = tmp(t, 'gh-inv-');
+    withEnv({ TMPDIR: tmpRoot }, () => {
+      const c = H.createContext({ timeoutMs: 1000 });
+      const [R] = readdirSync(tmpRoot).map((n) => join(tmpRoot, n));
+      for (let i = 0; i < 1000; i++) { mkdirSync(join(R, 'home', `e${i}`)); writeFileSync(join(R, 'home', `e${i}`, 'f'), ''); chmodSync(join(R, 'home', `e${i}`), 0o500); }
+      traced({ slow }, (tr) => {
+        assert.equal(outcome(() => c.dispose()), 'lane_remove_failed', `dispose, slow ${what}`);
+        invariant(tr, tr.start + 1000, `dispose, slow ${what}`);
+      });
+    });
+    // verify: 2,000 empty untracked dirs
+    const { top, head } = makeRepo(t, { a: 'a' });
+    for (let i = 0; i < 2000; i++) mkdirSync(join(top, 'u', `e${i}`), { recursive: true });
+    const ctx = ctxOf(t, { timeoutMs: 1000 });
+    const { store, source } = storeOf(t, ctx, top, [head]);
+    traced({ slow }, (tr) => {
+      const got = outcome(() => H.verifyWorktree(ctx, { source, store, oid: head }));
+      assert.ok(['worktree_budget_exceeded', 'ok'].includes(got), `verify, slow ${what}: ${got}`);
+      invariant(tr, tr.start + 1000 + 1000, `verify, slow ${what}`);
+    });
+  }
+});
+test('[M65] rollback after expiry: the derived grace gateway quarantines and removes (timeout outcome kept), or leaves the dir quarantined (lane_remove_failed); never past the grace deadline', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a', b: 'b' });
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const source = H.openSource(ctx, { toplevel: top });
+  const n = traced({}, (tr) => { H.initStore(ctx, { dir: join(tmp(t), 'dry'), source, oids: [head] }); return tr.log.length; });
+  const seen = new Set();
+  for (let k = 2; k <= n; k += 2) {
+    const parent = tmp(t);
+    traced({ step: Math.floor(1000 / k) + 1 }, (tr) => {
+      const got = outcome(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] }));
+      assert.ok(['ok', 'git_timeout', 'lane_remove_failed'].includes(got), `@${k}/${n}: ${got}`);
+      // deadline + view-removal window + rollback window; a window opens at most one call (one step) after the previous closed.
+      invariant(tr, tr.start + 3000 + 2 * (Math.floor(1000 / k) + 1), `rollback @${k}`);
+      if (got !== 'ok') assert.equal(existsSync(join(parent, 'store')), false, `@${k}: never left at its own name`);
+      if (got === 'git_timeout') assert.deepEqual(existsSync(join(parent, '.quarantine')) ? readdirSync(join(parent, '.quarantine')) : [], [], `@${k}: quarantined, then removed within the grace deadline`);
+      if (got === 'lane_remove_failed') assert.equal(readdirSync(join(parent, '.quarantine')).length <= 1, true, `@${k}: at most one quarantined slot`);
+      seen.add(got);
+    });
+  }
+  assert.ok(seen.has('git_timeout'), `the timeout outcome with full recovery occurs (${[...seen]})`);
+});
+test('[M67][M68] expiry inside eolHint, checkStore and live is the operation code: never git_timeout for verify work, never context_tampered or owned_dir_invalid', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`f${i}.txt`, 'a\nb\n'])));
+  for (let i = 0; i < 40; i++) writeFileSync(join(top, `f${i}.txt`), 'a\r\nb\r\n');
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const { store, source, dir } = storeOf(t, ctx, top, [head]);
+  traced({ slow: { openSync: 60 } }, (tr) => {
+    assert.equal(outcome(() => H.verifyWorktree(ctx, { source, store, oid: head })), 'worktree_budget_exceeded', 'eolHint reads');
+    invariant(tr, tr.start + 2000, 'eolHint');
+  });
+  // checkStore reads the config and marker through bounded reads: expiry there is a timeout, never tampering.
+  for (let k = 1; k <= 12; k++) {
+    traced({ step: Math.floor(1000 / k) + 1 }, () => {
+      const got = outcome(() => H.openStore(ctx, { dir }));
+      assert.ok(['ok', 'git_timeout'].includes(got), `openStore @${k}: ${got}`);
+      const got2 = outcome(() => H.op(store, 'object.exists', [head]));
+      assert.ok(['ok', 'git_timeout'].includes(got2), `op @${k}: ${got2}`);
+    });
+  }
+});
+test('[M69] CPU: a depth-2,000 tree chain lists in linear time, within the deadline (real clock)', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const deep = Array.from({ length: 2000 }, () => 'a').join('/');
+  sh(top, ['fast-import', '--quiet'], { input: Buffer.from(`commit refs/heads/deep\ncommitter f <f@x> 0 +0000\ndata 0\nfrom ${head}\nM 100644 inline ${deep}/f\ndata 1\nx\n\n`) });
+  const deepHead = out(top, ['rev-parse', 'refs/heads/deep']);
+  const ctx = ctxOf(t, { timeoutMs: 1500 });
+  const { store } = storeOf(t, ctx, top, [deepHead, head]);
+  const t0 = Date.now();
+  const got = outcome(() => H.op(store, 'tree.list', [deepHead]));
+  const ms = Date.now() - t0;
+  t.diagnostic(`depth-2,000 tree.list: ${got} in ${ms} ms`);
+  assert.ok(['ok', 'git_timeout'].includes(got), got);
+  assert.ok(ms < 1500 + 1000, `bounded by the deadline: ${ms} ms`);
+});
+test('[M69] CPU: the tree.list parse checks the clock every 1,024 records, and a terminal check refuses an expired success', { skip: POSIX }, (t) => {
+  const files = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`d${i % 7}/f${i}`, '']));
+  const { top, head } = makeRepo(t, files);
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const { store } = storeOf(t, ctx, top, [head]);
+  const realNow = Date.now;
+  const realSpawn = cp.spawnSync;
+  let clock = 0;
+  const marks = [];
+  let jumpAfterSpawn = false;
+  let base = realNow();
+  Date.now = () => { clock++; return base; };
+  cp.spawnSync = (...a) => { marks.push(['start', clock]); const r = realSpawn(...a); marks.push(['end', clock]); if (jumpAfterSpawn) base += 10_000; return r; };
+  syncBuiltinESMExports();
+  try {
+    H.op(store, 'tree.list', [head]);
+    // Clock reads between the ls-tree spawn's end and the next spawn's start: the parse (>= 10,000 records / 1,024) + git()'s own.
+    const between = marks[2][1] - marks[1][1];
+    assert.ok(between >= Math.floor(10_000 / 1024) + 2, `${between} clock reads while parsing 10,000 records`);
+    jumpAfterSpawn = true;
+    assert.equal(outcome(() => H.op(store, 'object.exists', [head])), 'git_timeout', 'the terminal check refuses a success after the deadline');
+  } finally { Date.now = realNow; cp.spawnSync = realSpawn; syncBuiltinESMExports(); }
+});
+test('[M70] helper modules (R-b, documented): the runner\'s statSync(cwd) and the probe are outside fsx; failures are typed, never tampering, and their time is not charged to the operation', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const ctx = ctxOf(t, { timeoutMs: 1000 });
+  const { store } = storeOf(t, ctx, top, [head]);
+  // A failing preflight stat of the lib-owned cwd: git_launch_failed (git-exec's typed outcome), never a tamper code.
+  traced({ step: 0 }, () => {
+    const real = fs.statSync;
+    fs.statSync = (p, ...a) => { if (Buffer.from(p).toString('latin1').endsWith('/cwd')) throw Object.assign(new Error('EIO'), { code: 'EIO' }); return real(p, ...a); };
+    syncBuiltinESMExports();
+    assert.equal(outcome(() => H.op(store, 'object.exists', [head])), 'git_launch_failed');
+  });
+  // A slow preflight stat (fake 5 s) is not deducted from the spawn's timeout; the NEXT gateway check refuses with the op code.
+  traced({ slow: { statSync: 5000 } }, () => assert.equal(outcome(() => H.op(store, 'object.exists', [head])), 'git_timeout'));
+  // The probe: a failing PATH resolution is a typed GitCapabilityError; a slow probe is not charged to createContext's fs deadline.
+  // Only the probe's realpath of the git binary is slow (fake 4 s); the context's own fs calls still fit its 1 s deadline.
+  traced({ slow: { 'realpathSync.native': (p) => (/\/git$/.test(p) ? 4000 : 0) } }, () => { const c = H.createContext({ timeoutMs: 1000 }); c.dispose(); });
+});
+test('[M66] LINT (development guardrail, not a security boundary): git-hardened.mjs reaches node:fs only inside the fsx factory, and every catch rethrows the deadline sentinel first', () => {
+  assert.ok(acorn, 'vendored acorn failed its integrity check');
+  const lint = (src) => {
+    const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+    const fsNames = new Set();
+    for (const d of ast.body) if (d.type === 'ImportDeclaration' && /^(?:node:)?fs(?:\/promises)?$/.test(d.source.value)) for (const sp of d.specifiers) { if (sp.type !== 'ImportSpecifier') return ['fs namespace/default import']; fsNames.add(sp.local.name); }
+    const off = [];
+    const factory = ast.body.find((n) => n.type === 'FunctionDeclaration' && n.id.name === 'fsx');
+    if (!factory) return ['no fsx factory'];
+    const inFactory = (n) => n.start >= factory.start && n.end <= factory.end;
+    const visit = (n, parent) => {
+      if (!n || typeof n.type !== 'string') return;
+      if (n.type === 'Identifier' && fsNames.has(n.name) && !inFactory(n) && !(parent?.type === 'ImportSpecifier')) off.push(`fs ${n.name} at line ${n.loc.start.line}`);
+      if (n.type === 'MemberExpression' && !n.computed && ['readSync', 'closeSync'].includes(n.property.name) && !inFactory(n)) off.push(`Dir.${n.property.name} at line ${n.loc.start.line}`);
+      if (n.type === 'ImportExpression' || (n.type === 'Identifier' && ['require', 'createRequire'].includes(n.name))) off.push(`loader ${n.type} at line ${n.loc.start.line}`);
+      if (n.type === 'CatchClause' && !inFactory(n)) {
+        const first = n.body.body[0];
+        const ok = n.param?.type === 'Identifier' && first?.type === 'IfStatement' && src.slice(first.start, first.end).replace(/\s+/g, ' ') === `if (expired(${n.param.name})) throw ${n.param.name};`;
+        if (!ok) off.push(`catch at line ${n.loc.start.line} does not rethrow the deadline sentinel first`);
+      }
+      for (const k of Object.keys(n)) { if (['type', 'start', 'end', 'loc'].includes(k)) continue; const v = n[k]; for (const c of Array.isArray(v) ? v : [v]) if (c && typeof c.type === 'string') visit(c, n); }
+    };
+    visit(ast, null);
+    if (/export\s+(?:function|const)\s+fsx\b/.test(src)) off.push('fsx exported');
+    return off;
+  };
+  const src = readFileSync(join(here, 'git-hardened.mjs'), 'utf8');
+  assert.deepEqual(lint(src), [], 'no direct fs use outside fsx and no deadline-swallowing catch');
+  // Positive controls: each planted form is flagged.
+  const base = "import { lstatSync } from 'node:fs';\nconst expired = () => false;\nfunction fsx() { return lstatSync; }\n";
+  for (const [plant, why] of [['lstatSync("/");', /fs lstatSync/], ['const f = lstatSync;', /fs lstatSync/], ['d.readSync();', /Dir\.readSync/], ['try { x(); } catch { y(); }', /catch/],
+    ['try { x(); } catch (e) { y(); }', /catch/], ["import('node:fs');", /loader/], ['require("fs");', /loader/]]) {
+    assert.ok(lint(base + plant).some((o) => why.test(o)), plant);
+  }
+  assert.ok(lint("import * as fs from 'node:fs';\nfunction fsx() {}").some((o) => /namespace/.test(o)));
+  assert.deepEqual(lint(`${base}try { x(); } catch (e) { if (expired(e)) throw e; y(); }`), [], 'control: the sanctioned catch form');
 });
 
 // ------------------------------------------------------------------ the canary matrix (C1): hostile builder config never runs
