@@ -160,7 +160,7 @@ export function startCheck(planText, { runId, now = Date.now(), bundleDir = null
  * without `debate_policy: 2`) would otherwise be refused as debate_policy_missing. A plan that carries `debate_policy: 2`
  * is checked whatever its approval date. Pinned in brief-debate.test.mjs.
  */
-export const DEBATE_POLICY_CUTOFF = '2026-11-23T00:00:00.000Z';
+export const DEBATE_POLICY_CUTOFF = '2026-11-23T11:15:00.000Z';
 /** Whether a START is legacy for the debate: approved_at (else timestamp) strictly before the cutoff; missing or unparseable fails closed. */
 export function debateLegacyApproval(start) {
   const at = start?.approved_at ?? start?.timestamp;
