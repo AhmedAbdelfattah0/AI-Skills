@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import { acceptedView, nextStep, PHASES } from './engine-accepted.mjs';
+import * as SP from './security-plan.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const CLI = fileURLToPath(new URL('./engine-accepted.mjs', import.meta.url));
@@ -289,12 +290,14 @@ test('T4 SHIP_READY reads the LATEST ship-ready GATE note: a later refusal un-ac
   v = view(fx, { last: d.file });
   assert.equal(phaseOf(v.out, 'SHIP_READY').state, 'not_accepted');
   assert.equal(phaseOf(v.out, 'SHIP_READY').code, 'exclusions_altered');
-  assert.deepEqual(step(next(fx, { last: d.file })), { phase: 'SHIP_READY', action: 'run', cmd: 'gate ship-ready', role: null });
+  const n = next(fx, { last: d.file });
+  stopped(n, 'gate_refused', 'SHIP_READY');
+  assert.deepEqual(n.out.facts.key, { candidate_id: c, gate: 'ship-ready', code: 'exclusions_altered', subject: 'run' });
 });
 
-// ------------------------------------------------------------------ repeat-no-progress
+// ------------------------------------------------------------------ refusals: first refusal stops, repeat is no_progress, only the gate's acceptance clears
 
-test('T5 the same ship-ready refusal twice with no progress record STOPs; unrelated notes never clear it; only the gate\'s own acceptance does', { skip: WIN_SKIP }, async (t) => {
+test('T5 next never re-names a gate that refused; the same key twice with no progress is no_progress; unrelated notes never clear it; only the gate\'s own acceptance does', { skip: WIN_SKIP }, async (t) => {
   const fx = flagged(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
   const d = drive(fx);
@@ -302,28 +305,29 @@ test('T5 the same ship-ready refusal twice with no progress record STOPs; unrela
   ok(fx.gate('review', passReview('rx-1', c)));
   writeFileSync(fx.flag, '');
   assert.equal(fx.gate('ship-ready', {}).out?.code, 'missing_local_proof');
-  assert.deepEqual(step(next(fx, { last: d.file })), { phase: 'SHIP_READY', action: 'run', cmd: 'gate ship-ready', role: null }, 'one refusal is not a repeat');
+  let n = next(fx, { last: d.file });
+  stopped(n, 'gate_refused', 'SHIP_READY');
+  assert.equal(n.out.stop_class, 'refused');
+  assert.deepEqual(n.out.facts.key, { candidate_id: c, gate: 'ship-ready', code: 'missing_local_proof', subject: 'run' });
+  assert.match(n.out.facts.at[0], /engine\.jsonl:\d+$/, 'the key\'s candidate comes from the engine log row');
   assert.equal(fx.gate('ship-ready', {}).out?.code, 'missing_local_proof');
   assert.ok(fx.readState().events.some(e => e.type === 'LOCAL_PROOF'), 'each refused call noted LOCAL_PROOF between the refusals: it is not progress');
-  let n = next(fx, { last: d.file });
+  n = next(fx, { last: d.file });
   stopped(n, 'no_progress', 'SHIP_READY');
   assert.deepEqual(n.out.facts.key, { candidate_id: c, gate: 'ship-ready', code: 'missing_local_proof', subject: 'run' });
 
-  // unrelated records: a RESUME note and another gate's refusal
-  ok(fx.cli('resume'));
+  ok(fx.cli('resume')); // unrelated records: a RESUME note and another gate's refusal
   assert.equal(fx.gate('review', passReview('rx-2', c)).out?.ok, false);
   stopped(next(fx, { last: d.file }), 'no_progress', 'SHIP_READY');
-  // a third refusal of the same key keeps it stopped
   assert.equal(fx.gate('ship-ready', {}).out?.code, 'missing_local_proof');
   stopped(next(fx, { last: d.file }), 'no_progress', 'SHIP_READY');
 
   rmSync(fx.flag);
   ok(fx.gate('ship-ready', {}));
-  n = next(fx, { last: d.file });
-  stopped(n, 'owner_publish', 'owner_publish');
+  stopped(next(fx, { last: d.file }), 'owner_publish', 'owner_publish');
 });
 
-test('T5 a different candidate is a different key; the same candidate again STOPs (review gate, audit record off: wildcard subject)', { skip: WIN_SKIP }, async (t) => {
+test('T5 a refusal on another candidate is another key (gate_refused, not no_progress); the same candidate again is no_progress', { skip: WIN_SKIP }, async (t) => {
   const fx = flagged(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
   const d = drive(fx);
@@ -334,15 +338,16 @@ test('T5 a different candidate is a different key; the same candidate again STOP
   const c2 = fx.candidate();
   assert.notEqual(c2, c1);
   assert.equal(fx.gate('review', noSecond('rx-1', c2)).out?.code, 'missing_second_opinion');
-  assert.deepEqual(step(next(fx, { last: d.file })), { phase: 'REVIEW', action: 'dispatch', cmd: 'gate review', role: 'reviewer' },
-    'the same code on another candidate is no repeat');
+  let n = next(fx, { last: d.file });
+  stopped(n, 'gate_refused', 'REVIEW');
+  assert.equal(n.out.facts.key.candidate_id, c2);
   assert.equal(fx.gate('review', noSecond('rx-2', c2)).out?.code, 'missing_second_opinion');
-  const n = next(fx, { last: d.file });
+  n = next(fx, { last: d.file });
   stopped(n, 'no_progress', 'REVIEW');
-  assert.equal(n.out.facts.key.subject, '*', 'without the audit record the subject is unavailable: wildcard');
+  assert.equal(n.out.facts.key.subject, '*');
 });
 
-test('T5 with the audit record the review_execution is the subject: another execution is no repeat, the same one is', { skip: WIN_SKIP }, async (t) => {
+test('T5 a caller-chosen review_execution is never the subject, with the audit record on too: another execution on the same candidate is still the same key', { skip: WIN_SKIP }, async (t) => {
   const fx = flagged(t, { audit: true });
   ok(fx.cli('init', { dag: fx.dagFile }));
   const d = drive(fx);
@@ -350,16 +355,78 @@ test('T5 with the audit record the review_execution is the subject: another exec
   const c = fx.candidate();
   assert.equal(fx.gate('review', noSecond('rx-1', c)).out?.code, 'missing_second_opinion');
   assert.equal(fx.gate('review', noSecond('rx-2', c)).out?.code, 'missing_second_opinion');
-  assert.deepEqual(step(next(fx, { last: d.file })), { phase: 'REVIEW', action: 'dispatch', cmd: 'gate review', role: 'reviewer' });
-  assert.equal(fx.gate('review', noSecond('rx-2', c)).out?.code, 'missing_second_opinion');
+  assert.ok(fx.readState().events.some(e => e.type === 'GATE' && e.review_execution === 'rx-2'), 'the audit record carries the execution');
   const n = next(fx, { last: d.file });
   stopped(n, 'no_progress', 'REVIEW');
-  assert.deepEqual(n.out.facts.key, { candidate_id: c, gate: 'review', code: 'missing_second_opinion', subject: 'rx-2' });
+  assert.deepEqual(n.out.facts.key, { candidate_id: c, gate: 'review', code: 'missing_second_opinion', subject: '*' });
+});
+
+// ------------------------------------------------------------------ freshness: a stale --last never advances (Round 1 E1/E1b/E2/E3)
+
+test('T9 a drive output stops settling INIT/BUILD once the plan narrative, the DAG bytes or a node-owned file changed after it: next never dispatches a reviewer or names ship-ready then', { skip: WIN_SKIP }, async (t) => {
+  const fx = happy(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  drive(fx);
+  ok(fx.gate('red', { node: 'r', command: 'unit' }));
+  const d = drive(fx);
+  assert.equal(d.r.out.outcome, 'done');
+  assert.equal(step(next(fx, { last: d.file })).action, 'dispatch', 'control: fresh, the reviewer dispatch is named');
+  const edit = (file, from, to) => { const before = readFileSync(file); writeFileSync(file, before.toString('utf8').replace(from, to)); return () => writeFileSync(file, before); };
+  const cases = [
+    ['E1 plan narrative edited after approval', () => edit(fx.planFile, 'Approved narrative.', 'Edited after approval.'), 'INIT', /changed since: the plan narrative/],
+    ['E2 DAG bytes edited', () => edit(fx.dagFile, '"width": 2', '"width": 1'), 'INIT', /changed since: .*DAG bytes/],
+    ['E3 a node-owned file edited after the drive', () => edit(join(fx.repo, 'src', 'p.txt'), 'p1', 'hand edit'), 'INIT', /changed since: .*fingerprints drifted: p/],
+  ];
+  for (const [name, apply, phase, why] of cases) {
+    const undo = apply();
+    const n = next(fx, { last: d.file });
+    stopped(n, 'acceptance_unknown', phase);
+    assert.match(n.out.reason, why, name);
+    assert.equal(n.out.facts.settle_with.cmd, 'drive', name);
+    assert.equal(view(fx, { last: d.file }).out.last.usable, false, name);
+    undo();
+  }
+  assert.equal(step(next(fx, { last: d.file })).action, 'dispatch', 'restored: fresh again');
+
+  ok(fx.gate('review', passReview('rx-1', fx.candidate())));
+  assert.equal(step(next(fx, { last: d.file })).cmd, 'gate ship-ready');
+  const undo = edit(fx.planFile, 'Approved narrative.', 'Edited after review.'); // E1b
+  stopped(next(fx, { last: d.file }), 'acceptance_unknown', 'INIT');
+  undo();
+});
+
+test('T9 --last hardening: oversize, malformed and inconsistent drive outputs are reported unusable (exit 0, never a crash)', { skip: WIN_SKIP }, async (t) => {
+  const fx = flagged(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const d = drive(fx);
+  const real = JSON.parse(readFileSync(d.file, 'utf8'));
+  const write = (name, value) => { const f = join(fx.root, name); writeFileSync(f, typeof value === 'string' ? value : JSON.stringify(value)); return f; };
+  const bad = {
+    huge: write('huge.json', JSON.stringify({ ...real, pad: 'x'.repeat(300 * 1024) })),
+    judgmentsString: write('j.json', { ...real, judgments: 'none' }),
+    judgmentEntry: write('je.json', { ...real, judgments: [42] }),
+    repairsObject: write('r.json', { ...real, repairs: {} }),
+    nodeNoState: write('n.json', { ...real, nodes: { a: {} } }),
+    nodesNull: write('nn.json', { ...real, nodes: null }),
+    judgmentEntryConsistent: write('jc.json', { ...real, outcome: 'judgment', judgments: [42] }),
+    outcomeOdd: write('o.json', { ...real, outcome: 'finished' }),
+    judgmentNoJudgments: write('jn.json', { ...real, outcome: 'judgment', judgments: [] }),
+    statusKeys: write('s.json', { ...real, base: {} }),
+    otherRun: write('or.json', { ...real, run_id: 'run-2' }),
+    notJson: write('x.json', '{'),
+  };
+  for (const [name, file] of Object.entries(bad)) {
+    const v = view(fx, { last: file });
+    assert.equal(v.status, 0, `${name}: ${v.stderr}`);
+    assert.equal(v.out.last.usable, false, name);
+    stopped(next(fx, { last: file }), 'acceptance_unknown', 'INIT');
+  }
+  assert.equal(view(fx, { last: d.file }).out.last.usable, true, 'control: the real drive output is usable');
 });
 
 // ------------------------------------------------------------------ hard stops on the real engine
 
-test('T6 hard stops: run mismatch, a binding judgment in the drive output, an engine judgment, and a candidate moved after review (RETRY authority)', { skip: WIN_SKIP }, async (t) => {
+test('T6 hard stops: run mismatch, a binding judgment in the drive output, and a candidate moved after review (RETRY authority)', { skip: WIN_SKIP }, async (t) => {
   const fx = flagged(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
   const n0 = next(fx, { runId: 'run-2' });
@@ -378,9 +445,7 @@ test('T6 hard stops: run mismatch, a binding judgment in the drive output, an en
   writeFileSync(fx.planFile, readFileSync(fx.planFile, 'utf8').replace('Approved narrative.', 'Edited after approval.'));
   const unbound = drive(fx);
   assert.equal(unbound.r.out?.outcome, 'judgment');
-  const n1 = next(fx, { last: unbound.file });
-  stopped(n1, 'approval_mismatch', 'INIT');
-  assert.equal(n1.out.stop_class, 'owner');
+  assert.equal(view(fx, { last: unbound.file }).out.last.usable, false, 'the edited plan also fails the freshness check');
 });
 
 test('T6 an open engine judgment (a failed node) STOPs with its code', { skip: WIN_SKIP }, async (t) => {
@@ -393,6 +458,33 @@ test('T6 an open engine judgment (a failed node) STOPs with its code', { skip: W
   assert.ok(n.out.facts.judgments.some(j => j.code === 'node_failed' && j.node === 'a'));
 });
 
+test('T6 an accepted FAIL original with no finding to fix opens no repair: an owner stop, not repair_owed', { skip: WIN_SKIP }, async (t) => {
+  const fx = flagged(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const d = drive(fx);
+  const c = fx.candidate();
+  const { repair_prompt_file: _drop, ...deferred } = failReview('rx-1', c, 'src/a.txt', '/x');
+  const r = fx.gate('review', { ...deferred, reconciliation: { dispositions: [{ finding_id: 'F1', source: 'primary', disposition: 'defer' }] } });
+  assert.equal(r.out?.code, 'review_accepted', r.stdout);
+  assert.deepEqual(fx.readState().repairs, [], 'no repair opened');
+  const n = next(fx, { last: d.file });
+  stopped(n, 'review_fail_no_repair', 'REVIEW');
+  assert.equal(n.out.stop_class, 'owner');
+});
+
+test('T6 a cancelled RED-bearing node owes no RED: next goes on to review instead of naming drive forever', { skip: WIN_SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { unit: TAP_RUNNER } },
+    nodes: [{ id: 'r', writes: ['src/r.txt'], redSpecs: RED_SPECS }, { id: 'a', writes: ['src/a.txt'] }] });
+  mkdirSync(join(fx.repo, 'spec'), { recursive: true });
+  writeFileSync(join(fx.repo, 'spec', 'red.test.mjs'), SPEC);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('mark', { node: 'r', transition: 'pending->cancelled', reason: 'descoped by the owner' }));
+  const d = drive(fx);
+  assert.equal(d.r.out.outcome, 'done');
+  assert.equal(phaseOf(view(fx, { last: d.file }).out, 'RED').state, 'not_applicable');
+  assert.deepEqual(step(next(fx, { last: d.file })), { phase: 'REVIEW', action: 'dispatch', cmd: 'gate review', role: 'reviewer' });
+});
+
 test('T7 usage errors exit 1 and write nothing; view always exits 0', async (t) => {
   const fx = flagged(t);
   const bad = call(fx, 'next', { extra: ['--bogus', 'x'] });
@@ -403,41 +495,128 @@ test('T7 usage errors exit 1 and write nothing; view always exits 0', async (t) 
   assert.equal(view(fx).out.phases.find(p => p.phase === 'INIT').state, 'not_accepted');
 });
 
+// ------------------------------------------------------------------ policy 2 on the real engine (fixture shape of run-engine-security.test.mjs secFx)
+
+const CATALOG = SP.loadCatalog();
+const BOOLS = Object.entries(CATALOG.catalog.fact_vocabulary).filter(([, d]) => d.type === 'bool').map(([k]) => k);
+const SEC_SPEC = 'spec/sec.test.mjs';
+/** A policy-2 run: node api writes one spec per pair (fails until src/impl.txt exists), node impl writes it; node extra owns spec2/ (addenda). */
+function secFx(t) {
+  const sel = SP.selectControls(CATALOG, { security_policy: 2,
+    surfaces: [{ boundary_id: 'orders-api', kind: 'server-input', path: 'src/orders.ts', principals: ['service'] }],
+    facts: Object.fromEntries(BOOLS.map(k => [k, false])), evidence: Object.fromEntries(BOOLS.map(k => [k, 'src/orders.ts:handler'])) });
+  assert.equal(sel.ok, true);
+  const ids = sel.pairs.map(p => p.pair_id);
+  const cov = sel.pairs.map(p => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SEC_SPEC, name: p.pair_id }] }));
+  const spec = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n`
+    + `for (const id of ${JSON.stringify(ids)}) test(id, () => { assert.ok(fs.existsSync('src/impl.txt'), 'not implemented'); });\n`;
+  const fx = fixture(t, { commit: true, narrativeExtra: SP.renderSection3a(sel) + '\n\n',
+    config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SEC_SPEC], format: 'tap' } },
+      securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: cov },
+    nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap(c => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }, { id: 'extra', writes: ['spec2'] }],
+    behaviour: { api: { write: { [SEC_SPEC]: spec } }, impl: { write: { 'src/impl.txt': 'done' } }, extra: { write: { 'spec2/added.test.mjs': '// added\n' } } } });
+  const g = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: fx.repo, encoding: 'utf8' });
+  g('add', '-A'); assert.equal(g('commit', '-q', '-m', 'base').status, 0);
+  fx.review = (rx) => { const c = fx.candidate(); return passReview(rx, c, { primary: primaryReview(c, { rule_rows: [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' },
+    ...cov.map(p => ({ subject_id: `${p.boundary}:${p.control}`, outcome: 'PASS', evidence: SEC_SPEC }))] }) }); };
+  return fx;
+}
+
+test('T10 policy 2: next walks RED, drive, gate reassess, review and ship-ready to owner_publish', { skip: WIN_SKIP }, async (t) => {
+  const fx = secFx(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const d1 = drive(fx);
+  let n = next(fx, { last: d1.file });
+  assert.deepEqual(step(n), { phase: 'RED', action: 'run', cmd: 'gate red', role: null });
+  ok(fx.gate('red', n.out.command.input));
+  const d2 = drive(fx);
+  assert.equal(d2.r.out.outcome, 'done', d2.r.stdout);
+  n = next(fx, { last: d2.file });
+  assert.deepEqual(step(n), { phase: 'REASSESS', action: 'run', cmd: 'gate reassess', role: null });
+  ok(fx.gate('reassess', n.out.command.input));
+  const v = view(fx, { last: d2.file }).out;
+  assert.equal(phaseOf(v, 'REASSESS').state, 'accepted');
+  evidenceHolds(fx, phaseOf(v, 'REASSESS').evidence);
+  n = next(fx, { last: d2.file });
+  assert.deepEqual(step(n), { phase: 'REVIEW', action: 'dispatch', cmd: 'gate review', role: 'reviewer' });
+  ok(fx.gate('review', fx.review('rx-1')));
+  n = next(fx, { last: d2.file });
+  assert.deepEqual(step(n), { phase: 'SHIP_READY', action: 'run', cmd: 'gate ship-ready', role: null });
+  ok(fx.gate('ship-ready', {}));
+  stopped(next(fx, { last: d2.file }), 'owner_publish', 'owner_publish');
+});
+
+test('T10 policy 2: a reassessment of another candidate, or one taken before a trusted addendum, is owed again: next names gate reassess', { skip: WIN_SKIP }, async (t) => {
+  const fx = secFx(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  drive(fx);
+  ok(fx.gate('red', { node: 'api' }));
+  const d = drive(fx);
+  ok(fx.gate('reassess', {}));
+  assert.equal(step(next(fx, { last: d.file })).cmd, 'gate review');
+
+  writeFileSync(join(fx.repo, 'docs', 'note.txt'), 'moved'); // owned by no node: a new candidate, no drift
+  let v = view(fx, { last: d.file }).out;
+  assert.equal(phaseOf(v, 'REASSESS').code, 'reassess_owed');
+  assert.match(phaseOf(v, 'REASSESS').reason, /candidate_id/);
+  assert.equal(step(next(fx, { last: d.file })).cmd, 'gate reassess');
+  rmSync(join(fx.repo, 'docs', 'note.txt'));
+
+  const id = 'orders-api:VAPT-API-01';
+  fx.appendRunState({ run_id: 'run-1', event: 'SECURITY_ADDENDUM', addendum_id: 'add-1', authorized_by: 'owner', reason: 'more controls',
+    pairs: [{ boundary: 'added', control: id.split(':')[1], node: 'extra', specs: [{ file: 'spec2/added.test.mjs', name: 'added:VAPT-API-01' }] }] });
+  ok(fx.cli('resume')); // an engine command observes (trusts) the line
+  v = view(fx).out;
+  assert.equal(phaseOf(v, 'REASSESS').code, 'reassess_owed', JSON.stringify(phaseOf(v, 'REASSESS')));
+  assert.match(phaseOf(v, 'REASSESS').reason, /addendum_set/);
+  const d2 = drive(fx);
+  const n = next(fx, { last: d2.file });
+  assert.ok(n.out.command?.cmd === 'gate reassess' || n.out.code === 'red_runner_ambiguous' || n.out.action === 'stop', n.stdout);
+  assert.notEqual(n.out.action, 'dispatch', 'never a reviewer dispatch on a stale reassessment');
+});
+
 // ------------------------------------------------------------------ pure core: classes a policy-1 fixture cannot reach
 
 const X = 'c'.repeat(64);
 /** A crafted run whose every phase up to REVIEW is settled; `over` edits it. */
-function crafted(over = {}) {
+function crafted(over = () => {}) {
   const S = { schema: 'ship-ticket-engine-state-v1', ticket: 'T-1', run_id: 'run-1', plan_digest: 'sha256:p', config: {}, seq: 0,
     nodes: { a: { phase: 'BUILD', state: 'done', redSpecs: [] } }, attempts: [], events: [], judgments: [], outbox: [], repairs: [],
     review_chain: [], freeze: null, gates: { red: {} }, builders: [{ identity: 'claude:m', node: 'a' }] };
   const statusOut = { schema: 'ship-ticket-engine-status-v1', judgments: [], authority_untrusted: [], budget: null, red_pending: [] };
   const last = { schema: 'ship-ticket-engine-status-v1', ticket: 'T-1', run_id: 'run-1', nodes: { a: { state: 'done' } }, repairs: [], judgments: [], outcome: 'done' };
   const input = { ticket: 'T-1', runId: 'run-1', S, raw: null, statusOut, candidate: { candidate_id: X }, logText: '', last: { file: '/l.json', value: last },
-    files: { state: '/s.json', log: '/l.jsonl' } };
+    freshness: { plan: true, dag: true, drifted: [] }, sec: null, files: { state: '/s.json', log: '/l.jsonl' } };
   over(input);
   return input;
 }
 const pureNext = (over) => nextStep(acceptedView(crafted(over)));
+const refusal = (seq, gate, code, cand = X) => (i) => { i.S.events.push({ seq, type: 'GATE', gate, ok: false, code }); i.S.outbox.push({ event: 'GATE', event_id: `gate-run-1-${seq}`, candidate_id: cand }); };
 
 test('T8 pure core: the crafted baseline names the review dispatch (control for every stop below)', () => {
-  const n = pureNext(() => {});
+  const n = pureNext();
   assert.equal(n.action, 'dispatch');
   assert.equal(n.phase, 'REVIEW');
   assert.deepEqual(PHASES, ['INIT', 'BUILD', 'RED', 'PROVE', 'REASSESS', 'REVIEW', 'SHIP_READY']);
 });
 
-test('T8 pure core: policy 2 reassess is named when absent or stale, and is UNKNOWN (a stop) when only its candidate and plan digest match', () => {
-  const on = (i) => { i.S.config.securityPolicy = 2; };
-  const absent = pureNext(on);
-  assert.equal(absent.phase, 'REASSESS');
-  assert.equal(absent.command.cmd, 'gate reassess');
-  const stale = pureNext((i) => { on(i); i.S.security = { reassessed: { candidate_id: 'd'.repeat(64), plan_digest: 'sha256:p' } }; });
-  assert.equal(stale.command?.cmd, 'gate reassess');
-  const current = pureNext((i) => { on(i); i.S.security = { reassessed: { candidate_id: X, plan_digest: 'sha256:p', catalog_digest: 'sha256:c', addendum_set: [] } }; });
-  assert.equal(current.action, 'stop');
-  assert.equal(current.code, 'acceptance_unknown');
-  assert.equal(current.phase, 'REASSESS');
+test('T8 pure core: REASSESS is accepted only on the whole tuple (candidate, plan, catalog, addenda); an unreadable catalog is an owner stop', () => {
+  const on = (sec) => (i) => { i.S.config.securityPolicy = 2; i.sec = sec; };
+  const SEC = { catalog_digest: 'sha256:c', addendum_set: [] };
+  const rec = (over) => (i) => { i.S.security = { reassessed: { candidate_id: X, plan_digest: 'sha256:p', catalog_digest: 'sha256:c', addendum_set: [], ...over } }; };
+  const both = (...fs) => (i) => fs.forEach(f => f(i));
+  assert.equal(pureNext(on(SEC)).command.cmd, 'gate reassess', 'absent');
+  assert.equal(pureNext(both(on(SEC), rec({}))).action, 'dispatch', 'whole tuple matches');
+  for (const [k, val] of [['candidate_id', 'd'.repeat(64)], ['plan_digest', 'sha256:q'], ['catalog_digest', 'sha256:old'], ['addendum_set', ['add-1']]]) {
+    const n = pureNext(both(on(SEC), rec({ [k]: val })));
+    assert.equal(n.command?.cmd, 'gate reassess', k);
+  }
+  const unread = pureNext(on({ error: 'catalog catalog_missing' }));
+  assert.equal(unread.code, 'catalog_unavailable');
+  assert.equal(unread.stop_class, 'owner');
+  const refused = pureNext(both(on(SEC), refusal(1, 'reassess', 'reassess_unclassified')));
+  assert.equal(refused.code, 'gate_refused');
+  assert.equal(refused.phase, 'REASSESS');
 });
 
 test('T8 pure core: owner-class and unreadable states all STOP', () => {
@@ -461,15 +640,43 @@ test('T8 pure core: owner-class and unreadable states all STOP', () => {
   }
 });
 
-test('T8 pure core: a refusal whose GATE event (candidate identity) is in neither the engine log nor the outbox STOPs conservatively', () => {
-  const refused = (i) => { i.S.events = [{ seq: 1, type: 'GATE', gate: 'review', ok: false, code: 'missing_second_opinion' }]; i.S.seq = 1; };
-  const n = pureNext(refused);
-  assert.equal(n.action, 'stop');
+test('T8 pure core: blockers are ordered owner > judgment > unknown > off_happy_path', () => {
+  const all = (i) => { i.runId = 'run-2'; i.S.attempts = [{ attempt_id: 'x', status: 'running' }]; i.statusOut.unit_reviews_pending = ['u1'];
+    i.statusOut.judgments = [{ code: 'node_failed', node: 'a', reason: 'r' }]; };
+  assert.equal(pureNext(all).code, 'run_mismatch');
+  assert.equal(pureNext((i) => { all(i); i.runId = 'run-1'; i.last.value.run_id = 'run-1'; }).code, 'node_failed');
+  assert.equal(pureNext((i) => { all(i); i.runId = 'run-1'; i.statusOut.judgments = []; }).code, 'attempts_live');
+});
+
+test('T8 pure core: a drive output of another run or ticket, or a stale binding, settles nothing', () => {
+  for (const over of [(i) => { i.last.value.run_id = 'run-2'; }, (i) => { i.last.value.ticket = 'T-2'; }, (i) => { i.freshness = { plan: false, dag: true, drifted: [] }; },
+    (i) => { i.freshness = { plan: true, dag: false, drifted: [] }; }, (i) => { i.freshness = { plan: true, dag: true, drifted: ['a'] }; }, (i) => { i.freshness = undefined; }]) {
+    const n = pureNext(over);
+    assert.equal(n.code, 'acceptance_unknown', String(over));
+    assert.equal(n.phase, 'INIT');
+  }
+});
+
+test('T8 pure core: a RED slot owed by an addendum is unknown with NO settle_with (no drive settles it); a refused RED gate is a stop', () => {
+  const n = pureNext((i) => { i.S.nodes.a.redSpecs = [{ file: 's', name: 'n' }]; i.S.gates.red.a = { seq: 1, baseline_candidate: X }; i.S.gates.red_addendum = { 'add-1/a': {} }; });
+  assert.equal(n.code, 'acceptance_unknown');
+  assert.equal(n.phase, 'RED');
+  assert.equal(n.facts.settle_with, null);
+  const owed = (i) => { i.S.nodes.a.redSpecs = [{ file: 's', name: 'n' }]; i.statusOut.red_pending = ['a']; i.S.config.testCommands = { unit: { cmd: 'x', format: 'tap' } }; };
+  assert.equal(pureNext(owed).command.cmd, 'gate red', 'control: RED owed is named');
+  const r = pureNext((i) => { owed(i); refusal(1, 'red', 'spec_not_failing')(i); });
+  assert.equal(r.code, 'gate_refused');
+  assert.equal(r.phase, 'RED');
+});
+
+test('T8 pure core: the refusal key\'s identity: an unjoinable or null candidate STOPs as identity_unavailable; a known one as gate_refused', () => {
+  const n = pureNext((i) => { i.S.events = [{ seq: 1, type: 'GATE', gate: 'review', ok: false, code: 'missing_second_opinion' }]; });
   assert.equal(n.code, 'identity_unavailable');
-  const known = pureNext((i) => { refused(i); i.S.outbox = [{ event: 'GATE', event_id: 'gate-run-1-1', candidate_id: X }]; });
-  assert.equal(known.action, 'dispatch', 'one refusal with a known candidate is no repeat');
-  const nul = pureNext((i) => { refused(i); i.logText = JSON.stringify({ event: 'GATE', event_id: 'gate-run-1-1', candidate_id: null }) + '\n'; });
-  assert.equal(nul.code, 'identity_unavailable', 'a null candidate on the GATE event is unavailable');
+  const known = pureNext(refusal(1, 'review', 'missing_second_opinion'));
+  assert.equal(known.code, 'gate_refused');
+  assert.deepEqual(known.facts.key, { candidate_id: X, gate: 'review', code: 'missing_second_opinion', subject: '*' });
+  const nul = pureNext((i) => { i.S.events = [{ seq: 1, type: 'GATE', gate: 'review', ok: false, code: 'c' }]; i.logText = JSON.stringify({ event: 'GATE', event_id: 'gate-run-1-1', candidate_id: null }) + '\n'; });
+  assert.equal(nul.code, 'identity_unavailable');
 });
 
 test('T8 pure core: SHIP_READY needs every leg on the current candidate: the latest note, S.ship_ready and S.local_proof', () => {
@@ -482,27 +689,33 @@ test('T8 pure core: SHIP_READY needs every leg on the current candidate: the lat
   };
   assert.equal(pureNext(shipped).code, 'owner_publish', 'control: every leg names X');
   const other = 'e'.repeat(64);
-  for (const [leg, over] of [['ship_ready', (i) => { i.S.ship_ready.candidate_id = other; }], ['local_proof', (i) => { i.S.local_proof.candidate_id = other; }],
-    ['latest note', (i) => { i.S.events.push({ seq: 4, type: 'GATE', gate: 'ship-ready', ok: false, code: 'exclusions_altered' });
-      i.S.outbox = [{ event: 'GATE', event_id: 'gate-run-1-4', candidate_id: X }]; }]]) {
+  for (const [leg, over] of [['ship_ready', (i) => { i.S.ship_ready.candidate_id = other; }], ['local_proof', (i) => { i.S.local_proof.candidate_id = other; }]]) {
     const n = pureNext((i) => { shipped(i); over(i); });
-    assert.equal(n.action, 'run', leg);
-    assert.equal(n.command.cmd, 'gate ship-ready', leg);
+    assert.equal(n.command?.cmd, 'gate ship-ready', leg);
   }
+  const refused = pureNext((i) => { shipped(i); refusal(4, 'ship-ready', 'exclusions_altered')(i); });
+  assert.equal(refused.code, 'gate_refused', 'latest note refused');
 });
 
-test('T8 pure core: progress between two refusals (a DISPATCH) means no repeat; a RESUME or an ok:false of another gate does not', () => {
-  const two = (between) => (i) => {
-    i.S.events = [{ seq: 1, type: 'GATE', gate: 'review', ok: false, code: 'missing_second_opinion' }, ...between,
-      { seq: 3, type: 'GATE', gate: 'review', ok: false, code: 'missing_second_opinion' }];
-    i.S.outbox = [1, 3].map(s => ({ event: 'GATE', event_id: `gate-run-1-${s}`, candidate_id: X }));
+test('T8 pure core: two consecutive refusals are no_progress only with the same key and no progress record between', () => {
+  const two = (between, code2 = 'missing_second_opinion', cand2 = X) => (i) => {
+    refusal(1, 'review', 'missing_second_opinion')(i); i.S.events.push(...between); refusal(3, 'review', code2, cand2)(i);
   };
-  assert.equal(pureNext(two([{ seq: 2, type: 'DISPATCH', node: 'a' }])).action, 'dispatch');
-  assert.equal(pureNext(two([{ seq: 2, type: 'GATE', gate: 'red', ok: true, code: 'red_accepted' }])).action, 'dispatch', 'any gate acceptance is progress');
+  assert.equal(pureNext(two([{ seq: 2, type: 'DISPATCH', node: 'a' }])).code, 'gate_refused', 'a DISPATCH is progress');
+  assert.equal(pureNext(two([{ seq: 2, type: 'GATE', gate: 'red', ok: true, code: 'red_accepted' }])).code, 'gate_refused', 'any gate acceptance is progress');
+  assert.equal(pureNext(two([], 'reviewer_is_builder')).code, 'gate_refused', 'another code is another key');
+  assert.equal(pureNext(two([], 'missing_second_opinion', 'd'.repeat(64))).code, 'gate_refused', 'another candidate is another key');
   assert.equal(pureNext(two([{ seq: 2, type: 'RESUME', outcome: 'reconciled' }])).code, 'no_progress');
   assert.equal(pureNext(two([{ seq: 2, type: 'GATE', gate: 'red', ok: false, code: 'spec_missing' }])).code, 'no_progress');
   assert.equal(pureNext(two([{ seq: 2, type: 'LOCAL_PROOF', passed: false }])).code, 'no_progress');
-  // only the gate's own acceptance code clears a stop: a later ok:true review_terminal note of the same gate does not
-  const terminalAfter = pureNext((i) => { two([])(i); i.S.events.push({ seq: 4, type: 'GATE', gate: 'review', ok: true, code: 'review_terminal' }); });
-  assert.equal(terminalAfter.code, 'no_progress');
+  // only the gate's own acceptance code clears: a later ok:true review_terminal note of the same gate does not
+  assert.equal(pureNext((i) => { two([])(i); i.S.events.push({ seq: 4, type: 'GATE', gate: 'review', ok: true, code: 'review_terminal' }); }).code, 'no_progress');
+  assert.equal(pureNext((i) => { two([])(i); i.S.events.push({ seq: 4, type: 'GATE', gate: 'review', ok: true, code: 'review_accepted' }); }).action, 'dispatch', 'the gate\'s own acceptance clears');
+});
+
+test('T8 pure core: a binding judgment in a fresh drive output is an owner stop at INIT', () => {
+  const n = pureNext((i) => { i.last.value.outcome = 'judgment'; i.last.value.judgments = [{ code: 'approval_mismatch', node: null }]; });
+  assert.equal(n.code, 'approval_mismatch');
+  assert.equal(n.phase, 'INIT');
+  assert.equal(n.stop_class, 'owner');
 });
