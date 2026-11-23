@@ -1,7 +1,7 @@
 // S-02a0b: the hardened-git execution core. Env composition, typed outcomes, safe serialisation and
 // strict decoding. Design: .claude/factory-assessment/consolidation-2026-11/S-02-design.md §2.2 and §3.
 // Internal to lib/: S-02a0c builds contexts, handles and the closed OPS table on top of it; only
-// `scrubAmbient` is for callers outside lib/. Node 18 compatible, synchronous, no dependency.
+// `scrubAmbient` is for callers outside lib/. Node >= 22, synchronous, no dependency.
 //
 // `neutralisationPairs` is adapted from DeepSeek Harness 39163dd
 // packages/experimental/worktree/src/index.ts:405-428 (`filterOverrides`), and the env recipe from

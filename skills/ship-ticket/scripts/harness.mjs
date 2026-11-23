@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Portable, advisory execution harness. Node >=18, no dependencies.
+ * Portable, advisory execution harness. Node >= 22, no dependencies.
  * Never executes model calls, starts containers, or deletes resources.
  * PLAN is intentionally excluded from model routing and scheduling.
  */
 import { readFileSync, realpathSync } from 'node:fs';
-import { cpus, freemem, totalmem } from 'node:os';
+import { cpus, freemem, totalmem, loadavg as loadavgOs } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -318,6 +318,228 @@ export function resourceSnapshot() {
     available_memory_bytes: availableMemoryBytes(), total_memory_bytes: totalmem(),
     auto_memory_budget_mb: autoMemoryBudgetMb(), process_rss_bytes: process.memoryUsage().rss,
     note: 'Host-wide memory is not a container limit; verify actual capacity before dispatch.' };
+}
+
+// ---------------------------------------------------------------------------------------------
+// FR-2b host admission. admitHost is PURE and FAIL-SAFE: it decides from an injected snapshot and
+// an injected history, performs no I/O and never terminates running work. Anything unknown,
+// invalid or malformed HOLDS. hostSnapshot() is the only reader.
+// Thresholds are the recorded TEMPORARY operating policy (STAB-followups-register FR-2).
+// ---------------------------------------------------------------------------------------------
+export const HOST_POLICY = Object.freeze({
+  pressure_levels: Object.freeze([1, 2, 4]), // documented kern.memorystatus_vm_pressure_level values
+  pressure_hold_level: 2,        // any sample in the window >= 2 holds
+  load_num: 3,                   // any of load1/5/15 >= 60% of cores (= 3/5, compared as 5*load >= 3*cores, no float fraction) holds
+  load_den: 5,
+  sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
+  sample_gap_max_ms: 30000,      // a larger gap is stale (held_resample)
+  max_snapshot_age_ms: 30000,    // snapshot.now_ms - latest.t_ms must be 0..30 s (freshness bound)
+  swap_growth_tolerance_kb100: 204800, // 2 MB = 2*1024 KB = 204800 hundredths-of-KB; swap USED growth STRICTLY above this (exact integers) holds (held_swap); flat/falling is fine
+  open_stale_ms: 180000,         // an 'open' history whose last counted sample is older than 3 min is a COLD START (held, two clean samples)
+  max_samples: 16,
+  max_cores: 4096,
+  clean_samples_to_resume: 2,    // hysteresis: two clean samples with distinct, strictly increasing t_ms
+  heavy_slots_healthy: 2,
+  heavy_slots_default: 1,
+});
+export const HOST_SNAPSHOT_SCHEMA = 'ship-ticket-host-snapshot-v2';
+export const HOST_HOLD_REASONS = Object.freeze(['held_pressure', 'held_swap', 'held_load', 'held_provider', 'held_heavy', 'held_hysteresis', 'held_resample', 'snapshot_unavailable', 'invalid_args']);
+const PROVIDER_KINDS = ['429', 'quota', 'timeout'];
+const HISTORY_KEYS = ['state', 'clean_streak', 'last_admit_t_ms', 'last_sample_t_ms'];
+const isInt = (n) => Number.isSafeInteger(n) && n >= 0;
+const isPlain = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+const HELD_HISTORY = Object.freeze({ state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null });
+
+function providerCount(pe) {
+  if (isInt(pe)) return pe;
+  if (Array.isArray(pe) && pe.every(e => isPlain(e) && PROVIDER_KINDS.includes(e.kind) && Number.isFinite(e.t_ms))) return pe.length;
+  return null;
+}
+// Provider stop signal from the VALID part of the field only (a quota row beside a malformed row still counts).
+function partialProviders(pe) {
+  if (isInt(pe)) return pe;
+  return Array.isArray(pe) ? pe.filter(e => isPlain(e) && PROVIDER_KINDS.includes(e.kind) && Number.isFinite(e.t_ms)).length : 0;
+}
+function knownStops(samples, pe) {
+  const stop = [];
+  if (samples.some(x => isPlain(x) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && x.pressure_level >= HOST_POLICY.pressure_hold_level)) stop.push('held_pressure');
+  if (partialProviders(pe) > 0) stop.push('held_provider');
+  return stop;
+}
+function validHistory(h) {
+  // Missing history is a conservative COLD START: held, so admission needs two clean samples.
+  if (h === undefined || h === null) return { ...HELD_HISTORY };
+  if (!isPlain(h) || Object.keys(h).some(k => !HISTORY_KEYS.includes(k))) return null;
+  // Machine-issued history: nothing is defaulted (a missing key is undefined and fails the exact checks below).
+  const x = { state: h.state, clean_streak: h.clean_streak, last_admit_t_ms: h.last_admit_t_ms, last_sample_t_ms: h.last_sample_t_ms };
+  if (x.state !== 'open' && x.state !== 'held') return null;
+  if (!isInt(x.clean_streak) || (x.state === 'held' && x.clean_streak >= HOST_POLICY.clean_samples_to_resume)) return null;
+  for (const k of ['last_admit_t_ms', 'last_sample_t_ms']) if (x[k] !== null && !isInt(x[k])) return null;
+  // Consistency with how the history can have been issued: a streak or an open state exists only after a counted sample,
+  // and an admit can only be at or before the last counted sample.
+  if ((x.clean_streak >= 1 || x.state === 'open') && x.last_sample_t_ms === null) return null;
+  if (x.state === 'open' && x.clean_streak < 1) return null;
+  if (x.last_admit_t_ms !== null && (x.last_sample_t_ms === null || x.last_admit_t_ms > x.last_sample_t_ms)) return null;
+  return x;
+}
+const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'provider_errors'];
+const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swap_used_kb100', 'load1', 'load5', 'load15'];
+// Unknown properties are rejected (stricter): an unrecognised field could be a signal this version does not understand.
+const onlyKeys = (o, keys) => Object.keys(o).every(k => keys.includes(k));
+function validSample(x) {
+  return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swap_used_kb100)
+    && ['load1', 'load5', 'load15'].every(k => typeof x[k] === 'number' && Number.isFinite(x[k]) && x[k] >= 0);
+}
+
+/**
+ * admitHost(snapshot, cls, running, history)  -- the approved positional contract.
+ *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swap_used_kb100, load1, load5, load15}] (oldest first),
+ *               provider_errors (count or [{kind,t_ms}]) }   (no process counting: unknown properties such as heavy_processes are rejected)
+ *   cls: 'HEAVY'|'LIGHT'   running: {total, heavy} nonneg safe ints, heavy <= total
+ *   history: undefined | {state:'open'|'held', clean_streak, last_admit_t_ms, last_sample_t_ms} as returned last time
+ * Returns { admit, reason, reasons, signals, history, terminate: [] }. A wrong-shaped call HOLDS with `invalid_args`.
+ * Swap signal: swap USED growth (MB) from the single-record `sysctl -n vm.swapusage`; see POLICY NOTE in the code below.
+ * There is NO fallback admit: any invalid snapshot field, history or argument holds. Non-darwin holds unless a valid snapshot is injected
+ * (E0/CI inject one). Missing history = cold start (held; two clean samples needed). A sample counts only if >= 15 s after
+ * history.last_sample_t_ms; closer or older samples are held_resample with history unchanged.
+ */
+export function admitHost(snapshot, cls, running, history) {
+  const result = (admit, reasons, signals, h) => ({ admit, reason: admit ? 'admitted' : reasons[0], reasons, signals, history: h, terminate: [] });
+  const hist = validHistory(history);
+  const run = running;
+  if ((cls !== 'HEAVY' && cls !== 'LIGHT') || !isPlain(run) || !isInt(run.total) || !isInt(run.heavy) || run.heavy > run.total
+    || hist === null || !isPlain(snapshot)) return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
+  const samples = Array.isArray(snapshot.samples) ? snapshot.samples : [];
+  const providers = providerCount(snapshot.provider_errors);
+  const cores = snapshot.cores;
+  const recovering = { ...hist, state: 'held', clean_streak: 0 };
+  // Unusable timestamps are a hard hold: samples cannot be ordered or aged.
+  if (samples.some(x => !isPlain(x) || !isInt(x.t_ms)) || (samples.length > 0 && !isInt(snapshot.now_ms)))
+    return result(false, [...knownStops(samples.filter(isPlain), snapshot.provider_errors), 'held_resample'], { available: false, timestamps_ok: false }, recovering);
+  // ONE admit path. Any invalid field holds the whole call; valid stop signals still get their specific reason first.
+  const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && snapshot.schema === HOST_SNAPSHOT_SCHEMA && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
+    && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
+  if (!fieldsOk) {
+    const stop = knownStops(samples, snapshot.provider_errors);
+    return result(false, [...stop, 'snapshot_unavailable'], { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 }, recovering);
+  }
+  const latest = samples[samples.length - 1];
+  // History timestamps must not be in the future relative to the snapshot clock.
+  if ((hist.last_sample_t_ms !== null && hist.last_sample_t_ms > snapshot.now_ms) || (hist.last_admit_t_ms !== null && hist.last_admit_t_ms > snapshot.now_ms))
+    return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
+  const holds = [];
+  if (samples.some(x => x.pressure_level >= HOST_POLICY.pressure_hold_level)) holds.push('held_pressure');
+  let swap = 'flat';
+  if (samples.length < 2) swap = 'unknown';
+  else {
+    // Swap USED growth (MB) above the tolerance between ANY earlier and later sample of the window. Falling or flat is fine; high
+    // absolute swap alone never blocks (recorded policy). POLICY NOTE: the recorded policy says 'no swapout growth'; swap-used growth
+    // is the same intent from a single-record numeric source (vm.swapusage) instead of multi-line vm_stat text.
+    let min = samples[0].swap_used_kb100;
+    for (const x of samples.slice(1)) { if (x.swap_used_kb100 - min > HOST_POLICY.swap_growth_tolerance_kb100) swap = 'growing'; min = Math.min(min, x.swap_used_kb100); }   // exact safe integers
+  }
+  if (swap !== 'flat') holds.push('held_swap');
+  // Exact: load >= (3/5)*cores  <=>  5*load >= 3*cores. Kernel loadavg is fixed-point (multiples of 1/2048), so 5*load is exact.
+  const loadLimit = cores * HOST_POLICY.load_num / HOST_POLICY.load_den;   // display only
+  // The WHOLE window counts: an earlier high reading is not forgotten because the latest one dipped under the limit.
+  const loadHigh = samples.some(x => ['load1', 'load5', 'load15'].some(k => x[k] * HOST_POLICY.load_den >= cores * HOST_POLICY.load_num));
+  if (loadHigh) holds.push('held_load');
+  if (providers > 0) holds.push('held_provider');
+  // A sample counts only if it is >= 15 s after the last counted one; replays and near-duplicates are ONE sample.
+  // But a real stop signal in such a snapshot is never hidden: it resets the clean streak (stop signals are evaluated first).
+  const sinceLast = hist.last_sample_t_ms === null ? null : latest.t_ms - hist.last_sample_t_ms;
+  if (sinceLast !== null && sinceLast < HOST_POLICY.sample_gap_min_ms) {
+    const stops = holds.filter(h => !(h === 'held_swap' && swap === 'unknown'));
+    if (stops.length > 0) return result(false, [...stops, 'held_resample'], { available: true, replay: true }, { ...hist, state: 'held', clean_streak: 0 });
+    return result(false, ['held_resample'], { available: true, replay: true }, hist);
+  }
+  const gapsOk = samples.every((x, i) => i === 0 || (x.t_ms - samples[i - 1].t_ms >= HOST_POLICY.sample_gap_min_ms && x.t_ms - samples[i - 1].t_ms <= HOST_POLICY.sample_gap_max_ms));
+  const age = snapshot.now_ms - latest.t_ms;
+  const fresh = age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
+  if (!fresh || (samples.length > 1 && !gapsOk)) return result(false, [...holds.filter(h => h !== 'held_swap'), 'held_resample'], { available: true, fresh, gaps_ok: gapsOk }, recovering);
+  // RECOVERY: while 'held', more than 30 s since the last counted sample means the clean samples are not consecutive: restart.
+  // An 'open' history is trusted across gaps up to open_stale_ms (3 min; the snapshot is itself a fresh validated window and
+  // every stop signal resets the streak); older than that it is an unobserved gap and counts as a COLD START (held, two clean
+  // samples). Caller contract for a RECOVERING host: re-sample within 30 s after a held_hysteresis.
+  const gap = sinceLast;
+  const restart = gap !== null && ((hist.state === 'held' && gap > HOST_POLICY.sample_gap_max_ms) || (hist.state === 'open' && gap > HOST_POLICY.open_stale_ms));
+  const base = restart ? { ...hist, state: 'held', clean_streak: 0 } : hist;
+  const clean = holds.length === 0;
+  const clean_streak = clean ? base.clean_streak + 1 : 0;
+  const resumed = base.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
+  const healthy = clean && resumed;
+  const heavy_slots = healthy ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
+  const reasons = [...holds];
+  if (clean && !resumed) reasons.push('held_hysteresis');
+  // HEAVY occupancy comes only from the caller's `running.heavy` (wave journal); real suites are serialized at execution time by heavy.sh.
+  if (cls === 'HEAVY' && run.heavy >= heavy_slots) reasons.push('held_heavy');
+  const admit = reasons.length === 0;
+  return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
+    clean, clean_streak, healthy, heavy_slots, heavy_running: run.heavy },
+  { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
+}
+
+/**
+ * Kernel-output parsers: ONE whole-output anchored grammar each. No splitting, no filtering, no line selection: the regex must
+ * consume the ENTIRE output string (including one optional trailing newline), so a second line, a trailing record, an embedded
+ * CR/NUL or any extra byte makes it null (= snapshot_unavailable).
+ * AUDIT (everything hostSnapshot/admitHost reads from outside):
+ *   1. sysctl -n kern.memorystatus_vm_pressure_level  -> parsePressure, grammar /^[124]\n?$/
+ *   2. sysctl -n vm.swapusage                        -> parseSwapUsedKb100, grammar below (one record)
+ *   3. os.loadavg()                                  -> array of exactly 3, finite >= 0 (range-checked in admitHost)
+ *   4. injected now()/cpus()/providerErrors/platform -> range/type validated in admitHost
+ *   5. caller-supplied snapshot, cls, running, history -> validated in admitHost
+ *   No other external text is read or parsed (vm_stat and ps are NOT used by the host path).
+ */
+export function parsePressure(out) {
+  if (typeof out !== 'string') return null;   // the grammar itself is length-bounded (max 2 chars)
+  const m = /^([124])\n?$/.exec(out);
+  return m ? Number(m[1]) : null;
+}
+const SWAP_NUM = '(0|[1-9]\\d{0,8})\\.(\\d{2})';
+const SWAP_RE = new RegExp('^total = ' + SWAP_NUM + '([KMG])  used = ' + SWAP_NUM + '([KMG])  free = ' + SWAP_NUM + '([KMG])(  \\(encrypted\\))?\\n?$');
+const UNIT_KB100 = { K: 1n, M: 1024n, G: 1048576n };   // hundredths-of-KB per hundredth of the unit (1 MB = 1024 KB, 1 GB = 1024 MB)
+/**
+ * Accepts exactly `total = N.NNu  used = N.NNu  free = N.NNu` with optional `  (encrypted)`, u in K|M|G, up to 9 integer digits.
+ * EXACT arithmetic, no float and no tolerance: each N.NN is the integer count of hundredths (BigInt), converted to a common exact
+ * integer unit (hundredths of KB). Requires total === used + free EXACTLY (which implies used <= total) (live macOS output satisfies this
+ * exactly; any rounding mismatch is rejected = fail-closed). Returns used in hundredths of KB as a safe integer, or null.
+ */
+export function parseSwapUsedKb100(out) {
+  if (typeof out !== 'string') return null;   // the grammar itself is length-bounded (< 120 chars)
+  const m = SWAP_RE.exec(out);
+  if (!m) return null;
+  const v = (i, u) => (BigInt(m[i]) * 100n + BigInt(m[i + 1])) * UNIT_KB100[m[u]];
+  const total = v(1, 3), used = v(4, 6), free = v(7, 9);
+  // used <= total is implied by the exact sum (free >= 0), so it needs no separate (tolerance-prone) comparison.
+  if (total !== used + free || total > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(used);
+}
+const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl' });
+/**
+ * The only I/O reader for admitHost. Every source is injectable. Takes `samples` readings `intervalMs`
+ * apart (default 2 x 20 s, inside the accepted 15..30 s window). Strict parsing: garbled output yields
+ * null fields, which admitHost treats as snapshot_unavailable.
+ */
+export async function hostSnapshot(probe = {}) {
+  const platform = probe.platform ?? process.platform;
+  const cores = (probe.cpus ?? cpus)().length;
+  const now = probe.now ?? Date.now;
+  const sleep = probe.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
+  const count = probe.samples ?? 2;
+  const intervalMs = probe.intervalMs ?? 20000;
+  const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }); return r.status === 0 ? r.stdout : null; });
+  const loadavg = probe.loadavg ?? loadavgOs;
+  const base = { schema: HOST_SNAPSHOT_SCHEMA, platform, cores, now_ms: null, samples: [], provider_errors: probe.providerErrors ?? [] };
+  if (platform !== 'darwin') return base;
+  for (let i = 0; i < count; i++) {
+    if (i > 0) await sleep(intervalMs);
+    const la = loadavg();
+    const [l1, l5, l15] = Array.isArray(la) && la.length === 3 ? la : [null, null, null];
+    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swap_used_kb100: parseSwapUsedKb100(run(BIN.sysctl, ['-n', 'vm.swapusage'])), load1: l1, load5: l5, load15: l15 });
+  }
+  base.now_ms = now();
+  return base;
 }
 
 function main(argv) {

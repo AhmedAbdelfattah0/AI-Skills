@@ -1,6 +1,6 @@
 // S-02a0a: resolve the git binary to an absolute path, parse its version, and enforce the floors.
 // Design: .claude/factory-assessment/consolidation-2026-11/S-02-design.md §2.1. Custom code; nothing
-// is copied from upstream here. Node 18 compatible, synchronous, no dependency.
+// is copied from upstream here. Node >= 22, synchronous, no dependency.
 // Fails closed by design: a cwd of `/` (or any cwd above every PATH dir) bans every candidate and
 // yields git_unavailable. The fourth T6 row (grafts refused) needs a handle and lands with S-02a0c.
 import { spawnSync } from 'node:child_process';

@@ -21,7 +21,7 @@
  *                                                     PLAN carrier probe: dispatch, fresh_result, resume, cancellation, coverage
  * Output is deterministic for build and plan-digest: no randomness, no absolute path (start-check reads the clock only for the
  * approved_at skew test). The last line is
- * `brief-digest sha256:<hex>`, the digest of everything above it after CRLF became LF. Dependency-free Node >= 18; its repository imports are the read-only
+ * `brief-digest sha256:<hex>`, the digest of everything above it after CRLF became LF. Dependency-free Node >= 22; its repository imports are the read-only
  * RISK_EVIDENCE table of harness.mjs, the T0 declaration validator of fast-checks.mjs, the test-kind table of test-kinds.mjs and
  * the RUN-STATE parser of run-state.mjs.
  *

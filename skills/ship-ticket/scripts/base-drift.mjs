@@ -3,7 +3,7 @@
  * Base drift check (AIS-BENCH-1 Wave 2b). Lists the files changed between the base a plan was
  * written against and the tip of a target ref, and reports those that overlap the approved DAG's
  * node `writes`/`reads` (or an optional contract path list). Read-only git via execFile, no shell.
- * Dependency-free Node >= 18; no clock.
+ * Dependency-free Node >= 22; no clock.
  *
  * CLI: base-drift.mjs check --repo <path> --base <sha-or-ref> --target <ref> --dag <dag.json> [--contract-paths <file>]
  * A path entry matches a changed file when equal or when the file is under it as a directory. Renames

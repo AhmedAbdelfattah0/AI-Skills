@@ -3,7 +3,7 @@
  * Ship-ready cross-check (AIS-BENCH-1 Wave 2b). Every SHIP_READY event in a plan's RUN-STATE block
  * must be backed by a `GATE ship-ready ok` event with the same run id and candidate id in the engine log. The
  * engine writes the pair; a hand-written SHIP_READY has no engine line and fails. Read-only; an
- * orchestrator tool that no engine module calls. Dependency-free Node >= 18; no clock.
+ * orchestrator tool that no engine module calls. Dependency-free Node >= 22; no clock.
  *
  * CLI: ship-ready-check.mjs check --run-state <plan.md> --engine-log <file>... [--run-id <ID>] [--require-event]
  * Matching is on the pair (run_id, candidate_id); a SHIP_READY without run_id is unmatched. --run-id checks
