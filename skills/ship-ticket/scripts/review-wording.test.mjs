@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gateReview } from './gate.mjs';
+import { DEBATE_OUTCOMES } from './brief.mjs';
 
 // Windows runners check markdown out as CRLF; the multi-line assertions below match LF text.
 const load = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
@@ -239,6 +240,8 @@ const S4_SUPERSEDED = [
   /configured_budget/i, /max_rounds/i, /max_minutes/i, /recorded only for a configured budget/i, /configured budget lives in this line/i,
   /consumption is derived from the retained evidence/i, /configured budget is reported as/i, /reaching a configured budget/i,
   /LIMIT_REACHED` is reported truthfully/i, /UNRESOLVED` or `LIMIT_REACHED` plan/i,
+  // attempt C Round 1 repair (MINOR-4): the orphaned cap annotation and the lower-case limit_reached metric value
+  /null = no cap/i, /debate_outcome=[a-z_|]*limit_reached/,
 ];
 test('S4: no superseded debate scope, cap or default-skip instruction survives in SKILL.md, AGENTS.md or any reference', () => {
   const files = S4_FILES();
@@ -251,7 +254,7 @@ test('S4: no superseded debate scope, cap or default-skip instruction survives i
   assert.deepEqual(hits, []);
 });
 test('S4: the superseded-phrase scan bites on wrapped and capitalised text (positive control)', () => {
-  for (const sample of ['with at most three\ncounterpart calls and 20 minutes\ntotal', '<Security-sensitive work only; otherwise', 'max_calls: 3']) {
+  for (const sample of ['with at most three\ncounterpart calls and 20 minutes\ntotal', '<Security-sensitive work only; otherwise', 'max_calls: 3', 'rounds, calls, minutes}   null = no cap', '`debate_outcome=converged|unresolved|limit_reached|skipped`']) {
     const flat = sample.replace(/\s+/g, ' ');
     assert.ok(S4_SUPERSEDED.some((re) => re.test(flat)), sample);
   }
@@ -281,6 +284,14 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(x.includes('`CONVERGED` requires the counterpart\'s confirmation of the exact final plan digest'));
   assert.ok(x.includes('`LIMIT_REACHED` is reserved and unsupported until an authenticated telemetry source exists (follow-up F-105-1): `debate-check` refuses it as `debate_limit_unsupported`, and a debate that stopped for any reason is `UNRESOLVED`.'));
   assert.ok(x.includes('passes one structural bounds gate before any processing'));
+  // attempt C Round 1 repair: the metric vocabulary IS the outcome vocabulary; the evidence caps, the reserved id and the residual
+  const metric = /`debate_outcome=([a-z_|]+)`/.exec(obs);
+  assert.ok(metric, 'observability.md names the debate_outcome metric values');
+  assert.deepEqual(metric[1].split('|'), DEBATE_OUTCOMES.map((o) => o.toLowerCase()), 'debate_outcome values are exactly the supported outcomes');
+  assert.ok(!/plan_debate: \{[^\n]*\}[^\n]*\bcap\b/.test(f['references/plan.md']), 'the plan_debate header line carries no cap annotation');
+  assert.ok(x.includes('A round references at most the four evidence files `brief`, `result`, `events` and `message`; each is at most 16 MiB and a debate bundle at most 64 MiB in total, checked from the file sizes before any read'));
+  assert.ok(x.includes('`LIMIT` is a reserved id: a counterpart finding named `LIMIT` is refused (`debate_response_invalid`), so one owner row never settles both a finding and the incomplete review.'));
+  assert.ok(x.includes('Host-trust residual (F-105-1): the host chooses which attempts it records, so a dropped failed attempt, or a failed attempt recorded before a completed one, is not detected'));
   assert.ok(x.includes('`incomplete_review` is derived from the retained results'));
   assert.ok(x.includes('A dispatch failure that left no `result.json` at all has no valid outcome except `SKIPPED` with the owner exception'));
   assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));

@@ -566,7 +566,7 @@ Useful end metrics are:
   `repair_batches=0|1`, `confirmation_count=0|1`;
 - PLAN phase (or `native_plan_mode` end): `host_agent=claude|codex|other|unknown`,
   `counterpart_agent=claude|codex|fable|other|unavailable`, and the debate replay
-  `debate_outcome=converged|unresolved|limit_reached|skipped`, `debate_carrier=<agent>`,
+  `debate_outcome=converged|unresolved|skipped`, `debate_carrier=<agent>`,
   `debate_carrier_degraded=true|false`, `debate_rounds=<n>`, `debate_calls=<n>`
   (includes failed attempts), `debate_minutes=<n>`, `plan_debate_started_at=<iso>`,
   `plan_debate_ended_at=<iso>` (historical values, logged at the current time);

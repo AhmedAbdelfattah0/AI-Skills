@@ -131,7 +131,7 @@ The YAML header above this body carries (plain text in this template; a debate_p
      host_agent: claude|codex|other|unknown
      counterpart_agent: codex|claude|fable|other|unavailable
      debate_policy: 2                    every new implementation plan (START refuses a new plan without it)
-     plan_debate: {outcome: CONVERGED|UNRESOLVED|SKIPPED (LIMIT_REACHED is reserved and refused; SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}, rounds, calls, minutes}   null = no cap
+     plan_debate: {outcome: CONVERGED|UNRESOLVED|SKIPPED (LIMIT_REACHED is reserved and refused; SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}, rounds, calls, minutes}
      codex_route: {dispatch, fresh_result, resume, cancellation, coverage}   PLAN carrier probe: each pass|fail with class permission_denied|auth|provider|relay
      worker_width: <available concurrent workers>
      parallelism_degradations: []

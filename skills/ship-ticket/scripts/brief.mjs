@@ -31,7 +31,7 @@
  */
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, lstatSync, statSync, realpathSync, copyFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, constants as fsConstants } from 'node:fs';
+import { readFileSync, writeFileSync, lstatSync, statSync, realpathSync, copyFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RISK_EVIDENCE, isEntrypoint } from './harness.mjs';
@@ -191,7 +191,12 @@ const BRIEF_LINE = /^(request_id|plan_version|plan_digest): (\S+)$/;
 const sha256Of = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-const placeholder = (v) => !nonEmpty(v) || /^(none|tbd|todo|pending|n\/a|-)$/i.test(v.trim()) || /<[^>]*>/.test(v);
+/**
+ * Whether `v` holds `<...>` markup: a `<` with a `>` anywhere after it. Exactly what /<[^>]*>/ matched (the first `>` after
+ * a `<` ends a match), in linear time: two indexOf scans, no backtracking quantifier over untrusted text (MAJOR-1a).
+ */
+const angleMarkup = (v) => { const lt = v.indexOf('<'); return lt >= 0 && v.indexOf('>', lt + 1) > lt; };
+const placeholder = (v) => !nonEmpty(v) || /^(none|tbd|todo|pending|n\/a|-)$/i.test(v.trim()) || angleMarkup(v);
 
 /** The structural bounds of every untrusted JSON value the debate checks read. */
 export const JSON_BOUNDS = Object.freeze({ depth: 64, nodes: 100000, array: 1024, string: 1000000 });
@@ -276,10 +281,24 @@ export function readAttestation(planText) {
   return { ok: true, line, sha256: sha256Of(Buffer.from(line, 'utf8')), attestation: att };
 }
 
-/** The `debate_policy:` header value of the narrative: { value, count }. */
-function debatePolicy(narr) {
-  const found = [...normalise(narr).matchAll(/^\s*debate_policy:\s*(\S*)\s*$/gm)].map((m) => m[1]);
-  return { value: found.length === 1 ? found[0] : null, count: found.length };
+/**
+ * The `debate_policy:` header of the narrative: { value, count }. Linear (MAJOR-1c): one pass over the lines (LF after
+ * CRLF/CR normalisation, U+2028 and U+2029, the line ends the old multiline regex used), no regex over the text. `count` is
+ * every line that starts, after whitespace, with `debate_policy:`; `value` is its single token when exactly one such line
+ * exists and the rest of it is one token. Compared with the old /^\s*debate_policy:\s*(\S*)\s*$/gm reader, it can only
+ * refuse more, never newly route a plan to legacy (count 0) or newly accept one: a value on the NEXT line, or a second
+ * token on the line, no longer reads as a header value (pinned by a differential in brief-debate.test.mjs).
+ */
+export function debatePolicy(narr) {
+  let count = 0, value = null;
+  for (const line of normalise(narr).split(/[\n\u2028\u2029]/)) {
+    const s = line.trimStart();
+    if (!s.startsWith('debate_policy:')) continue;
+    count += 1;
+    const rest = s.slice('debate_policy:'.length).trim();
+    value = /\s/.test(rest) ? null : rest;
+  }
+  return { value: count === 1 ? value : null, count };
 }
 
 // ---- the frozen dispositions line (approved amendment 2026-11-23, B1 closed structurally) -----------------------------
@@ -346,9 +365,9 @@ function readDispositions(narr) {
 function hiddenMarkup(narr) {
   const lines = normalise(narr.replace(RUN_STATE_BEGIN, '').replace(RUN_STATE_END, '')).split('\n');
   for (let n = 0; n < lines.length; n += 1) {
-    for (let at = lines[n].indexOf('<!--'); at >= 0; at = lines[n].indexOf('<!--', at + 4)) {
-      if (lines[n].indexOf('-->', at + 4) < 0) return `narrative line ${n + 1} opens an HTML comment that does not close on the same line: only single-line comments are allowed in a debate_policy 2 narrative`;
-    }
+    // Linear (MAJOR-1c): every `<!--` has a later `-->` (at least 4 characters on) exactly when the LAST one does.
+    const open = lines[n].lastIndexOf('<!--');
+    if (open >= 0 && lines[n].lastIndexOf('-->') < open + 4) return `narrative line ${n + 1} opens an HTML comment that does not close on the same line: only single-line comments are allowed in a debate_policy 2 narrative`;
   }
   return null;
 }
@@ -365,6 +384,8 @@ const RESPONSE_KEYS = ['v', 'request_id', 'plan_version', 'plan_digest', 'verdic
 const FINDING_KEYS = ['id', 'status', 'severity', 'note'];
 const RESPONSE_STATUS = ['conceded', 'confirmed', 'maintained', 'new'];
 const FINDING_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** The disposition id of an incomplete review (MINOR-2): reserved, never a counterpart finding id, so one row settles one obligation. */
+const LIMIT_ID = 'LIMIT';
 const PLAN_VERSION = /^v[0-9]{1,4}$/;
 
 /**
@@ -382,6 +403,7 @@ export function parseResponse(text, expect = null) {
   if (Buffer.byteLength(text, 'utf8') > RESPONSE_MAX_BYTES) return bad(`the response is larger than ${RESPONSE_MAX_BYTES} bytes`);
   let o;
   try { o = JSON.parse(text); } catch { return bad('the response is not exactly one JSON object (text, a fence or a BOM around it, or invalid JSON)'); }
+  // Kept although the 16 KiB cap already bounds the work: the ONE gate runs at every untrusted JSON entry (D-A11).
   const bounds = jsonBoundsProblem(o);
   if (bounds) return bad(`the response JSON is out of bounds: ${bounds}`);
   if (!isObject(o)) return bad('the response is not a JSON object');
@@ -395,6 +417,7 @@ export function parseResponse(text, expect = null) {
   for (const f of o.findings) {
     if (!isObject(f)) return bad('a finding is not an object');
     if (typeof f.id !== 'string' || !FINDING_ID.test(f.id)) return bad('a finding id must be a safe identifier');
+    if (f.id === LIMIT_ID) return bad(`finding id ${LIMIT_ID} is reserved for the owner's disposition of an incomplete review`);
     if (ids.has(f.id)) return bad(`finding ${f.id} appears twice`);
     ids.add(f.id);
     if (!RESPONSE_STATUS.includes(f.status)) return bad(`finding ${f.id}: status must be conceded, confirmed, maintained or new`);
@@ -448,10 +471,69 @@ function containedFile(root, rel) {
       p = join(p, part);
       if (lstatSync(p).isSymbolicLink()) return { code: 'debate_evidence_mismatch', why: `${rel} passes through a symbolic link` };
     }
-    if (!lstatSync(p).isFile()) return { code: 'debate_evidence_mismatch', why: `${rel} is not a regular file` };
+    const st = lstatSync(p);
+    if (!st.isFile()) return { code: 'debate_evidence_mismatch', why: `${rel} is not a regular file` };
     if (!realpathSync(p).startsWith(realpathSync(root) + sep)) return { code: 'debate_evidence_mismatch', why: `${rel} resolves outside the bundle` };
+    return { path: p, size: st.size };
   } catch (err) { return { code: 'debate_evidence_missing', why: `${rel} is not readable in the bundle (${err.code ?? err.message})` }; }
-  return { path: p };
+}
+
+/** The evidence file names a round may reference (MAJOR-1b); any other `files` key is refused, never read. */
+export const EVIDENCE_NAMES = Object.freeze(['brief', 'result', 'events', 'message']);
+/**
+ * Evidence size caps (MAJOR-1b), checked from the file sizes BEFORE any read. A real relay round is kilobytes (the retained
+ * fixtures are under 2 KiB, a response at most 16 KiB); 16 MiB per file and 64 MiB per debate leave a long event stream
+ * ample room while bounding the hashing work, and stay far below the 2 GiB Node read limit and the maximum string length.
+ */
+export const EVIDENCE_MAX_BYTES = 16 * 1024 * 1024;
+export const EVIDENCE_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * `{ bytes }` of the regular file at `path`, read through one descriptor whose size is checked first (at most `max`
+ * bytes), or `{ code, why }`: a read failure is a typed refusal, never an exception.
+ */
+function readBounded(path, max, label) {
+  let fd = null;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    if (size > max) return { code: 'debate_evidence_mismatch', why: `${label} is ${size} bytes; an evidence file is at most ${max} bytes` };
+    const bytes = Buffer.alloc(size);
+    let at = 0;
+    while (at < size) { const n = readSync(fd, bytes, at, size - at, at); if (n === 0) break; at += n; }
+    return at === size ? { bytes } : { code: 'debate_evidence_mismatch', why: `${label} changed while it was read` };
+  } catch (err) {
+    return { code: 'debate_evidence_missing', why: `${label} is not readable (${err.code ?? err.message})` };
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch { /* already closed */ }
+  }
+}
+/** `{ bytes }` of a bundle-relative evidence file (contained, at most `max` bytes), or `{ code, why }`. */
+function evidenceBytes(root, rel, max = EVIDENCE_MAX_BYTES) {
+  const c = containedFile(root, rel);
+  return c.path ? readBounded(c.path, max, rel) : c;
+}
+/**
+ * Why the DISTINCT evidence files the rounds reference exceed the caps, or null. Sizes only (lstat), no file is read, so
+ * an oversized or sparse multi-gigabyte file costs nothing. Unknown names and bad paths are left to verifyRound.
+ */
+function evidenceSizeProblem(rounds, bundleDir) {
+  if (!bundleDir) return null;
+  const sizes = new Map();
+  for (const r of rounds) {
+    if (!isObject(r) || !isObject(r.files)) continue;
+    for (const name of EVIDENCE_NAMES) {
+      const rel = Object.hasOwn(r.files, name) ? r.files[name] : undefined;
+      if (!relativeEvidence(rel) || sizes.has(rel)) continue;
+      const c = containedFile(bundleDir, rel);
+      if (c.path) sizes.set(rel, c.size);
+    }
+  }
+  let total = 0;
+  for (const [rel, size] of sizes) {
+    if (size > EVIDENCE_MAX_BYTES) return `${rel} is ${size} bytes; an evidence file is at most ${EVIDENCE_MAX_BYTES} bytes`;
+    total += size;
+  }
+  return total > EVIDENCE_TOTAL_MAX_BYTES ? `the ${sizes.size} evidence files hold ${total} bytes; a debate bundle holds at most ${EVIDENCE_TOTAL_MAX_BYTES} bytes in total` : null;
 }
 
 /**
@@ -480,8 +562,8 @@ export function debateLocator(commonDir, ticket, debateId) {
   return join(commonDir, 'ai-skills', 'ship-ticket', 'debate', ticket, debateId);
 }
 
-/** Every evidence file an attestation references (bundle-relative). */
-const evidencePaths = (att) => asList(att?.rounds).flatMap((r) => Object.values(isObject(r?.files) ? r.files : {}));
+/** Every evidence file an attestation references (bundle-relative; the four evidence names only). */
+const evidencePaths = (att) => asList(att?.rounds).flatMap((r) => (isObject(r?.files) ? EVIDENCE_NAMES.filter((n) => Object.hasOwn(r.files, n)).map((n) => r.files[n]) : []));
 
 const realOr = (p) => { try { return realpathSync.native(String(p)); } catch { return resolve(String(p)); } };
 /** Trimmed stdout of `git -C dir ...`, or null. Read-only git queries only. */
@@ -635,7 +717,9 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   for (const k of ['started_at', 'ended_at']) if (metrics[k] !== null && !(typeof metrics[k] === 'string' && realInstant(metrics[k]))) add('debate_attestation_invalid', `metrics.${k} must be an ISO-8601 instant or null`);
   if (att.limit !== null && att.limit !== undefined) add('debate_limit_unsupported', 'a limit record is not supported: LIMIT_REACHED is reserved until an authenticated telemetry source exists (F-105-1); a debate that stopped is UNRESOLVED');
   if (att.budget !== undefined) add('debate_limit_unsupported', 'a budget record is not supported: the 5-round / 45-minute checkpoint is telemetry and never stops a debate');
-  if (rounds.length > 64) add('debate_attestation_invalid', `the attestation records ${rounds.length} rounds; at most 64 attempted rounds are allowed`);
+  if (rounds.length > 64) { add('debate_attestation_invalid', `the attestation records ${rounds.length} rounds; at most 64 attempted rounds are allowed`); return done(); }
+  const tooBig = evidenceSizeProblem(rounds, bundleDir);
+  if (tooBig) { add('debate_evidence_mismatch', tooBig); return done(); }
   // ---- carrier: a transport label, never an outcome; Fable or any substitute only as the declared degraded carrier
   if (!asList(CARRIER_KINDS[carrier.agent]).includes(carrier.kind)) add('debate_carrier_invalid', `carrier ${carrier.agent} cannot use kind ${carrier.kind}`);
   if (!carrier.degraded && (carrier.agent !== PAIRED[host.agent] || base.diversity === 'same_provider')) {
@@ -651,13 +735,14 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   const seen = new Set();
   const completedNumbers = new Set();
   const perRound = new Map();
+  const store = new Map(); // bundle-relative path -> { bytes } | { code, why }: each distinct file is read and hashed once
   rounds.forEach((r, i) => {
     if (!isObject(r) || r.n !== i + 1) { add('debate_attestation_invalid', `round ${i + 1} is not an object numbered n: ${i + 1}`); return; }
     if (!ROUND_STATUS.includes(r.status)) { add('debate_attestation_invalid', `round ${r.n} status ${JSON.stringify(r.status)} is not one of ${ROUND_STATUS.join(', ')}`); return; }
     if (!SAFE_SEGMENT.test(String(r.request_id))) add('debate_attestation_invalid', `round ${r.n} needs a safe request_id`);
     if (seen.has(r.request_id)) add('debate_request_mismatch', `round ${r.n} reuses request_id ${r.request_id} (a replayed request)`);
     seen.add(r.request_id);
-    perRound.set(r.n, verifyRound(r, att, bundleDir, add));
+    perRound.set(r.n, verifyRound(r, att, bundleDir, add, store));
     if (r.status === 'completed') completedNumbers.add(r.n);
   });
   // ---- the canonical ledger: derived from the response objects; the attestation ledger must equal it
@@ -714,7 +799,7 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   }
   const byId = new Map(asList(D?.dispositions).map((row) => [row.id, row]));
   const needsLimit = outcome === 'UNRESOLVED' && att.incomplete_review === true;
-  const need = [...base.outstanding, ...(needsLimit ? ['LIMIT'] : [])];
+  const need = [...base.outstanding, ...(needsLimit ? [LIMIT_ID] : [])];
   base.pending = outcome === 'CONVERGED' || outcome === 'SKIPPED' ? [] : need.filter((id) => dispositionProblem(id, byId.get(id), D, rounds, digest));
   base.debate_qualified = outcome === 'CONVERGED' && errors.length === 0;
   const m = (k, v) => (v === null || v === undefined ? [] : [`${k}=${v}`]);
@@ -731,7 +816,7 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
  * object, bound to the round's request_id, plan_version and plan_digest (also those of the brief that was sent).
  * Returns { diag, response }.
  */
-function verifyRound(r, att, bundleDir, add) {
+function verifyRound(r, att, bundleDir, add, store = new Map()) {
   const out = { relay: null, response: null };
   const kind = att.carrier.kind;
   const files = isObject(r.files) ? r.files : {};
@@ -742,16 +827,17 @@ function verifyRound(r, att, bundleDir, add) {
     const rel = files[name];
     if (!relativeEvidence(rel)) { add('debate_attestation_invalid', `round ${r.n} ${name}: evidence paths are bundle-relative (no absolute path, no ..); out_dir is provenance only`); return null; }
     if (!bundleDir) { add('debate_evidence_missing', `round ${r.n} ${name}: no bundle root to resolve ${rel}`); return null; }
-    const c = containedFile(bundleDir, rel);
-    if (!c.path) { add(c.code, `round ${r.n} ${name}: ${c.why}`); return null; }
-    const bytes = readFileSync(c.path);
-    const want = hashes[name];
-    if (sha256Of(bytes) !== want) add('debate_evidence_mismatch', `round ${r.n} ${name}: ${rel} does not match its recorded sha256`);
-    return bytes;
+    if (!store.has(rel)) { const e = evidenceBytes(bundleDir, rel); store.set(rel, e.bytes ? { bytes: e.bytes, hash: sha256Of(e.bytes) } : e); }
+    const e = store.get(rel);
+    if (!e.bytes) { add(e.code, `round ${r.n} ${name}: ${e.why}`); return null; }
+    if (e.hash !== hashes[name]) add('debate_evidence_mismatch', `round ${r.n} ${name}: ${rel} does not match its recorded sha256`);
+    return e.bytes;
   };
+  const unknown = Object.keys(files).filter((n) => !EVIDENCE_NAMES.includes(n));
+  if (unknown.length) add('debate_attestation_invalid', `round ${r.n} files holds ${unknown.length} unknown evidence name(s) (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? ', ...' : ''}): only ${EVIDENCE_NAMES.join(', ')}; none is read`);
   const need = r.status !== 'completed' ? [] : kind === 'native_session' ? ['message'] : ['brief', 'result', 'events'];
   for (const n of need) if (!files[n]) add('debate_evidence_missing', `round ${r.n} is ${r.status} but has no ${n} evidence file`);
-  const got = Object.fromEntries(Object.keys(files).map((n) => [n, read(n)]));
+  const got = Object.fromEntries(EVIDENCE_NAMES.filter((n) => Object.hasOwn(files, n)).map((n) => [n, read(n)]));
   if (r.status !== 'completed' && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
@@ -847,13 +933,14 @@ function debateStartCheck(planText, start, { bundleDir, repo, digest, add }) {
   if (!bundleDir) { put('debate_evidence_missing', 'no retained debate bundle: run `brief.mjs debate-retain` after approval and pass --repo to start-check'); return; }
   const loc = locatorProblem(bundleDir);
   if (loc) { put(loc.code, `the retained locator: ${loc.why}`); return; }
-  const lineFile = containedFile(bundleDir, 'attestation.line');
-  if (!lineFile.path) { put(lineFile.code, `the retained bundle's attestation.line: ${lineFile.why}`); return; }
-  if (!readFileSync(lineFile.path).equals(Buffer.from(got.line, 'utf8'))) { put('debate_evidence_mismatch', 'the retained attestation.line is not byte-identical to the plan line'); return; }
+  const want = Buffer.from(got.line, 'utf8');
+  const lineFile = evidenceBytes(bundleDir, 'attestation.line', want.length);
+  if (!lineFile.bytes) { put(lineFile.code, `the retained bundle's attestation.line: ${lineFile.why}`); return; }
+  if (!lineFile.bytes.equals(want)) { put('debate_evidence_mismatch', 'the retained attestation.line is not byte-identical to the plan line'); return; }
   const v = verifyDebate(planText, { bundleDir, repo });
   for (const e of v.errors) put(e.code, e.message);
   if (added || v.outcome === 'CONVERGED' || v.outcome === 'SKIPPED') return;
-  const need = [...v.outstanding, ...(v.needsLimit ? ['LIMIT'] : [])];
+  const need = [...v.outstanding, ...(v.needsLimit ? [LIMIT_ID] : [])];
   for (const id of need) {
     const p = dispositionProblem(id, v.byId.get(id), v.D, v.rounds, digest);
     if (p) add(p[0], p[1]);
@@ -890,11 +977,9 @@ export function retainBundle(planText, { from, to, root = null, repo = null }) {
     }
   } catch (err) { return refuse('debate_evidence_missing', `creating the retained locator failed (${err.code ?? err.message}): WAIT_FOR_USER`); }
   const same = (dir) => {
-    try {
-      const lf = containedFile(dir, 'attestation.line');
-      if (!lf.path || !readFileSync(lf.path).equals(line)) return false;
-      return files.every((f) => { const c = containedFile(dir, f); return Boolean(c.path) && readFileSync(c.path).equals(readFileSync(join(from, ...f.split('/')))); });
-    } catch { return false; }
+    const lf = evidenceBytes(dir, 'attestation.line', line.length);
+    if (!lf.bytes || !lf.bytes.equals(line)) return false;
+    return files.every((f) => { const a = evidenceBytes(dir, f), b = evidenceBytes(from, f); return Boolean(a.bytes && b.bytes) && a.bytes.equals(b.bytes); });
   };
   let existing = null;
   try { existing = lstatSync(to); } catch (err) { if (err.code !== 'ENOENT') return refuse('debate_evidence_missing', `cannot inspect ${to} (${err.code})`); }
@@ -909,7 +994,7 @@ export function retainBundle(planText, { from, to, root = null, repo = null }) {
     for (const f of files) {
       let d = tmp;
       for (const part of f.split('/').slice(0, -1)) { d = join(d, part); if (!existsSync(d)) mkdirSync(d); }
-      copyFileSync(join(from, ...f.split('/')), join(tmp, ...f.split('/')), fsConstants.COPYFILE_EXCL);
+      copyFileSync(join(from, f), join(tmp, f), fsConstants.COPYFILE_EXCL); // f is bundle-relative with forward slashes; join normalises them
     }
     writeFileSync(join(tmp, 'attestation.line'), line, { flag: 'wx' });
     if (!same(tmp)) throw new Error('the copy is not byte-identical');

@@ -286,7 +286,12 @@ Outcomes, independent of the carrier:
   `result.json`) passes one structural bounds gate before any processing: at most
   64 levels deep, 100,000 nodes, 1,024 array elements and 1,000,000 characters per
   string, finite numbers only; at most 64 attempted rounds; a relay exit code is a
-  non-negative integer.
+  non-negative integer. A round references at most the four evidence files `brief`, `result`, `events` and `message`; each is at most 16 MiB and a debate bundle at most 64 MiB in total, checked from the file sizes before any read
+  (another `files` name is refused, never read; each distinct file is read and hashed
+  once; an unreadable or oversized file is a typed refusal, never a crash). The
+  narrative scans (the `debate_policy:` header, the single-line comment rule and the
+  placeholder test of a resolution or exception reason) run in linear time.
+  `LIMIT` is a reserved id: a counterpart finding named `LIMIT` is refused (`debate_response_invalid`), so one owner row never settles both a finding and the incomplete review.
 - `SKIPPED`: only with the owner exception frozen in the plan.
 
 `DEGRADED` is not an outcome: a substitute carrier is `carrier.degraded: true`.
@@ -372,7 +377,7 @@ again (`debate_reconfirm_required`). The attestation never closes a finding on i
 own: its ledger must equal the one derived from the response objects. Populated names or timestamps are
 never proof of authorization. Documented limit: this detects inconsistency, replay
 and stale or unrelated results; it cannot authenticate against a host able to
-fabricate every input. No relay text is classified: whether a failure was a quota, a
+fabricate every input. Host-trust residual (F-105-1): the host chooses which attempts it records, so a dropped failed attempt, or a failed attempt recorded before a completed one, is not detected; `incomplete_review` is derived from the last recorded round only, because no retained field is out of the host's reach (the relay timestamps can be forged, which is why D-A11 removed the derivation built on them). No relay text is classified: whether a failure was a quota, a
 permission error or a timeout is for the owner to read in the retained diagnostics
 (D-A10, 2026-11-23: three classification strategies each failed review, because no
 heuristic separates diagnostic evidence from metadata and benign warnings in an

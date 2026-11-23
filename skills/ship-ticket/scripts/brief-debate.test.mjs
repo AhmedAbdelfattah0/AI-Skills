@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync, statSync, existsSync, chmodSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync, statSync, existsSync, chmodSync, realpathSync, symlinkSync, truncateSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import * as B from './brief.mjs';
@@ -691,12 +691,13 @@ async function mutant(find, replace) {
 }
 const MUTANTS = [
   ['D-A11: LIMIT_REACHED is unsupported', "if (outcome === 'LIMIT_REACHED') { add('debate_limit_unsupported'", "if (false) { add('debate_limit_unsupported'",
-    (t) => ({ x: limited(t, { over: { limit: { kind: 'configured_budget', evidence: 'max_rounds: 1' } } }), code: 'debate_limit_unsupported' })],
+    (t) => ({ x: limited(t, { over: { limit: { kind: 'configured_budget', evidence: 'max_rounds: 1' } } }), code: 'debate_limit_unsupported',
+      rest: ['debate_attestation_invalid', 'debate_outcome_invalid'] /* layered: LIMIT_REACHED is not a member of DEBATE_OUTCOMES either; the kill is the typed code */ })],
   ['D-A11: no limit record on any outcome', "if (att.limit !== null && att.limit !== undefined) add('debate_limit_unsupported'", "if (false) add('debate_limit_unsupported'",
     (t) => ({ x: converged(t, { over: { limit: { kind: 'configured_budget', evidence: 'x' } } }), code: 'debate_limit_unsupported' })],
   ['D-A11: no budget record', "if (att.budget !== undefined) add('debate_limit_unsupported'", "if (false) add('debate_limit_unsupported'",
     (t) => ({ x: converged(t, { over: { budget: { max_rounds: 3, max_minutes: null } } }), code: 'debate_limit_unsupported' })],
-  ['at most 64 attempted rounds', "if (rounds.length > 64) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
+  ['at most 64 attempted rounds', "if (rounds.length > 64) { add('debate_attestation_invalid'", "if (false) { add('debate_attestation_invalid'",
     (t) => ({ x: manyRounds(t, 65), code: 'debate_attestation_invalid' })],
 
   ['bounds gate: string length', 'if (v.length > JSON_BOUNDS.string) return', 'if (false) return',
@@ -705,20 +706,33 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { r2: { resultOver: { touchedFiles: Array.from({ length: 200 }, () => Array.from({ length: 600 }, () => 'f')) } } }), code: 'debate_evidence_mismatch' })],
   ['bounds gate: array length', 'if (v.length > JSON_BOUNDS.array) return', 'if (false) return',
     (t) => ({ x: converged(t, { r2: { resultOver: { touchedFiles: Array.from({ length: 2000 }, () => 'f') } } }), code: 'debate_evidence_mismatch' })],
+  // Round 1 repair (MINOR-5): the non-finite mutant used to 'pass' only because the mutant THREW into a catch. Its entry is now
+  // result.json, where the gate is the only check: an unread field spliced in as raw `1e400` (JSON.parse gives Infinity).
+  ['bounds gate: non-finite numbers (result.json entry)', "if (typeof v === 'number') { if (!Number.isFinite(v)) return", "if (typeof v === 'number') { if (false) return",
+    (t) => ({ x: converged(t, { r2: { resultOver: { touchedFiles: DEEP_MARK }, resultDeep: { n: 0, leaf: '1e400' } } }), code: 'debate_evidence_mismatch' })],
+  ['bounds gate: depth', 'if (d > JSON_BOUNDS.depth) return', 'if (false) return',
+    (t) => ({ x: converged(t, { over: { findings: [FIND({ host_position: DEEP(100, 'x') })] } }), code: 'debate_attestation_invalid' })],
+  ['evidence names are the four allowlisted ones', 'if (unknown.length) add(', 'if (false) add(',
+    (t) => { const x = converged(t); const att = JSON.parse(x.line.slice(27, -4)); const r2 = att.rounds[1];
+      return { x, text: planText(x.narr, [B.serializeAttestation({ ...att, rounds: [att.rounds[0], { ...r2, files: { ...r2.files, extra: r2.files.events } }] })]), code: 'debate_attestation_invalid' }; }],
+  ['per-file evidence cap', 'export const EVIDENCE_MAX_BYTES = 16 * 1024 * 1024;', 'export const EVIDENCE_MAX_BYTES = Infinity;',
+    (t) => zeroEvidence(t, 2, CAP + 1, 'debate_evidence_mismatch')],
+  ['total evidence cap', 'export const EVIDENCE_TOTAL_MAX_BYTES = 64 * 1024 * 1024;', 'export const EVIDENCE_TOTAL_MAX_BYTES = Infinity;',
+    (t) => zeroEvidence(t, 5, CAP, 'debate_evidence_mismatch')],
   ['relay exit codes are non-negative integers', '(Number.isInteger(res.exitCode) && res.exitCode >= 0)', '(typeof res.exitCode === \'number\')',
-    (t) => ({ x: converged(t, { r1: { exit_code: -1, status: 'failed' } }), code: 'debate_evidence_mismatch' })],
+    (t) => ({ x: converged(t, { r1: { exit_code: -1, status: 'failed' }, r2: { concede: [] }, over: { findings: [] } }), code: 'debate_evidence_mismatch' })],
   ['D-A10: an incomplete review needs a failed relay result', "else if (relay.status === 'completed' && relay.exitCode === 0) add('debate_outcome_invalid'", "else if (false) add('debate_outcome_invalid'",
-    (t) => ({ x: incomplete(t, { roundOpts: { status: 'completed', verdict: 'AGREE', findings: [] } }), code: 'debate_outcome_invalid' })],
+    (t) => ({ x: incomplete(t, { roundOpts: { status: 'completed', verdict: 'AGREE', findings: [] } }), code: 'debate_outcome_invalid', rest: ['debate_attestation_invalid'] /* layered: incomplete_review is also derived */ })],
   ['D-A10: an incomplete review needs a retained relay result', "if (!relay) add('debate_outcome_invalid'", "if (!relay) void ('debate_outcome_invalid'",
     (t) => ({ x: incomplete(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'spawn failed' } } }), code: 'debate_outcome_invalid' })],
   ['D-A10: CONVERGED is never an incomplete review', "if (att.incomplete_review === true) add('debate_outcome_invalid', 'CONVERGED", "if (false) add('debate_outcome_invalid', 'CONVERGED",
-    (t) => ({ x: converged(t, { over: { incomplete_review: true } }), code: 'debate_outcome_invalid' })],
-  ['D-A9: no comment spans a line', "if (lines[n].indexOf('-->', at + 4) < 0) return", 'if (false) return',
+    (t) => ({ x: converged(t, { over: { incomplete_review: true } }), code: 'debate_outcome_invalid', rest: ['debate_attestation_invalid'] /* layered: incomplete_review is also derived */ })],
+  ['D-A9: no comment spans a line', "if (open >= 0 && lines[n].lastIndexOf('-->') < open + 4) return", 'if (false) return',
     (t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: ')); return { x: converged(t, { narr: base.replace(line, `<!--\n${line}\n-->`) }), code: 'debate_narrative_hidden_markup' }; }],
   ['dispositions debate_id binding', "if (D && D.debate_id !== att.debate_id) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
     (t) => ({ x: converged(t, { narr: narrative({ attestationRef: 'Attestation: debate-T-1-20261122T0900Z' }) }), code: 'debate_attestation_invalid' })],
   ['dispositions carrier_degraded binding', "if (D && D.carrier_degraded !== carrier.degraded) add('debate_carrier_invalid'", "if (false) add('debate_carrier_invalid'",
-    (t) => ({ x: converged(t, { over: { carrier: { agent: 'fable', kind: 'native_session', identity: 'claude:fable', degraded: true } }, r1: { kind: 'native_session', session: 'f1' }, r2: { kind: 'native_session', session: 'f1' } }), code: 'debate_carrier_invalid' })],
+    (t) => ({ x: converged(t, { narr: narrative({ carrier: { degraded: true, degradationAck: B.DEGRADED_ACK } }) }), code: 'debate_carrier_invalid' })],
   ['round verdict equals the response object', "if (parsed.obj.verdict !== r.verdict) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
     (t) => ({ x: converged(t, { r1: { verdict: 'AGREE', message: respond({ verdict: 'CHANGES_REQUESTED', request_id: 'req-1', plan_version: 'v1', plan_digest: OLD_DIGEST, findings: [{ id: 'P1', status: 'new', severity: 'major' }] }) } }), code: 'debate_attestation_invalid' })],
   ['brief plan_digest binding', 'if (b.request_id !== r.request_id || b.plan_version !== r.plan_version || b.plan_digest !== r.plan_digest) {', 'if (b.request_id !== r.request_id || b.plan_version !== r.plan_version) {',
@@ -734,8 +748,8 @@ const MUTANTS = [
   ['dispositions unique ids', 'if (ids.has(row.id)) return { error:', 'if (false) return { error:',
     (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', 'One.', 'no'], ['P3', 'decided', 'Two.', 'no']] }) }), code: 'debate_attestation_invalid' })],
   ['digest binding', 'if (final.plan_digest !== digest) add(\'debate_digest_mismatch\'', 'if (false) add(\'debate_digest_mismatch\'',
-    (t) => { const x = converged(t); return { x, text: planText(narrative({ body: 'Edited.' }), [x.line]), code: 'debate_digest_mismatch' }; }],
-  ['evidence hash', 'if (sha256Of(bytes) !== want) add(\'debate_evidence_mismatch\'', 'if (false) add(\'debate_evidence_mismatch\'',
+    (t) => { const x = converged(t); return { x, text: planText(withResult(narrative({ body: 'Edited.' }), 'CONVERGED'), [x.line]), code: 'debate_digest_mismatch' }; }],
+  ['evidence hash', "if (e.hash !== hashes[name]) add('debate_evidence_mismatch'", "if (false) add('debate_evidence_mismatch'",
     (t) => { const x = converged(t); writeFileSync(join(x.bundle, 'r2', 'events.jsonl'), 'x'); return { x, code: 'debate_evidence_mismatch' }; }],
   ['response request_id binding', 'if (o.request_id !== expect.request_id) return bad(', 'if (false) return bad(',
     (t) => ({ x: converged(t, { r2: { echo_request_id: 'req-1' } }), code: 'debate_request_mismatch' })],
@@ -750,7 +764,7 @@ const MUTANTS = [
   ['skip exception', "if (!exceptionOk(D, 'SKIPPED')) add('debate_exception_missing'", "if (false) add('debate_exception_missing'",
     (t) => ({ x: skipped(t, { carrier: {} }), code: 'debate_exception_missing' })],
   ['degradation acknowledgement', "if (att.carrier.degraded && !(D?.carrier_degraded === true && D.degradation_ack === DEGRADED_ACK)) add('debate_degradation_unacknowledged'", "if (false) add('debate_degradation_unacknowledged'",
-    (t) => ({ x: converged(t, { over: { carrier: { agent: 'codex', kind: 'codex_relay', identity: 'codex:gpt-5.5', degraded: true } } }), code: 'debate_degradation_unacknowledged' })],
+    (t) => ({ x: converged(t, { narr: narrative({ carrier: { degraded: true } }), over: { carrier: { agent: 'codex', kind: 'codex_relay', identity: 'codex:gpt-5.5', degraded: true } } }), code: 'debate_degradation_unacknowledged' })],
   ['replayed request_id', "if (seen.has(r.request_id)) add('debate_request_mismatch'", "if (false) add('debate_request_mismatch'",
     (t) => ({ x: converged(t, { r1: { request_id: 'req-final' } }), code: 'debate_request_mismatch' })],
   ['carrier pairing', "if (!carrier.degraded && (carrier.agent !== PAIRED[host.agent] || base.diversity === 'same_provider')) {", 'if (false) {',
@@ -789,13 +803,13 @@ const MUTANTS = [
   ['disposition kinds are concrete (a pending finding has no row)', "if (!sameKeys(row, DISPOSITION_KEYS) || typeof row.id !== 'string' || !CONCRETE.has(row.kind)", "if (!sameKeys(row, DISPOSITION_KEYS) || typeof row.id !== 'string' || false",
     (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'decide', 'later', 'no']] }) }), code: 'debate_attestation_invalid' })],
   ['completed round exit code 0', "if (r.status === 'completed' && (r.exit_code !== 0 || res.exitCode !== 0)) add('debate_evidence_mismatch'", "if (false) add('debate_evidence_mismatch'",
-    (t) => ({ x: converged(t, { r2: { exit_code: 7 } }), code: 'debate_evidence_mismatch' })],
+    (t) => ({ x: unresolved(t, { r2: { exit_code: 7 }, over: { incomplete_review: true } }), code: 'debate_evidence_mismatch' })],
   ['completed round session id', "if (r.status === 'completed' && !nonEmpty(r.session_id)) add('debate_carrier_invalid'", "if (false) add('debate_carrier_invalid'",
-    (t) => ({ x: converged(t, { r2: { omitIds: true } }), code: 'debate_carrier_invalid' })],
+    (t) => ({ x: converged(t, { over: { host: { agent: 'codex', identity: 'codex:gpt-5.5' }, carrier: { agent: 'claude', kind: 'native_session', identity: 'claude:opus-5-5', degraded: false } }, r1: { kind: 'native_session', session: 's1' }, r2: { kind: 'native_session', session: '' } }), code: 'debate_carrier_invalid' })],
   ['every round read-only', "if (r.read_only !== true) add('debate_carrier_invalid'", "if (false) add('debate_carrier_invalid'",
     (t) => ({ x: converged(t, { over: { host: { agent: 'codex', identity: 'codex:gpt-5.5' }, carrier: { agent: 'claude', kind: 'native_session', identity: 'claude:opus-5-5', degraded: false } }, r1: { kind: 'native_session', session: 's1' }, r2: { kind: 'native_session', session: 's1', read_only: false } }), code: 'debate_carrier_invalid' })],
   ['attestation ledger equals the derived ledger', "if (!same) add('debate_attestation_invalid', `the attestation ledger entry", "if (false) add('debate_attestation_invalid', `the attestation ledger entry",
-    (t) => ({ x: converged(t, { r2: { concede: [] } }), code: 'debate_attestation_invalid' })],
+    (t) => ({ x: converged(t, { over: { findings: [FIND({ closed_round: 1 })] } }), code: 'debate_attestation_invalid' })],
   ['no finding only the attestation names', "for (const id of attById.keys()) if (!ledger.has(id)) add('debate_attestation_invalid'", "for (const id of attById.keys()) if (false) add('debate_attestation_invalid'",
     (t) => ({ x: converged(t, { over: { findings: [FIND(), FIND({ id: 'P7', severity: 'minor', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] } }), code: 'debate_attestation_invalid' })],
   ['no symlink inside a bundle', "if (lstatSync(p).isSymbolicLink()) return { code: 'debate_evidence_mismatch'", "if (false) return { code: 'debate_evidence_mismatch'",
@@ -803,22 +817,38 @@ const MUTANTS = [
   ['dispositions-line outcome matches the attestation', "if (D && D.outcome !== outcome) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
     (t) => ({ x: converged(t, { narr: withResult(narrative(), 'UNRESOLVED') }), code: 'debate_outcome_invalid' })],
   ['{-leading attestation refused', "if (R.events.some((e) => Object.hasOwn(e, 'debate-attestation-v1') || Object.hasOwn(e, 'debate_id'))) {", 'if (false) {',
-    (t) => { const x = converged(t); return { x, text: planText(x.narr, [JSON.stringify({ debate_id: DEBATE_ID, outcome: 'CONVERGED' })]), code: 'debate_attestation_invalid' }; }],
+    (t) => { const x = converged(t); return { x, text: planText(x.narr, [JSON.stringify({ debate_id: DEBATE_ID, outcome: 'CONVERGED' }), x.line]), code: 'debate_attestation_invalid' }; }],
 ];
 const PROBE_OK = { relay_present: true, codex_version: { status: 0, version: 'codex-cli 1.0.0', path: '/x/codex' }, login: { status: 0 }, nonce: 'n',
   dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', codexVersion: 'codex-cli 1.0.0', finalMessage: PROBE_MSG('n') } },
   resume: { result: { status: 'completed', threadId: 't', sandbox: 'read-only' } }, cancel: { child_seen: true, result: { status: 'timeout' }, survivors: [] }, coverage: { before: 'c', after: 'c', ignored_before: 'i', ignored_after: 'i' } };
+/**
+ * The verdict of one result for OTHER_MUTANTS: `true` when it refuses with exactly `code` (a parseResponse result's `code`, or a
+ * checker result's error codes), `false` when it accepts (ok, no error), else the codes it refused with (never a kill).
+ */
+const verdictOf = (r, code) => {
+  if (r.ok && !(r.errors ?? []).length) return false;
+  const got = r.errors ? codes(r) : [r.code];
+  return got.includes(code) || got.join();
+};
+/** A probe capability verdict: `true` for the exact refusal (fail), `false` for pass, anything else is neither. */
+const pf = (v) => (v === 'fail' ? true : v === 'pass' ? false : v);
+/**
+ * A valid UNRESOLVED debate of `n` rounds whose events.jsonl files are each `size` zero bytes (sparse; the recorded hashes
+ * match, so only a size cap refuses it). The mutant without the cap reads them: n * size bytes, kept small (<= 80 MiB).
+ */
+function zeroEvidence(t, n, size, code) {
+  const x = manyRounds(t, n);
+  const att = JSON.parse(x.line.slice(27, -4));
+  const zeros = sha(Buffer.alloc(size));
+  for (const r of att.rounds) { truncateSync(join(x.bundle, r.files.events), 0); truncateSync(join(x.bundle, r.files.events), size); r.sha256.events = zeros; }
+  const line = B.serializeAttestation(att);
+  return { x: { ...x, att, line }, text: planText(x.narr, [line]), code };
+}
 const OTHER_MUTANTS = [
-  ['bounds gate: non-finite numbers (dispositions entry)', "if (typeof v === 'number') { if (!Number.isFinite(v)) return", "if (typeof v === 'number') { if (false) return",
-    (mod, t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
-      const x = converged(t, { narr: base.replace(line, line.replace('"v":1', '"v":1e400')) });
-      try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_attestation_invalid'); } catch { return false; } }],
-  ['bounds gate: depth', 'if (d > JSON_BOUNDS.depth) return', 'if (false) return',
-    (mod, t) => { const x = converged(t, { over: { findings: [FIND({ host_position: DEEP(100, 'x') })] } });
-      try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_attestation_invalid'); } catch { return false; } }],
   ['probe: fresh_result needs an explicit AGREE', "probeExpect(o.nonce)).obj?.verdict === 'AGREE' ?", 'probeExpect(o.nonce)).ok ?',
-    (mod) => mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only',
-      finalMessage: JSON.stringify({ v: 1, request_id: 'probe-n1', plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}`, verdict: 'CHANGES_REQUESTED', findings: [{ id: 'P1', status: 'new', severity: 'major' }] }) } } }).fresh_result.result === 'fail'],
+    (mod) => pf(mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n1', dispatch: { result: { status: 'completed', threadId: 'th-1', sandbox: 'read-only',
+      finalMessage: JSON.stringify({ v: 1, request_id: 'probe-n1', plan_version: 'v1', plan_digest: `sha256:${'0'.repeat(64)}`, verdict: 'CHANGES_REQUESTED', findings: [{ id: 'P1', status: 'new', severity: 'major' }] }) } } }).fresh_result.result)],
   ...[
     ['response: v is 1', 'if (o.v !== 1) return bad(', (o) => ({ ...o, v: 2 })],
     ['response: request_id format', "if (typeof o.request_id !== 'string' || !SAFE_SEGMENT.test(o.request_id)) return bad(", (o) => ({ ...o, request_id: '../x' })],
@@ -833,13 +863,18 @@ const OTHER_MUTANTS = [
     ['response: note length', "if (Object.hasOwn(f, 'note') && !(typeof f.note === 'string' && f.note.length <= 2000)) return bad(", (o) => ({ ...o, findings: [{ id: 'P1', status: 'new', severity: 'major', note: 'n'.repeat(2001) }] })],
     ['response: plan_digest binding', 'if (o.plan_digest !== expect.plan_digest) return bad(', (o) => ({ ...o, plan_digest: `sha256:${'2'.repeat(64)}` })],
     ['response: plan_version binding', 'if (o.plan_version !== expect.plan_version) return bad(', (o) => ({ ...o, plan_version: 'v2' })],
+    ['response: LIMIT is a reserved finding id', 'if (f.id === LIMIT_ID) return bad(', (o) => ({ ...o, findings: [{ id: 'LIMIT', status: 'new', severity: 'blocker' }] })],
   ].map(([name, find, change]) => [name, find, find.replace(/^(\s*)if \(/, '$1if (false) if ('),
-    (mod) => !mod.parseResponse(JSON.stringify(change(JSON.parse(resp()))), name.includes('binding') ? EXPECT : null).ok]),
+    (mod) => verdictOf(mod.parseResponse(JSON.stringify(change(JSON.parse(resp()))), name.includes('binding') ? EXPECT : null), name.includes('plan_digest binding') ? 'debate_digest_mismatch' : name.includes('binding') ? 'debate_request_mismatch' : 'debate_response_invalid')]),
   ['response: size limit', 'if (Buffer.byteLength(text, \'utf8\') > RESPONSE_MAX_BYTES) return bad(', 'if (false) return bad(',
-    (mod) => !mod.parseResponse(resp({ findings: Array.from({ length: 12 }, (_, i) => ({ id: `P${i + 1}`, status: 'new', severity: 'minor', note: 'n'.repeat(1990) })) }), EXPECT).ok],
+    (mod) => verdictOf(mod.parseResponse(resp({ verdict: 'CHANGES_REQUESTED', findings: Array.from({ length: 12 }, (_, i) => ({ id: `P${i + 1}`, status: 'new', severity: 'minor', note: 'n'.repeat(1990) })) }), EXPECT), 'debate_response_invalid')],
   ['response: strict UTF-8 bytes', "try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }", "try { text = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(bytes); }",
     (mod) => { const base = resp({ findings: [{ id: 'P1', status: 'new', severity: 'major', note: 'ab' }] }); const at = base.indexOf('"ab"') + 2;
-      return !mod.parseResponseBytes(Buffer.concat([Buffer.from(base.slice(0, at)), Buffer.from([0xff]), Buffer.from(base.slice(at))]), null).ok; }],
+      return verdictOf(mod.parseResponseBytes(Buffer.concat([Buffer.from(base.slice(0, at)), Buffer.from([0xff]), Buffer.from(base.slice(at))]), null), 'debate_response_invalid'); }],
+  ['JSON_BOUNDS are exact (depth 64, array 1,024, string 1,000,000, nodes 100,000)', 'export const JSON_BOUNDS = Object.freeze({ depth: 64, nodes: 100000, array: 1024, string: 1000000 });',
+    'export const JSON_BOUNDS = Object.freeze({ depth: 99, nodes: 100001, array: 1999, string: 1999999 });',
+    (mod) => { const over = [DEEP_ARR(65, 1), new Array(1025).fill(0), 'x'.repeat(1_000_001), Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, 0]))].map((v) => mod.jsonBoundsProblem(v) !== null);
+      return over.every(Boolean) ? true : over.some(Boolean) ? over.join() : false; }],
   ['git overrides scrubbed', "const gitEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));", 'const gitEnv = () => process.env;',
     (mod, t) => {
       const plain = tmp(t, 'debate-plain-');
@@ -847,22 +882,22 @@ const OTHER_MUTANTS = [
       const saved = [process.env.GIT_DIR, process.env.GIT_WORK_TREE];
       process.env.GIT_DIR = join(REPO, '.git');
       process.env.GIT_WORK_TREE = plain;
-      try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_workdir_unbound'); } finally {
+      try { return verdictOf(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO }), 'debate_workdir_unbound'); } finally {
         if (saved[0] === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved[0];
         if (saved[1] === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = saved[1];
       }
     }],
   ['probe: an empty CLI version fails closed', "else if (cli && Object.hasOwn(cli, 'version') && !nonEmpty(cli.version)) dispatch = no('provider'", "else if (false) dispatch = no('provider'",
-    (mod) => mod.classifyProbe({ ...PROBE_OK, codex_version: { status: 0, version: '', path: '/usr/bin/true' }, dispatch: { result: { ...PROBE_OK.dispatch.result, codexVersion: '' } } }).dispatch.result === 'fail'],
+    (mod) => pf(mod.classifyProbe({ ...PROBE_OK, codex_version: { status: 0, version: '', path: '/usr/bin/true' }, dispatch: { result: { ...PROBE_OK.dispatch.result, codexVersion: '' } } }).dispatch.result)],
   ['probe: the relay runs the probed CLI', 'else if (nonEmpty(cli?.version) && String(', 'else if (false && String(',
-    (mod) => mod.classifyProbe({ ...PROBE_OK, dispatch: { result: { ...PROBE_OK.dispatch.result, codexVersion: 'codex-cli 9.9.9' } } }).dispatch.result === 'fail'],
+    (mod) => pf(mod.classifyProbe({ ...PROBE_OK, dispatch: { result: { ...PROBE_OK.dispatch.result, codexVersion: 'codex-cli 9.9.9' } } }).dispatch.result)],
   ['probe: the resumed session stays read-only', ": !readOnly(rs.result) ? no('relay', 'the resumed session is not read-only')", ": false ? no('relay', 'the resumed session is not read-only')",
-    (mod) => mod.classifyProbe({ ...PROBE_OK, resume: { result: { status: 'completed', threadId: 't', sandbox: 'workspace-write' } } }).resume.result === 'fail'],
+    (mod) => pf(mod.classifyProbe({ ...PROBE_OK, resume: { result: { status: 'completed', threadId: 't', sandbox: 'workspace-write' } } }).resume.result)],
   ['probe: failed process listing', ": c.listing_failed ? no('relay'", ": false ? no('relay'",
-    (mod) => mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n', dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', finalMessage: PROBE_MSG('n') } },
-      resume: { result: { status: 'completed', threadId: 't' } }, cancel: { child_seen: true, listing_failed: true, result: { status: 'timeout' }, survivors: [] }, coverage: {} }).cancellation.result === 'fail'],
+    (mod) => pf(mod.classifyProbe({ relay_present: true, codex_version: { status: 0 }, login: { status: 0 }, nonce: 'n', dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', finalMessage: PROBE_MSG('n') } },
+      resume: { result: { status: 'completed', threadId: 't' } }, cancel: { child_seen: true, listing_failed: true, result: { status: 'timeout' }, survivors: [] }, coverage: {} }).cancellation.result)],
   ['probe: Claude subscription auth', "else if (claude && o.login.authMethod !== 'claude.ai') dispatch = no('auth'", "else if (false) dispatch = no('auth'",
-    (mod) => mod.classifyProbe({ carrier: 'claude', relay_present: true, cli_version: { status: 0 }, login: { status: 0, authMethod: 'api_key' }, nonce: 'n', dispatch: { result: { status: 'completed', sessionId: 's', readOnly: true, finalMessage: PROBE_MSG('n') } } }).dispatch.result === 'fail'],
+    (mod) => pf(mod.classifyProbe({ carrier: 'claude', relay_present: true, cli_version: { status: 0 }, login: { status: 0, authMethod: 'api_key' }, nonce: 'n', dispatch: { result: { status: 'completed', sessionId: 's', readOnly: true, finalMessage: PROBE_MSG('n') } } }).dispatch.result)],
   ['retain: symlinked destination component', "if (st && (st.isSymbolicLink() || !st.isDirectory())) return refuse('debate_evidence_mismatch'", "if (false) return refuse('debate_evidence_mismatch'",
     (mod, t) => {
       if (win) return true;
@@ -870,22 +905,29 @@ const OTHER_MUTANTS = [
       mkdirSync(join(common, 'ai-skills', 'ship-ticket', 'debate'), { recursive: true });
       symlinkSync(elsewhere, join(common, 'ai-skills', 'ship-ticket', 'debate', TICKET));
       const r = mod.retainBundle(x.text, { from: x.bundle, to: B.debateLocator(common, TICKET, DEBATE_ID), root: common, repo: REPO });
-      return !r.ok && readdirSync(elsewhere).length === 0;
+      if (readdirSync(elsewhere).length) return false; // the defect accepted: the copy followed the link out of the locator
+      return r.ok ? false : codes(r).includes('debate_evidence_mismatch') || codes(r).join();
     }],
 ];
 for (const [name, find, replace, refuses] of OTHER_MUTANTS) {
   test(`mutation: ${name} — the mutant accepts the defect, the real code refuses it`, { skip: name.startsWith('retain') && POSIX_ONLY }, async (t) => {
     const m = await mutant(find, replace);
-    assert.equal(refuses(B, t), true, 'the real code refuses');
+    // No catch anywhere: a throwing mutant fails the test. `true` is the exact positive refusal signal, `false` full acceptance;
+    // anything else (another refusal code, another classifier result) is neither and fails.
+    assert.equal(refuses(B, t), true, 'the real code refuses with the exact signal');
     assert.equal(refuses(m, t), false, 'the mutant lets it through');
   });
 }
 for (const [name, find, replace, make] of MUTANTS) {
   test(`mutation: ${name} — the mutant accepts the defect, the real checker refuses it`, async (t) => {
     const m = await mutant(find, replace);
-    const { x, text = x.text, code } = make(t);
+    const { x, text = x.text, code, rest = [] } = make(t);
     assert.ok(codes(B.debateCheck(text, { bundleDir: x.bundle, repo: REPO })).includes(code), `real checker refuses with ${code}`);
-    assert.ok(!codes(m.debateCheck(text, { bundleDir: x.bundle, repo: REPO })).includes(code), `mutant no longer refuses with ${code}`);
+    // No catch: a mutant that throws fails here, never counts as a kill. The mutant must return normally and accept the
+    // defect: no error at all, or (layered checks, named per entry in `rest`) exactly the other checks' codes, never `code`.
+    const mr = m.debateCheck(text, { bundleDir: x.bundle, repo: REPO });
+    assert.deepEqual(codes(mr), rest, `mutant accepts the defect: ${JSON.stringify(mr.errors).slice(0, 300)}`);
+    assert.equal(mr.ok, rest.length === 0);
   });
 }
 const START_MUTANTS = [
@@ -895,6 +937,8 @@ const START_MUTANTS = [
     (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'waived', 'Out of scope.', 'no']] }) }), code: 'debate_disposition_pending' })],
   ['pending disposition', "if (placeholder(row.resolution)) return ['debate_disposition_pending'", "if (false) return ['debate_disposition_pending'",
     (t) => { const x = unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', '', 'no']] }) }); return { x, code: 'debate_disposition_pending' }; }],
+  ['`<...>` text is a placeholder resolution', 'angleMarkup(v);', 'false;',
+    (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', 'see <fill in> later', 'no']] }) }), code: 'debate_disposition_pending' })],
   ['attestation hash at START', "if (start.debate_attestation_sha256 !== got.sha256) add('debate_attestation_changed'", "if (false) add('debate_attestation_changed'",
     (t) => { const x = converged(t); const changed = B.serializeAttestation({ ...x.att, metrics: { ...x.att.metrics, minutes: 99 } }); return { x, lines: [changed], code: 'debate_attestation_changed' }; }],
   ['policy applicability', "if (!debateLegacyApproval(start)) add('debate_policy_missing'", "if (false) add('debate_policy_missing'",
@@ -910,12 +954,12 @@ const START_MUTANTS = [
     (t) => { const narr = withResult(narrative({ rows: [['P3', 'decided', 'Adopt B.', 'yes']] }), 'UNRESOLVED'); const D = digestOf(narr);
       return { x: unresolved(t, { narr, r2: { plan_version: 'v3', plan_digest: 'sha256:' + 'c'.repeat(64), verdict: 'CHANGES_REQUESTED' }, r3: { plan_version: 'v2', plan_digest: D, verdict: 'AGREE', request_id: 'req-3' } }), code: 'debate_reconfirm_required' }; }],
   ['START needs the attestation hash', "if (!nonEmpty(start.debate_attestation_sha256)) { put('debate_attestation_missing'", "if (false) { put('debate_attestation_missing'",
-    (t) => { const x = converged(t); return { x, startOver: { debate_attestation_sha256: undefined }, code: 'debate_attestation_missing' }; }],
+    (t) => { const x = converged(t); return { x, startOver: { debate_attestation_sha256: undefined }, code: 'debate_attestation_missing', rest: ['debate_attestation_changed'] /* layered: an absent hash also differs from the line's */ }; }],
 ];
 for (const [name, find, replace, make] of START_MUTANTS) {
   test(`mutation (START): ${name} — the mutant accepts the defect, the real start-check refuses it`, async (t) => {
     const m = await mutant(find, replace);
-    const { x, lines, code, noStartHash, startOver, ancestorLink } = make(t);
+    const { x, lines, code, noStartHash, startOver, ancestorLink, rest = [] } = make(t);
     if (ancestorLink && win) return;
     const dir = x.att ? retain(t, x) : null;
     if (ancestorLink) {
@@ -927,8 +971,9 @@ for (const [name, find, replace, make] of START_MUTANTS) {
     }
     const s = noStartHash ? JSON.stringify({ run_id: 'r1', event: 'START', approved_plan_digest: x.D, approved_at: AFTER, approved_by: 'o' }) : startLine(x, startOver);
     const text = planText(x.narr, [...(lines ?? (x.line ? [x.line] : [])), s]);
-    assert.ok(codes(B.startCheck(text, { runId: 'r1', now: NOW, bundleDir: dir, repo: REPO })).includes(code));
-    assert.ok(!codes(m.startCheck(text, { runId: 'r1', now: NOW, bundleDir: dir, repo: REPO })).includes(code));
+    assert.ok(codes(B.startCheck(text, { runId: 'r1', now: NOW, bundleDir: dir, repo: REPO })).includes(code), `real start-check refuses with ${code}`);
+    const mr = m.startCheck(text, { runId: 'r1', now: NOW, bundleDir: dir, repo: REPO });
+    assert.deepEqual(codes(mr), rest, `mutant accepts the defect: ${JSON.stringify(mr.errors).slice(0, 300)}`);
   });
 }
 
@@ -1401,7 +1446,7 @@ function refParse(text, expect) {
     let last = -1;
     for (const k of f.keys) { const at = order.indexOf(k); if (at <= last) return NO; last = at; }
     const v = f.obj;
-    if (typeof v.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(v.id) || ids.has(v.id)) return NO;
+    if (typeof v.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(v.id) || v.id === 'LIMIT' || ids.has(v.id)) return NO;
     ids.add(v.id);
     if (!['conceded', 'confirmed', 'maintained', 'new'].includes(v.status)) return NO;
     if ('severity' in v ? !['blocker', 'major', 'minor'].includes(v.severity) : v.status === 'new') return NO;
@@ -1426,7 +1471,7 @@ test('differential: the checker accepts EXACTLY what an independent reference pa
   const expect = { request_id: 'req-1', plan_version: 'v1', plan_digest: R_D };
   const base = () => {
     const findings = Array.from({ length: Math.floor(rnd() * 5) }, (_, k) => {
-      const f = { id: rnd() < 0.97 ? `P${k + 1}` : pick(['P 1', '', '-x', `P${k}`]), status: pick(['conceded', 'confirmed', 'maintained', 'new', 'new']) };
+      const f = { id: rnd() < 0.96 ? `P${k + 1}` : pick(['P 1', '', '-x', `P${k}`, 'LIMIT', 'LIMIT']), status: pick(['conceded', 'confirmed', 'maintained', 'new', 'new']) };
       if (f.status === 'new' || rnd() < 0.3) f.severity = pick(['blocker', 'major', 'minor', 'minor']);
       if (rnd() < 0.5) f.note = text(Math.floor(rnd() * 40));
       return f;
@@ -1679,4 +1724,138 @@ function manyRounds(t, n) {
 test('[c-bounds] 64 attempted rounds verify; 65 are refused', (t) => {
   assert.deepEqual(pre(manyRounds(t, 64)).errors, []);
   assert.ok(codes(pre(manyRounds(t, 65))).includes('debate_attestation_invalid'));
+});
+
+// ================================================================== attempt C Round 1 repair (PR #105): bounded work, the reserved LIMIT id, pinned bounds
+// Timing: a generous fixed bound. Every input below took tens of seconds (quadratic) or crashed on 884a8fe/17efec3; the
+// linear code takes milliseconds, so LINEAR_MS is far above any loaded-machine noise and far below the quadratic cost.
+const LINEAR_MS = 3000;
+const timed = (fn) => { const t0 = process.hrtime.bigint(); const v = fn(); return { v, ms: Number(process.hrtime.bigint() - t0) / 1e6 }; };
+const MIB = 1024 * 1024;
+const CAP = B.EVIDENCE_MAX_BYTES ?? 16 * MIB; // guarded so RED fails per test, not at load
+test('[c1-hang-a] placeholder is linear: 300,000 `<` in a resolution or an exception reason is concrete and fast; `<...>` stays a placeholder', (t) => {
+  const lts = '<'.repeat(300_000);
+  const a = timed(() => pre(unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', lts, 'no']] }) })));
+  assert.deepEqual(a.v.errors, []);
+  assert.deepEqual(a.v.pending, [], 'a `<` with no later `>` is not markup');
+  assert.ok(a.ms < LINEAR_MS, `resolution: ${a.ms} ms`);
+  const b = timed(() => pre(skipped(t, { carrier: { exception: 'SKIPPED', reason: lts, exceptionAck: B.SKIP_ACK } })));
+  assert.deepEqual(b.v.errors, []);
+  assert.ok(b.ms < LINEAR_MS, `exception reason: ${b.ms} ms`);
+  const pending = (res) => pre(unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', res, 'no']] }) })).pending;
+  for (const res of ['<fill in>', 'see <x> later', 'a<b>c', '<<>', '<>']) assert.deepEqual(pending(res), ['P3'], res);
+  for (const res of ['a > b < c', 'x<y', '>only<', 'a -> b']) assert.deepEqual(pending(res), [], res);
+});
+test('[c1-hang-c] the narrative scans are linear: one line of 65,536 `<!--` then `-->`, 160,000 blank lines, a 60,000-space policy value', (t) => {
+  const comments = withResult(narrative({ body: `${'<!--'.repeat(65_536)}-->` }), 'CONVERGED');
+  const a = timed(() => pre(converged(t, { narr: comments })));
+  assert.deepEqual(a.v.errors, [], 'every `<!--` closes on its line');
+  assert.ok(a.ms < LINEAR_MS, `hidden markup: ${a.ms} ms`);
+  const blank = withResult(narrative({ body: `Do it.${'\n'.repeat(160_000)}End.` }), 'CONVERGED');
+  const x = converged(t, { narr: blank });
+  const b = timed(() => pre(x));
+  assert.deepEqual(b.v.errors, []);
+  assert.ok(b.ms < LINEAR_MS, `debate_policy over blank lines: ${b.ms} ms`);
+  const c = timed(() => sc(planText(x.narr, [x.line, startLine(x)]), retain(t, x)));
+  assert.deepEqual(codes(c.v), []);
+  assert.ok(c.ms < LINEAR_MS, `START debate_policy over blank lines: ${c.ms} ms`);
+  const spaced = withResult(narrative({ body: `debate_policy:${' '.repeat(60_000)}x y` }), 'CONVERGED');
+  const d = timed(() => pre(converged(t, { narr: spaced })));
+  assert.ok(codes(d.v).includes('debate_policy_missing'), 'a second header line is refused');
+  assert.ok(d.ms < LINEAR_MS, `debate_policy value backtracking: ${d.ms} ms`);
+});
+test('[c1-policy] differential: the linear debate_policy reader never newly routes a plan to legacy and never newly accepts one', () => {
+  assert.equal(typeof B.debatePolicy, 'function', 'the reader is exported for this differential');
+  const old = (narr) => { const found = [...String(narr).replace(/\r\n?/g, '\n').matchAll(/^\s*debate_policy:\s*(\S*)\s*$/gm)].map((m) => m[1]); return { value: found.length === 1 ? found[0] : null, count: found.length }; };
+  let seed = 0x9011c4;
+  const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x ^= x + Math.imul(x ^ (x >>> 7), 61 | x); return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+  const TOKENS = ['debate_policy:', 'debate_policy: 2', ' ', '\t', '\n', '\r\n', '\r', ' ', ' ', ' ', '\v', '2', '3', 'x', '# h', ':'];
+  let same = 0;
+  for (let k = 0; k < 20_000; k += 1) {
+    const narr = Array.from({ length: 1 + Math.floor(rnd() * 10) }, () => TOKENS[Math.floor(rnd() * TOKENS.length)]).join('');
+    const o = old(narr), n = B.debatePolicy(narr);
+    if (o.count > 0) assert.ok(n.count > 0, `newly legacy: ${JSON.stringify(narr)}`);
+    if (n.count === 1 && n.value === '2') assert.deepEqual(o, n, `newly accepted: ${JSON.stringify(narr)}`);
+    if (o.count === n.count && o.value === n.value) same += 1;
+  }
+  assert.ok(same > 15_000, `the readers agree on ordinary input (${same} of 20,000)`);
+  for (const h of ['debate_policy: 2', '  debate_policy:\t2  ', 'debate_policy:2']) assert.deepEqual(B.debatePolicy(`---\n${h}\n---\n`), { value: '2', count: 1 }, h);
+});
+test('[c1-files-keys] evidence reads are bounded by the four evidence names: 99,000 `files` keys are one refusal, not 99,000 reads', (t) => {
+  const x = converged(t);
+  const att = JSON.parse(x.line.slice(27, -4));
+  const files = { ...att.rounds[1].files };
+  for (let k = 0; k < 99_000; k += 1) files[`k${k}`] = att.rounds[1].files.events;
+  const many = timed(() => pre(x, planText(x.narr, [B.serializeAttestation({ ...att, rounds: [att.rounds[0], { ...att.rounds[1], files }] })])));
+  assert.ok(many.v.errors.length < 10, `work is bounded by the four names, not by the key count (${many.v.errors.length} errors)`);
+  assert.ok(codes(many.v).includes('debate_attestation_invalid'), 'an unknown evidence name is refused');
+  assert.ok(many.ms < LINEAR_MS, `${many.ms} ms`);
+});
+test('[c1-files-size] a file over 2 GiB (sparse, never read): debate-check and start-check answer typed JSON with exit 1, no stack trace', { skip: POSIX_ONLY }, (t) => {
+  const huge = converged(t);
+  const d = tmp(t);
+  const plan = join(d, 'p.md');
+  writeFileSync(plan, huge.text);
+  truncateSync(join(huge.bundle, 'r2', 'events.jsonl'), 2 ** 31 + 1);
+  const cli = run('debate-check', '--plan', plan, '--bundle', huge.bundle, '--repo', REPO);
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.ok(JSON.parse(cli.stdout).errors.some((e) => e.code === 'debate_evidence_mismatch'), cli.stdout.slice(0, 300));
+  const repo = tmp(t, 'debate-repo-');
+  assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0);
+  const y = converged(t, { over: { workdir: repo }, r1: { workdir: repo }, r2: { workdir: repo } });
+  const planFile = join(repo, 'plan.md');
+  writeFileSync(planFile, y.text);
+  const kept = run('debate-retain', '--plan', planFile, '--bundle', y.bundle, '--repo', repo);
+  assert.equal(kept.status, 0, kept.stdout + kept.stderr);
+  const where = JSON.parse(kept.stdout).retained;
+  writeFileSync(planFile, planText(y.narr, [y.line, startLine(y)]));
+  const startCli = () => spawnSync(process.execPath, [CLI, 'start-check', '--plan', planFile, '--run-id', 'r1', '--repo', repo], { encoding: 'utf8' });
+  truncateSync(join(where, 'r2', 'events.jsonl'), 2 ** 31 + 1);
+  const st = startCli();
+  assert.equal(st.status, 1, st.stderr);
+  assert.ok(JSON.parse(st.stdout).errors.some((e) => e.code === 'debate_evidence_mismatch'), st.stdout.slice(0, 300));
+  truncateSync(join(where, 'attestation.line'), 2 ** 31 + 1);
+  const st2 = startCli();
+  assert.equal(st2.status, 1, st2.stderr);
+  assert.ok(JSON.parse(st2.stdout).errors.some((e) => e.code === 'debate_evidence_mismatch'), st2.stdout.slice(0, 300));
+});
+test('[c1-files-caps] the per-file (16 MiB) and total (64 MiB) evidence caps are typed refusals checked before any read', (t) => {
+  assert.deepEqual([B.EVIDENCE_MAX_BYTES, B.EVIDENCE_TOTAL_MAX_BYTES], [16 * MIB, 64 * MIB], 'the documented caps');
+  const big = converged(t);
+  truncateSync(join(big.bundle, 'r2', 'events.jsonl'), CAP + 1);
+  const r = pre(big);
+  assert.ok(r.errors.some((e) => e.code === 'debate_evidence_mismatch' && /at most 16777216 bytes/.test(e.message)), JSON.stringify(r.errors).slice(0, 300));
+  const total = converged(t);
+  for (const f of ['r1/events.jsonl', 'r2/events.jsonl', 'r1/brief.txt', 'r2/brief.txt']) truncateSync(join(total.bundle, f), CAP);
+  const rt = pre(total);
+  assert.ok(rt.errors.some((e) => e.code === 'debate_evidence_mismatch' && /67108864 bytes in total/.test(e.message)), JSON.stringify(rt.errors).slice(0, 300));
+});
+test('[c1-limit-id] LIMIT is reserved: a counterpart finding named LIMIT is refused, so one owner row cannot settle two obligations', (t) => {
+  assert.equal(B.parseResponse(resp({ findings: [{ id: 'LIMIT', status: 'new', severity: 'blocker' }] })).code, 'debate_response_invalid');
+  for (const id of ['limit', 'LIMIT2', 'P-LIMIT']) assert.equal(B.parseResponse(resp({ findings: [{ id, status: 'new', severity: 'blocker' }] })).ok, true, id);
+  const rows = [['LIMIT', 'accept_risk', 'The owner accepts the incomplete review.', 'no']];
+  const x = unresolved(t, { narr: narrative({ rows }), r1: { findings: [{ id: 'LIMIT', status: 'new', severity: 'blocker' }] }, r2: { status: 'failed' }, over: { incomplete_review: true },
+    findings: [FIND({ id: 'LIMIT', severity: 'blocker', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] });
+  assert.ok(codes(pre(x)).includes('debate_response_invalid'), 'the round naming LIMIT is refused');
+  const common = tmp(t, 'debate-common-');
+  const dir = B.debateLocator(common, TICKET, DEBATE_ID);
+  const kept = B.retainBundle(x.text, { from: x.bundle, to: dir, root: common, repo: REPO });
+  const got = kept.ok ? codes(sc(planText(x.narr, [x.line, startLine(x)]), dir)) : codes(kept);
+  assert.ok(got.includes('debate_response_invalid'), `a blocker named LIMIT and the incomplete review never START on one row: ${got}`);
+});
+test('[c1-bounds] JSON_BOUNDS are pinned: exactly N passes and N+1 is refused for depth, nodes, array, string and key', () => {
+  assert.deepEqual({ ...B.JSON_BOUNDS }, { depth: 64, nodes: 100000, array: 1024, string: 1000000 });
+  const p = B.jsonBoundsProblem;
+  assert.equal(p(DEEP_ARR(64, 1)), null, 'depth 64');
+  assert.match(p(DEEP_ARR(65, 1)) ?? '', /deeper than 64/);
+  assert.equal(p(Object.fromEntries(Array.from({ length: 99_999 }, (_, i) => [`k${i}`, 0]))), null, '100,000 nodes (the root and 99,999 values)');
+  assert.match(p(Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, 0]))) ?? '', /more than 100000/);
+  assert.equal(p(new Array(1024).fill(0)), null, '1,024 elements');
+  assert.match(p(new Array(1025).fill(0)) ?? '', /longer than 1024/);
+  assert.equal(p('x'.repeat(1_000_000)), null, 'a 1,000,000-character string');
+  assert.match(p('x'.repeat(1_000_001)) ?? '', /string longer than 1000000/);
+  assert.equal(p({ ['k'.repeat(1_000_000)]: 1 }), null, 'a 1,000,000-character key');
+  assert.match(p({ ['k'.repeat(1_000_001)]: 1 }) ?? '', /key longer than 1000000/);
+  for (const v of [Infinity, -Infinity, NaN]) assert.equal(p({ a: [v] }), 'a non-finite number', String(v));
+  assert.equal(p({ a: [1e308, -0, 0.5] }), null);
 });
