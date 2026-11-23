@@ -44,7 +44,10 @@ approved plan immediately once the host permits implementation.
 In an interactive session the orchestrator owns the Plan Mode lifecycle.
 `EnterPlanMode` and `ExitPlanMode` are deferred tools in the main session, so
 the first action of PLAN is to load them, when they are not already callable,
-with ToolSearch query `select:EnterPlanMode,ExitPlanMode`. Then write the
+with ToolSearch query `select:EnterPlanMode,ExitPlanMode`. Then run the read-only
+telemetry preflight `run-log.mjs check --repo <TARGET_REPO> --ticket <TICKET>`
+([observability.md](observability.md); an exit 1 is a recorded degradation, never a
+blocker), write the
 predeclared PLAN timing markers and invoke `EnterPlanMode` before any PLAN
 research or critique, unless the session is already in that mode. The tools are
 unavailable only when that query returns neither tool (a headless carrier) or
@@ -117,7 +120,7 @@ the plan metadata.
 
 Use it exactly — same headings, same order, so every plan reads the same way.
 
-```markdown
+````markdown
 # Plan — <TICKET>: <ticket title>
 
 <!-- the YAML header above this body carries:
@@ -184,10 +187,18 @@ no producer/consumer boundary changes.>
 ### Execution DAG
 | ID | Owner | Step (plain words) | Files touched | Depends on | Exclusive resources |
 |---|---|---|---|---|---|
-| contract | orchestrator | Materialize the approved contract artifact | <real path> | — | generator outputs |
-| backend | backend worker | Build provider and provider tests | <real paths> | contract | <database/none> |
-| frontend | frontend worker | Build consumer and consumer tests | <real paths> | contract | <output dir/none> |
-| integration | orchestrator | Join and verify the real integration | <real paths> | backend, frontend | local app + datastore |
+| contract | orchestrator | Materialize the approved contract artifact | `<real path>` | — | generator outputs |
+| backend | backend worker | Build provider and provider tests | `<real path>`, `<real dir/>` | contract | <database/none> |
+| frontend | frontend worker | Build consumer and consumer tests | `<real path>`, `<real dir/>` | contract | <output dir/none> |
+| integration | orchestrator | Join and verify the real integration | `<real path>` | backend, frontend | local app + datastore |
+
+<Files touched: explanation for the approver only; the fenced block below is the scope.>
+
+```scope-contract
+{"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]}
+```
+
+contract body: <the `contract body: sha256:<hex>` line printed by `check-pr-scope.mjs contract`>
 
 **Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
 rationale: <independent boundaries · shared contracts · acceptance criteria per
@@ -222,6 +233,7 @@ security-pairs sha256:<hex>
 |---|---|---|---|---|---|
 | <checkout total calculation> | <business · data-integrity: wrong charge> | <unit + `[kind:negative]` test; VAPT-ABUSE-04; primary review> | <PROVE> | <a repair touches pricing> | <planned> |
 | <edge rate limit on /login> | <security: credential stuffing> | <Cloudflare rate-limiting rule, read-only API check (`cloudflare` skill)> | <external — needs: read-only Cloudflare API token scoped to the zone> | <the rule or route changes> | <unverified: no token in this run> |
+| <old consumers · cached clients · deploy order of the changed shared contract> | <regression · data-integrity: a deployed or cached client still sends/expects the previous shape> | <`contract-consumer` test kind against the previous shape (`shared-contract` tag); Integration Contract frontend compatibility> | <PROVE> | <the contract shape or deploy order changes> | <planned> |
 
 Not applicable: <check>: <one-line reason>, ...
 
@@ -283,7 +295,7 @@ without the resolution is pending and blocks START.
      approved_plan_digest, approved_at (ISO-8601) and approved_by (the human
      approver, required). Every later event carries the same run_id. -->
 <!-- RUN-STATE:END -->
-```
+````
 
 When the human approves an execution, append `START` before another event using
 the run ID already created by workflow telemetry. A later execution of the same
@@ -322,6 +334,12 @@ adds the checks the catalog does not hold.
 - **Never claim equivalent coverage without evidence.** A check that covers a
   row names what it runs and what it proves; "covered by review" needs the
   review item that covers it.
+- **Old consumers, cached clients and deploy order.** When the change touches a
+  shared contract (the Integration Contract is triggered, or the `shared-contract`
+  risk label or test-trigger tag applies), section 3b has a row for old
+  consumers, cached clients and deploy order, or lists it under `Not applicable:`
+  with the reason. Enforcement is the orchestrator-enforced 3b completeness rule
+  above; no script checks it.
 - **Status vocabulary:** `verified`, `partially verified`, `unverified`,
   `failed` (it ran and did not pass), `not applicable`, plus `planned` before
   PROVE runs. Update the status in RUN-STATE (`PROVE` event), never by editing
@@ -569,3 +587,68 @@ repair cycle.
 A file the contract needs but the plan lacks means the plan was wrong. That is a
 **material divergence**: it goes back through plan mode for re-approval and
 updates the artifact. Do not silently build past the plan the user approved.
+
+**The scope contract.** The Files touched column is explanation for the approver and is read by no script; the fenced `scope-contract` block is the authoritative scope.
+Generate it rather than typing it: `node scripts/check-pr-scope.mjs contract
+--mode engine --dag <dag.json> --supporting tests` (planned is the DAG write set)
+or `node scripts/check-pr-scope.mjs contract --mode manual --planned src/checkout
+--supporting tests`. It prints the three-line block, the `contract body:` line and
+the four-backtick quote for the ExitPlanMode request. A manual-mode example:
+
+````
+```scope-contract
+{"v":1,"mode":"manual","dag":null,"planned":["src/checkout","src/checkout/page.tsx"],"supporting":["tests"]}
+```
+
+contract body: sha256:<64 hex of the JSON line>
+````
+
+The rules, which `lint --plan` checks before approval and `check` re-checks on the
+approved file, the RUN-STATE body included:
+
+- exactly one block, at column 0, before RUN-STATE, with a blank line directly
+  before and after it, and exactly one `contract body:` line equal to the SHA-256
+  of the JSON line;
+- no other fenced code block anywhere in the plan (examples go in 4-space
+  indented code or inline code), and no run of three backticks or tildes before
+  the block;
+- the name `scope-contract` appears nowhere else, paths included;
+- front matter (a first line starting with `---` or `+++`) closes with the same
+  token before the block, with no `...` line; no `$$` before the block; an HTML
+  block such as `<script>`, `<!--` or `<![CDATA[` opened before the block ends
+  before it;
+- no control character other than TAB and line ends, no lone CR and no BOM
+  anywhere; CRLF line ends are accepted;
+- a plan with the earlier bare `scope-contract:` line, or with no block, is
+  refused (`scope_contract_missing`) and needs a new plan version re-approved
+  through `ExitPlanMode`; it is never converted silently.
+
+Every entry is a repository path with no trailing slash that covers itself and
+everything below it. `planned` is the DAG write set in engine mode (globs as the
+DAG carries them) and literal paths in manual mode. `supporting` entries end in
+`tests`, `test`, `__tests__`, `spec`, `e2e`, `fixtures`, `__fixtures__` or `docs`
+and never overlap a planned entry (checked segment by segment, globs included); a
+file under one counts as supporting only when it is a plain, non-executable file
+(git mode not 100755, no `#!` first line), not a manifest or lockfile, and under
+`docs` only documentation or an asset (md, mdx, markdown, txt, rst, adoc, png,
+jpg, jpeg, gif, svg, webp, ico, pdf, csv). Under a tests-class entry any other
+plain file counts as supporting by design and is listed for the reviewer.
+Supporting paths are outside the Design Contract: on an engine run with security
+policy 2 the engine's reassess reports them as out-of-plan paths (REAPPROVAL), so
+put a test directory that will change into the DAG writes; supporting is most
+useful in manual mode. In manual mode `[ ]` and `{ }` are literal characters
+(`app/[id]/page.tsx`); `*` and `?` are refused. Entries are printable ASCII
+without `` ` ``, `|`, `"`, `<`, `>` or `&`.
+
+**Approval of the scope (owner policy, terminal only).** Scope approval is valid only when the complete, untruncated, literal ExitPlanMode request is presented in a trusted terminal, without active rendering or control-sequence ambiguity, and the canonical contract is verified byte for byte with `contract --verify-quote`.
+The ExitPlanMode request quotes the block inside a four-backtick fence (the
+`contract` helper prints it); for `--verify-quote` the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that, nothing else (a precise input definition, not an attempt to detect contradictory prose). Browser, GitHub and editor previews are never valid
+approval surfaces. A successful `--verify-quote` does not by itself prove what the
+owner saw and does not authorize execution: native ExitPlanMode approval remains
+mandatory. If the approval surface cannot meet the trusted-terminal requirement,
+fail closed and report exactly `scope approval NOT verified: the approval surface
+does not meet the trusted-terminal requirement; do not build`, never a verified
+approval. Raw HTML in a plan is no longer refused by `check-pr-scope.mjs`: a
+viewer that renders it is excluded by this policy, not by code. The mode is part of the approved text: a run whose engine init failed
+stays engine mode until a new plan version with `"mode":"manual"` is re-approved
+through `ExitPlanMode`.

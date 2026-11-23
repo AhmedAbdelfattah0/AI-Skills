@@ -24,7 +24,9 @@ export const ENGINE_POLICY_VERSION = 1;
  * test kinds (config.testKinds), so every other run is still version 1, byte for byte.
  */
 export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
-  3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }) });
+  3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }),
+  5: Object.freeze({ pinnedBase: true }), 6: Object.freeze({ testKinds: true, pinnedBase: true }),
+  7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }) });
 
 /** The version `init` records for a run that activates test kinds (design rev 5 section 5). */
 export const TEST_KINDS_POLICY_VERSION = 2;
@@ -39,6 +41,17 @@ export const SECURITY_OBLIGATIONS_POLICY_VERSION = 3;
 /** The version `init` records: test kinds and/or a format-3 security block. */
 export const recordedVersion = ({ testKinds = false, obligations = false } = {}, current = ENGINE_POLICY_VERSION) =>
   (obligations ? (testKinds ? 4 : SECURITY_OBLIGATIONS_POLICY_VERSION) : testKinds ? TEST_KINDS_POLICY_VERSION : current);
+
+/**
+ * S-12 (ASTF-6): a run with config.pinnedBase reads every base from the pinned remote merge base (S.base), never from a local
+ * ref, so it records the version of its other flags plus pinnedBase: 1 -> 5, 2 -> 6, 3 -> 7, 4 -> 8. An engine without S-12
+ * supports none of 5-8 and refuses such a run (policy_version_unsupported) instead of re-reading it as a local-base run.
+ * Every run without the flag keeps 1-4, byte for byte.
+ */
+export const PINNED_BASE_VERSION_OF = Object.freeze({ 1: 5, 2: 6, 3: 7, 4: 8 });
+/** The version a pinned-base run records for `version` (its other flags); a version with no pinned row is refused. */
+export const pinnedVersion = (version) => (Object.hasOwn(PINNED_BASE_VERSION_OF, String(version)) ? PINNED_BASE_VERSION_OF[version]
+  : (() => { throw Object.assign(new Error(`policy_version_unsupported: no pinned-base policy version for policy_version ${JSON.stringify(version)}`), { code: 'policy_version_unsupported' }); })());
 
 /** The version a state without the key is read as: the oldest supported one. */
 export const LEGACY_POLICY_VERSION = 1;

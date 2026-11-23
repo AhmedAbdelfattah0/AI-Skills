@@ -34,6 +34,32 @@ a repair.
 Finish these checks before announcing REVIEW or appending its start event:
 
 - the approved plan and Design Contract still match the intended change;
+  run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]`
+  on the candidate before announcing REVIEW (manual flow too) and give the scope
+  record to the primary reviewer. It reads only the plan's one fenced
+  `scope-contract` block (see [plan.md](plan.md)), never the Files touched
+  table, and classifies every candidate path as planned, supporting or material.
+  The ExitPlanMode request quoted the block inside a four-backtick fence; the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that, then runs `node scripts/check-pr-scope.mjs contract --verify-quote <saved-quote> --plan <plan> --record <scope.json>`, and the reviewer re-runs it. The saved file must hold the quote and nothing else (whitespace-only lines and CRLF aside); any other line fails. This is a precise input definition, not an attempt to detect contradictory prose.
+  It byte-compares the quoted body with the plan block and `record.contract`.
+  Verification does not by itself prove what the owner saw and does not authorize
+  execution: native ExitPlanMode approval remains mandatory, and it counts only
+  when the complete, untruncated, literal request was presented in a trusted
+  terminal (browser, GitHub and editor previews never count). If the approval
+  surface could not meet that, report `scope approval NOT verified: the approval
+  surface does not meet the trusted-terminal requirement; do not build` and stop.
+  Raw HTML in the plan is no longer refused by the check; such viewers are
+  excluded by that policy. The reviewer reads the block and checks every supporting path, which lies outside the Design Contract (on an
+  engine policy-2 run reassess reports it as out-of-plan; supporting is most
+  useful in manual mode). Exit 1 (a material
+  path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through
+  `ExitPlanMode`. An engine-mode contract always needs `--dag` (`dag_required`),
+  also after a failed engine init; a manual-mode contract refuses `--dag` and any
+  engine evidence of the run. A contract or mode change is a plan change: re-approval through `ExitPlanMode`.
+  Exit 2 or 3 is never a pass. When the plan text itself must change (a missing,
+  ambiguous, noncanonical or invalid contract block), the remedy is re-approval
+  through `ExitPlanMode`, since an edited plan changes the digest and gives
+  `approval_mismatch`; fix and rerun only a wrong flag, path or git state.
+  Exit 0 proves only the path set, not the behaviour inside a planned file;
 - the Integration Contract digest, generated outputs, provider conformance and
   consumer conformance pass when a producer/consumer seam changed;
 - every CI-equivalent command runnable locally has passed;
@@ -190,7 +216,7 @@ and rule-catalogue work:
 - under security policy 2, return one primary `rule_row` per effective pair,
   `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
   dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
-  the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
+  the cited fact holds (and the surface's exact file is where the boundary's code lives, not a decoy), `FAIL` to dispute it. A counterpart that disputes a drop
   gives its finding `subject_id: '<boundary>:<control>'`, which, on an original
   review, records the same run-wide dispute (see
   [security-risk.md](security-risk.md) section 9). No file is exempted by its

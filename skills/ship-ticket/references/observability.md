@@ -6,21 +6,153 @@ not part of the reviewed candidate.
 ## Storage and privacy
 
 Use `scripts/run-log.mjs` from the installed `ship-ticket` folder. It resolves the
-target repository's Git metadata directory and appends to:
+target repository's shared Git directory (`git rev-parse --git-common-dir`) and appends to:
 
 ```text
-<git-metadata>/ai-skills/ship-ticket/<TICKET>.jsonl
+<git-common-dir>/ai-skills/ship-ticket/<TICKET>.jsonl
 ```
 
-This location survives branch switches, does not dirty the worktree, and remains
+There is one file per ticket for the whole repository: the main checkout and every
+linked worktree write the same file, so a run whose phases are logged from two
+worktrees after S5 is not split. No command reads another worktree's files. A linked
+worktree's pre-S5 history is in no figure, and it is kept only by leaving that worktree in
+place (see the interim rule below). `--repo` may be any directory inside the work tree. This
+location survives branch switches, does not dirty the worktree, and remains
 available while waiting for approval, CI, or tracker operations. It is local and
-is not pushed. Never put source text, prompts, ticket descriptions, credentials,
+is not pushed.
+
+**The shared log is the only telemetry source (S5 cutover).** Every reader and writer uses
+the shared `<TICKET>.jsonl` above, and nothing else: no runtime union, no migration.
+
+Earlier versions wrote to `git rev-parse --git-path ai-skills/ship-ticket`. In a linked
+worktree that is `<git-common-dir>/worktrees/<name>/ai-skills/ship-ticket`, a per-worktree
+log. Those files are now a READ-ONLY ARCHIVE. They are never written, moved, copied,
+deleted, or merged into any figure. In the main checkout the old path IS the common dir,
+so its pre-S5 history already is the shared log and stays fully visible.
+
+Three commands read a linked worktree's archive, always THIS worktree's own, never another
+worktree's, and always through one safe bounded read: an lstat first, a regular file only,
+`O_NOFOLLOW|O_NONBLOCK`.
+- Every normal command reads it only for `legacy_present`: a newline count over at most the
+  first MiB.
+- `abandon` reads at most 64 MiB to find a valid legacy start row of the run.
+- `run-log.mjs legacy` reads at most 64 MiB for the audit.
+
+None of these reads produces a figure. For `legacy_present`, the read is that lstat of
+`<TICKET>.jsonl` and, when it is a regular file, the 1 MiB newline count. It reports `{files, lines | 'unavailable',
+errno?, truncated?}`, and anything that is not a regular file is
+`lines: 'unavailable', errno: 'not_regular'`. No command opens another worktree's
+archive. The carrier's REPAIR read is unchanged (see below).
+- `summary`, the integrity line and `check` report `legacy_present` when it is non-zero.
+- `check` lists it under `degraded`, with exit code 0: writes work.
+- Every `start`/`end` written in a worktree that has an archive of the ticket carries the
+  metric `legacy_worktree: true`, and every reader labels such a run
+  `partial_legacy: 'possible'`. Part of that run may be in the archive, which no figure
+  includes.
+
+**Runs that span the upgrade (AC2-C).** A run started in a linked worktree's pre-S5 log is
+not in the shared log, so this version cannot end its intervals.
+- `end` refuses with zero rows written: `event a has no start in the shared log; this
+  worktree has a pre-S5 log (<path>, <n> lines). A run started there cannot be ended by
+  this version: close it with the build that started it, or record that it was abandoned
+  with "run-log.mjs abandon --repo <repo> --ticket T --run-id R"`. In a worktree without
+  an archive the text stays `event a has no start in run R`.
+- `run-log.mjs abandon --repo <wt> --ticket T --run-id R [--reason
+  old_build_unavailable|superseded|unknown]` is allowed only when that worktree has an
+  archive of T. It is idempotent. It reads only this worktree's own archive of T, through
+  the safe bounded read (at most 64 MiB), to find a valid legacy START row of run R for
+  ticket T; that read produces no figure. Normal commands read the own archive only for
+  `legacy_present` (an lstat plus at most 1 MiB, newlines counted), and only
+  `run-log.mjs legacy` reads it in full (at most 64 MiB) for audit.
+  - It writes one reserved ACTIVITY pair to the shared log: name `legacy_abandoned`,
+    event id `legacy-abandoned.<12 hex>`, outcome `abandoned`. It is not a workflow
+    interval, so the recorded run outcome is not rewritten.
+  - Every reader shows that run with outcome `abandoned` (the recorded workflow outcome
+    stays as `recorded_outcome`) and counts it in `abandoned_runs`, never in
+    `completed_runs`. The eval report never treats it as an accepted ticket, and the
+    integrity line prints ` abandoned=<n>`. **Abandonment never means success.**
+- The name `legacy_abandoned` and event ids starting `legacy-abandoned` are reserved
+  (AC15, case-insensitive). Every other writer refuses them: `start`, `end`, `batch`,
+  `event` and `close`.
+- `abandon` refuses in two cases.
+  - First, when the own archive holds no well-formed legacy START row of run R for ticket
+    T. Each line is parsed whole, with an exact `run_id` field (not a substring, not a
+    metric), the run-log schema, `event: start` and the ticket of the file. A missing,
+    unreadable or non-regular archive (for example a directory named `<T>.jsonl`) refuses
+    too.
+  - Second, when the shared log holds a workflow interval of R that ended `complete`. This
+    is checked again inside the lock that writes the abandon rows, so a completion
+    committed meanwhile also refuses: a completed run is never abandoned.
+- The S5 continuation of such a run (new intervals after the upgrade) IS in the shared
+  log. Its figures are partial and labelled `partial_legacy: 'possible'`.
+
+**Audit of an archive (inspection only).** `run-log.mjs legacy --repo <worktree> [--ticket T]`
+prints that worktree's archive to the terminal, read-only: its rows, its warnings, and a summary computed
+over that file alone, labelled `scope: 'legacy-archive'`. It is never combined with the
+shared log. It uses the same safe read as `legacy_present`:
+- lstat first, a regular file only, never following a symbolic link, never blocking on a
+  FIFO;
+- at most 64 MiB; a larger file is reported `truncated: true, bytes_read`;
+- an unlistable directory is `status: 'unavailable'` with its errno, never an empty listing.
+
+That JSON is a READABLE COMPANION for inspection only. It is NOT a preservation of history,
+and its output must not be redirected onto an existing path. Its gaps:
+- S-04 measurement rows appear as zero rows;
+- invalid or torn lines are dropped;
+- a file over the limit is truncated.
+
+**Retention (interim rule).** A linked worktree that holds a pre-S5 run log must not be
+removed until its history is preserved by a faithful, integrity-verified raw archive.
+Until a separately approved archive helper is delivered, the only supported preservation
+is to LEAVE THE WORKTREE IN PLACE.
+
+Read-only legacy export: `run-log.mjs legacy` output, readable, inspection only, lossy, NOT a
+preservation of history. Verified raw archival preservation: NOT available until a separately
+approved archive helper unit is delivered and qualified; no document, runbook or command in
+this repository claims it.
+
+`run-log.mjs legacy --repo <wt> --ticket <T>` prints a readable companion to the terminal
+for inspection only. It omits S-04 rows, invalid or torn lines, and data over the read
+limit. It is NOT a preservation of history, and its output must not be redirected onto an
+existing path.
+
+No hand-written copy procedure is documented: a shell copy of git metadata could not be
+made safe by construction.
+
+**REPAIR authority stays per worktree.** The common log is telemetry and never authorises
+a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its
+row into a dedicated subdirectory of this worktree's own gitdir, `git rev-parse --git-path
+ai-skills/ship-ticket/review-auth/<TICKET>.jsonl`. No ticket name can address that
+directory: a ticket id has no `/`, so every shared write is a file directly in the log
+directory. Without engine state, the carrier reads a REVIEW start only from that file and,
+in a linked worktree, from its own pre-S5 `<TICKET>.jsonl` (no other worktree writes it).
+A row counts only when its `ticket` is exactly the requested ticket (case-sensitive), so a
+case-folding filesystem (APFS, NTFS) cannot alias one ticket's records into another's.
+Ticket ids ending in `.engine` or `.review-auth`, or equal to `review-auth` or `excluded`,
+are refused, compared case-insensitively. The earlier `<TICKET>.review-auth.jsonl` files
+of this branch's first repair are not read by anything and keep no authority. If the copy
+cannot be written, `start` exits 1 after the shared row is written, and REPAIR stays
+unauthorised.
+
+**Transitional upgrade note.** In the main checkout the old per-worktree path IS the common
+dir, so a REVIEW start that a pre-S5 version recorded there does not authorise a run-log
+REPAIR after the upgrade. Record a fresh REVIEW start (new event id, same
+`review_execution`) with this version, or rely on engine state. A REVIEW start in a linked
+worktree's own pre-S5 log keeps authorising there.
+
+**Mixed versions and rollback.** A version before S5 never reads the common log, except in
+the main checkout, where its old path is the common dir: there it reads and writes the
+common file itself, which holds only single-file history (nothing is ever copied into it).
+A pre-S5 build still running in a linked worktree keeps writing its own archive, which is
+invisible to S5 readers (`legacy_present` grows there). After a rollback, a linked
+worktree's old version stops seeing the events written since S5; they are not lost.
+Never put source text, prompts, ticket descriptions, credentials,
 URLs with tokens, reviewer prose, or command output in the log. Metrics are only
 short booleans, numbers, or enum-like labels.
 
 The run engine ([execution-harness.md](execution-harness.md)) writes its own
 events (`MARK`, resume and retry events) to a sibling file,
-`<git-metadata>/ai-skills/ship-ticket/<TICKET>.engine.jsonl`. It is not a timing
+`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.engine.jsonl` (per worktree). It is not a timing
 log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
 
 Measurement events (`run-log.mjs event`, `close`) are validated against a closed schema
@@ -31,7 +163,13 @@ verbatim to `<TICKET>.jsonl.lost-<offset>-<sha>[-<layout>].json` (the layout has
 place, so the loss stays visible. A complete but invalid line is never dropped: every write
 refuses until `run-log.mjs quarantine --repo <path> --ticket <key>` moves undecodable,
 malformed and invalid measurement lines to such a sidecar (with a `log_loss` record).
-Damaged legacy rows are not quarantined; they refuse writes as before.
+Since S5 (AC12) `quarantine` clears EVERY content-level state that makes writers refuse,
+to a fixed point: undecodable, malformed or invalid lines, unsupported schema, invalid
+records, ticket mismatches, orphan ends, second starts of an id, and ends whose order,
+duration, identity or carrier binding disagree with their start (the later row moves).
+Only the 64 MiB size limit is not cleared; archive or rotate that file by hand. Because the
+shared log serves every worktree, its damage blocks every worktree's writes, REVIEW starts
+included, until `quarantine` runs (from any worktree).
 
 Usage events (`usage.mjs`, carrier `usageLog`, the run engine) carry `source` (`carrier`,
 `engine`, `session` or `codex`; one source per execution, never double-counted) and `role`
@@ -103,6 +241,154 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs start \
 `<SHIP_TICKET_SKILL>` means the directory containing this skill's `SKILL.md`.
 Keep the same ticket and run ID for the entire execution, including later turns
 that resume a legitimate wait.
+
+### Preflight: `check`
+
+Before `EnterPlanMode`, run the read-only preflight once:
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs check --repo <TARGET_REPO> --ticket <TICKET>
+```
+
+It writes nothing (no probe file, no directory, no lock) and prints one JSON line
+`{ok, append_ready, resolved_dir, legacy_present, degraded?, reason?}`. Exit 0: telemetry can be
+written to `resolved_dir`. Exit 1, with `reason`: not a Git repository; an append to the
+shared `<TICKET>.jsonl` or to this worktree's `review-auth/<TICKET>.jsonl` could not
+succeed; the lock file is
+unreadable, malformed, held by another host (`lock_foreign_host`), or stale with an
+existing `<lock>.recovery` marker. These follow the same decision the next append's lock
+takes, using the same process probe; check mirrors it read-only, because the lock module
+has no read-only form. "Could succeed" is judged by `appendPreflight`, which mirrors the
+exact operations of an append, one function for `check`, `batch` prevalidation, a single
+REVIEW `start` and the authority copy itself:
+- the directory, or its nearest existing ancestor when `mkdir -p` would create it, is a
+  directory (not a regular file, not a dangling symbolic link) that is writable and
+  searchable;
+- an existing target directory is also readable, because it is opened to fsync a newly
+  created file;
+- the target, when present, is a regular file that is writable (not a directory);
+- `<file>.lock` would be accepted as above.
+
+Exit 1 also when the existing log would refuse writes (for example a torn tail,
+`incomplete_tail`; the next write or `quarantine` moves it aside). An exit 1 is a
+declared degradation of the run's telemetry: record it (`harness degraded`) and
+continue. It never blocks the ticket. `degraded` lists notes that do not stop
+writes: `legacy_present` (this worktree has a pre-S5 archive of the ticket; it is not read),
+`stale_lock_recoverable` (a dead writer's lock the next write recovers), `lock_held` (a
+live holder: the next write waits for it, up to 10 s), and
+`future_history` (a row of a run is more than 5 s in the future, see below).
+
+### Several intervals at once: `batch`
+
+
+A shell variable holding several `--metric` flags is one word in zsh, so the flags
+never reach the parser. Put the operations in a JSON file instead (or pass `-` and
+write them to stdin):
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs batch \
+  --repo <TARGET_REPO> --ticket <TICKET> --run-id <RUN_ID> --ops-file <ops.json>
+```
+
+`ops.json` is an array of
+`{"op": "start"|"end", "kind", "name", "event_id", "outcome"?, "metrics"?: {"key": value}}`.
+Metric values are typed exactly as `--metric key=value` types them and are never
+word-split, so `--` and spaces survive verbatim. A metric key must be a plain name;
+a key containing `=` is refused, never re-split. A numeric value must be finite (a
+400-digit number is refused, never stored as Infinity). Every op is validated before the
+first write; the ops then run in order and the first failure stops the batch. A
+batch is not atomic: ops already applied stay. A REVIEW start also needs its
+per-worktree authority copy: if `appendPreflight` says it could not succeed, the whole
+batch is refused before the first write, by the same decision `check` uses. A single
+REVIEW `start` is refused the same way, with zero rows. stdout is one JSON line, `{"applied": n}` or `{"applied": n, "failed":
+{"index": i, "reason": "...", "committed_shared": true|false, "authority_copy"?:
+"failed"|"pending"}}` (exit 1). `applied` counts every op whose row committed to the
+shared log, including a REVIEW start whose authority copy then failed
+(`committed_shared: true`, `authority_copy: "failed"`). Do not retry that op: its shared
+row exists, so a retry is refused as a duplicate. Record a fresh REVIEW start with a new
+event id instead. No command re-copies the authority row from the shared log, because the
+shared log does not record which worktree wrote a row, so a re-copy would be a new
+authority source. A single `start` reports the same case on stderr
+(`committed_shared=true authority_copy=failed`).
+
+### Supplied timestamps (estimated)
+
+`start --started-at <iso>` and `end --ended-at <iso>` record a boundary that was
+not stamped when it happened. The value must be strict UTC ISO-8601
+(`2026-01-01T00:00:00.000Z`). It is checked against the clock when the row is
+written: not later than now + 5 s, not earlier than now - 24 h, and never earlier
+than any row already recorded for the run (so a supplied value never backdates
+recorded history, and an end is never before its start). A supplied `--ended-at`
+earlier than a LATER row of the same run is refused too, so backfilling intervals
+that overlap recorded ones is limited. A refused value writes nothing. The row
+carries `timestamp_source: "supplied"` and `label: "estimated"`; `duration_ms` is
+computed from the recorded pair. A row stamped by the clock is unchanged and has
+neither key; when a supplied value up to 5 s ahead is already recorded, the clock
+stamp is raised to it so the run's rows stay in time order. The raise never goes
+beyond now + 5 s. A row more than 5 s in the future (clock skew, a hand-seeded or
+an old version's `2999-...` stamp) is kept as it is, never adopted and never
+rewritten. It is left out of the ordering history, reported as `future_history` by
+`check` and by the integrity line, and the next rows keep the clock stamp. Ordering
+therefore holds only within the 5 s skew bound. The only exception is an end whose
+own start is in the future: the end is never earlier than its start.
+`event --started-at/--ended-at` take the same now + 5 s / now - 24 h bounds. They
+are not held to the time-order rule, because measurement events can overlap
+earlier rows (concurrent review lanes), so an `event` row may be earlier than
+recorded rows of its run. They carry their own `label`.
+
+**When the checks run.** The append path (`run-log-io.mjs`) takes the bytes to append
+before it takes the lock, so the stamp is computed from the log as read. The lock-held
+check of that same append then re-validates the stamp against the exact bytes it is
+appended after, at the moment of writing: the window (now + 5 s, now - 24 h, for
+`start`, `end` and `event`) and, for `start`/`end`, never earlier than a recorded row
+of the run. A supplied stamp that fails there is refused and nothing is written. A
+clock stamp that a concurrent writer overtook while waiting for the lock is refused
+with a retry: the command re-reads the log, re-stamps and tries again, up to 5 times.
+So the bytes appended are always the bytes checked under the lock. The stamp itself is
+not computed inside run-log-io.
+
+### What the log can and cannot claim
+
+- The log is local, unauthenticated and unsigned. Any process that can write
+  `.git` can forge, edit or delete events.
+- Supplied timestamps are self-asserted. They are bounded, not verified.
+- The `run-log integrity` line of `ship-ready-check.mjs` (with `--repo` and
+  `--ticket`) claims only what was parsed, counted and paired: events (legacy
+  start/end ROWS plus S-04 events, each a start/end pair; `log_loss` records are
+  counted apart), runs, open phases, warnings and `log_loss` records, plus
+  `degraded=future_history(n)` when some run has a row more than 5 s in the future. It does not claim the log is complete or
+  authentic. A deleted or missing log prints `unavailable`, never zero events.
+- Shared observability is not shared authority. The common log never authorises a
+  REPAIR; only this worktree's own gitdir does (see above).
+- One source for every reader: `summary`, `check`, the writers, the integrity line and
+  `eval.mjs report` read the shared log only, so their figures are the same from every
+  worktree. The abandoned and partial-legacy labels come from one rule
+  (`lib/run-log-paths.mjs` `labelLegacyRun`). Only the per-line parsing differs: eval's
+  legacy figures read lines leniently, as before S5. Only ENOENT means "no log". A shared
+  directory or file that cannot be read for any other reason (EACCES, ...) is reported with
+  its errno and never shows up as an empty result:
+  - `summary` and `check` refuse;
+  - `eval.mjs report` adds `degraded: shared_log_unavailable` and computes no figures;
+  - the integrity line says `unavailable`;
+  - `lostSignal` sets `log_unreadable`.
+- Known limits:
+  - Pre-S5 history of LINKED worktrees is in no figure. It is visible only through
+    `run-log.mjs legacy` (inspection only) while the worktree exists, and it is kept only by
+    leaving that worktree in place (the interim rule above).
+  - A run spanning the upgrade is split. It is labelled `partial_legacy` only when some of
+    its S5 rows were written in the worktree that holds the archive. Rows written from the
+    main checkout, or from any worktree without an archive of the ticket, carry no
+    `legacy_worktree` mark, so such a run shows no label.
+  - A pre-S5 build still running in a linked worktree writes invisibly to its archive.
+  - `legacy_worktree` is not added to S-04 `event`/`close` rows (their schema is closed),
+    so `partial_legacy` is judged from `start`/`end` rows.
+  - A residual failure no read-only preflight can foresee (the lock still held after
+    10 s, the filesystem changing between the check and the write) is reported truthfully
+    (`committed_shared`) and is not undone. A REVIEW start whose authority copy failed
+    after its shared row committed needs a fresh REVIEW start with a new event id.
+  - A hand edit of any log file is outside these guarantees.
+- Telemetry never gates a ship decision. The integrity line never changes
+  `ship-ready-check`'s exit code, and a failed `check` is a recorded degradation.
 
 ## Close intervals
 

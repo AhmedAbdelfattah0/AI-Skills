@@ -4,11 +4,16 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn as spawnAsync } from 'node:child_process';
+import { hostname as hostnameOf } from 'node:os';
 import { buildRun } from './run-summary.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { REVIEW_ROLE_OF, IDENTITY_ACTIVITIES, GAP_REASONS, CEILING_METRICS, STRING_METRICS } from './review-intervals.mjs';
-import { readFileSync as readText } from 'node:fs';
+import { readFileSync as readText, readdirSync, realpathSync, existsSync, chmodSync, symlinkSync } from 'node:fs';
+const readdirSyncSafe = (d) => { try { return readdirSync(d).sort(); } catch { return []; } };
+const realpathSyncSafe = (p) => realpathSync.native(p);
+const existsSyncSafe = existsSync;
+const chmodSyncSafe = (p, m) => { try { chmodSync(p, m); } catch { /* gone */ } };
 
 const script = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
 const schema = 'ship-ticket-run-log-v1';
@@ -562,4 +567,458 @@ test('S-04a1 summary: an unfinished repair under a declared 0 (or no declaration
     assert.ok(s.runs[0].missing_review_intervals.items.some((i) => i.role === 'repair' && i.reason === 'open_without_end'));
     assert.notEqual(s.aggregate.missing_review_intervals, 0);
   }
+});
+
+// ------------------------------------------------------------------ S5 (F05): batch, check, supplied timestamps
+
+const rowsOf = (f) => { try { return readText(f.path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+const bytesOf = (f) => { try { return readText(f.path, 'latin1'); } catch { return null; } };
+const phaseArgs = (cmd, id) => [cmd, '--run-id', 'run-1', '--kind', 'phase', '--name', `P${id}`, '--event-id', id];
+const zsh = spawnSync('zsh', ['-f', '-c', 'exit 0']).status === 0;
+
+test('AC3 batch: metric values with -- and spaces survive verbatim under zsh (no word-splitting), from a file and from stdin', { skip: !zsh && 'zsh not installed' }, (t) => {
+  const f = fixture(t);
+  const opsFile = join(f.repo, 'ops file.json');
+  writeFileSync(opsFile, JSON.stringify([
+    { op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b1', metrics: { note: '--metric x=1  two  spaces', n: 3 } },
+    { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'b1', outcome: 'pass', metrics: { tail: 'a -- b' } },
+  ]));
+  // The unquoted variable is the F05 failure: zsh passes "$OPS" as ONE word whatever it contains.
+  const zshScript = 'OPS=$1; R=$2; "$3" "$4" batch --repo $R --ticket T1 --run-id run-1 --ops-file $OPS';
+  const r = spawnSync('zsh', ['-f', '-c', zshScript, 'zsh', opsFile, f.repo, process.execPath, script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)), { applied: 2 });
+  const rows = rowsOf(f);
+  assert.equal(rows[0].metrics.note, '--metric x=1  two  spaces');
+  assert.equal(rows[0].metrics.n, 3);
+  assert.equal(rows[1].metrics.tail, 'a -- b');
+  // The failure batch replaces: an unquoted multi-flag variable is ONE word in zsh, so the flags never reach the parser.
+  const split = spawnSync('zsh', ['-f', '-c', 'M="--metric a=1 --metric b=2"; "$1" "$2" start --repo "$3" --ticket T1 --run-id run-1 --kind phase --name Q --event-id q $M',
+    'zsh', process.execPath, script, f.repo], { encoding: 'utf8' });
+  assert.equal(split.status, 1, 'the documented zsh failure mode');
+  assert.equal(rowsOf(f).length, 2);
+});
+
+test('AC3 batch without a shell: values with -- and spaces are kept verbatim from a file and from stdin', (t) => {
+  const f = fixture(t);
+  const opsFile = join(f.repo, 'ops file.json');
+  writeFileSync(opsFile, JSON.stringify([{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b1', metrics: { note: '--metric x=1  two  spaces', n: 3, flag: true } }]));
+  const r = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', opsFile], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(rowsOf(f)[0].metrics, { note: '--metric x=1  two  spaces', n: 3, flag: true });
+  const viaStdin = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+    { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'activity', name: 'contract_review', event_id: 'c1', metrics: { candidate_id: 'sha-1', review_execution: 'review-1', x: '-- y' } }]) });
+  assert.equal(viaStdin.status, 0, viaStdin.stderr);
+  assert.equal(rowsOf(f)[1].metrics.x, '-- y');
+});
+
+test('batch: every op is validated before the first write; a later runtime failure stops with {applied, failed:{index, reason}}', (t) => {
+  const f = fixture(t);
+  const batch = (ops) => spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'], { encoding: 'utf8', input: JSON.stringify(ops) });
+  const ok = { op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b1' };
+  for (const bad of [[ok, { op: 'start', kind: 'nope', name: 'X', event_id: 'x' }], [ok, { op: 'start', kind: 'phase', name: 'X', event_id: 'bad id' }],
+    [ok, { op: 'drop', kind: 'phase', name: 'X', event_id: 'x' }], [ok, { op: 'start', kind: 'phase', name: 'X', event_id: 'x', metrics: { 'bad key': 1 } }],
+    [ok, { op: 'start', kind: 'activity', name: IDENTITY_ACTIVITIES[0], event_id: 'x' }], [ok, { op: 'start', kind: 'phase', name: 'host_sleep', event_id: 'x' }], 'not-an-array']) {
+    const r = batch(bad);
+    assert.equal(r.status, 1, JSON.stringify(bad));
+    const out = JSON.parse(r.stdout.trim());
+    assert.equal(out.applied, 0);
+    assert.equal(typeof out.failed.reason, 'string');
+    assert.equal(bytesOf(f), '', `nothing written: ${JSON.stringify(bad)}`);
+  }
+  const r = batch([ok, { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'b1' }, { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'zz' }, { op: 'start', kind: 'phase', name: 'C', event_id: 'c' }]);
+  assert.equal(r.status, 1);
+  assert.deepEqual(JSON.parse(r.stdout.trim()), { applied: 2, failed: { index: 2, reason: 'event zz has no start in run run-1', committed_shared: false } });
+  assert.deepEqual(rowsOf(f).map((x) => `${x.event}:${x.event_id}`), ['start:b1', 'end:b1'], 'not atomic: applied ops stay, later ops never run');
+});
+
+test('AC5/AC6 supplied timestamps: bounded, labelled estimated, duration from the supplied pair; every refusal appends zero rows', (t) => {
+  const f = fixture(t);
+  const base = Date.now();
+  const ago = (ms) => new Date(base - ms).toISOString();
+  const H = 3600000;
+  const s = f.cli(...phaseArgs('start', 'a'), '--started-at', ago(H));
+  assert.equal(s.status, 0, s.stderr);
+  const started = JSON.parse(s.stdout);
+  assert.deepEqual([started.timestamp_source, started.label], ['supplied', 'estimated']);
+  const before = bytesOf(f);
+  for (const [why, args] of [['future', ['--started-at', new Date(Date.now() + H).toISOString()]], ['beyond 24 h', ['--started-at', ago(25 * H)]],
+    ['earlier than a row of the run', ['--started-at', ago(2 * H)]], ['non-ISO', ['--started-at', 'yesterday']], ['offset form', ['--started-at', '2026-01-01T00:00:00+02:00']]]) {
+    const r = f.cli(...phaseArgs('start', 'b'), ...args);
+    assert.equal(r.status, 1, why);
+    assert.equal(bytesOf(f), before, `zero rows appended: ${why}`);
+  }
+  const endEarly = f.cli(...phaseArgs('end', 'a'), '--ended-at', ago(H + 1000));
+  assert.equal(endEarly.status, 1, 'end before its start');
+  assert.match(endEarly.stderr, /ended-at/);
+  assert.equal(bytesOf(f), before);
+  const endAt = ago(H / 2);
+  const e = f.cli(...phaseArgs('end', 'a'), '--ended-at', endAt);
+  assert.equal(e.status, 0, e.stderr);
+  const ended = JSON.parse(e.stdout);
+  assert.deepEqual([ended.timestamp, ended.duration_ms, ended.timestamp_source, ended.label], [endAt, H / 2, 'supplied', 'estimated']);
+  const d = f.cli(...phaseArgs('start', 'c'));
+  assert.equal(d.status, 0, d.stderr);
+  const plain = JSON.parse(d.stdout);
+  assert.equal(Object.hasOwn(plain, 'timestamp_source') || Object.hasOwn(plain, 'label'), false, 'a default row is unchanged: no new key');
+  assert.equal(f.summary().integrity_warnings.length, 0);
+  assert.equal(f.cli(...phaseArgs('start', 'x'), '--ended-at', ago(1)).status, 1, '--ended-at is an end option');
+  assert.equal(f.cli(...phaseArgs('end', 'c'), '--started-at', ago(1)).status, 1, '--started-at is a start option');
+});
+
+test('D2 event --started-at/--ended-at: the same now-window bounds; zero rows appended on refusal', (t) => {
+  const f = fixture(t);
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  let n = 0;
+  const ev = (a, b) => f.cli('event', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', `s-${n += 1}`, '--metric', 'label=estimated', '--started-at', a, '--ended-at', b);
+  assert.equal(ev(ago(3600000), ago(1800000)).status, 0);
+  const before = bytesOf(f);
+  for (const [a, b] of [[ago(25 * 3600000), ago(1000)], [ago(1000), new Date(Date.now() + 3600000).toISOString()]]) {
+    const r = ev(a, b);
+    assert.equal(r.status, 1, `${a}..${b}`);
+    assert.match(r.stderr, /within/);
+    assert.equal(bytesOf(f), before);
+  }
+});
+
+test('AC6 property (seeded): no start/end row is ever earlier than an earlier row of its run, whatever is supplied', (t) => {
+  const f = fixture(t);
+  let seed = 0x5eed5;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const open = [];
+  let n = 0;
+  for (let i = 0; i < 24; i += 1) {
+    const offset = Math.round((rand() - 0.9) * 2 * 3600000); // mostly the past, sometimes a few seconds ahead
+    const stamp = new Date(Date.now() + Math.min(offset, 4000)).toISOString();
+    const supply = rand() < 0.6;
+    const before = bytesOf(f);
+    let r;
+    if (open.length && rand() < 0.5) {
+      const id = open[Math.floor(rand() * open.length)];
+      r = f.cli(...phaseArgs('end', id), ...(supply ? ['--ended-at', stamp] : []));
+      if (r.status === 0) open.splice(open.indexOf(id), 1);
+    } else {
+      const id = `e${n += 1}`;
+      r = f.cli(...phaseArgs('start', id), ...(supply ? ['--started-at', stamp] : []));
+      if (r.status === 0) open.push(id);
+    }
+    if (r.status !== 0) assert.equal(bytesOf(f), before, `refused op ${i} appended nothing: ${r.stderr}`);
+  }
+  const rows = rowsOf(f);
+  assert.ok(rows.length >= 8, `the property saw writes (${rows.length})`);
+  for (let k = 1; k < rows.length; k += 1) assert.ok(Date.parse(rows[k].timestamp) >= Date.parse(rows[k - 1].timestamp), `row ${k} ${rows[k].timestamp} < ${rows[k - 1].timestamp}`);
+  for (const row of rows) if (!row.timestamp_source) assert.equal(Object.hasOwn(row, 'label'), false);
+});
+
+test('AC4 check: one JSON line, exit 0 healthy and 1 with a reason (non-repo, unwritable, torn tail); it writes nothing', (t) => {
+  const f = fixture(t);
+  const check = (repo, ...extra) => spawnSync(process.execPath, [script, 'check', '--repo', repo, ...extra], { encoding: 'utf8' });
+  const listing = () => spawnSync('git', ['-C', f.repo, 'status', '--porcelain', '--ignored'], { encoding: 'utf8' }).stdout + readdirSyncSafe(dirname(f.path)).join(',');
+  const before = listing();
+  const ok = check(f.repo, '--ticket', 'T1');
+  assert.equal(ok.status, 0, ok.stderr);
+  const out = JSON.parse(ok.stdout.trim());
+  assert.equal(out.ok, true);
+  assert.equal(realpathSyncSafe(out.resolved_dir), realpathSyncSafe(dirname(f.path)));
+  assert.equal(listing(), before, 'check created nothing (no probe file, no lock)');
+  const fresh = mkdtempSync(join(tmpdir(), 'ship-ticket-check-'));
+  t.after(() => rmSync(fresh, { recursive: true, force: true }));
+  const nonRepo = check(fresh);
+  assert.equal(nonRepo.status, 1);
+  assert.equal(JSON.parse(nonRepo.stdout.trim()).ok, false);
+  assert.ok(JSON.parse(nonRepo.stdout.trim()).reason);
+  spawnSync('git', ['init', '-q', fresh]);
+  const unborn = check(fresh, '--ticket', 'T1');
+  assert.equal(unborn.status, 0, unborn.stderr);
+  assert.equal(existsSyncSafe(join(fresh, '.git', 'ai-skills')), false, 'a healthy check on a fresh repository creates no directory');
+  writeFileSync(f.path, readText(f.path, 'utf8') + '{"torn":');
+  const torn = check(f.repo, '--ticket', 'T1');
+  assert.equal(torn.status, 1);
+  assert.match(JSON.parse(torn.stdout.trim()).reason, /incomplete_tail/);
+  writeFileSync(f.path, '');
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    chmodSyncSafe(dirname(f.path), 0o500);
+    let ro;
+    try { ro = check(f.repo, '--ticket', 'T1'); } finally { chmodSyncSafe(dirname(f.path), 0o700); }
+    assert.equal(ro.status, 1);
+    assert.match(JSON.parse(ro.stdout.trim()).reason, /not writable/);
+  }
+});
+
+test('old-reader compatibility: origin/main rowsFromText accepts rows carrying timestamp_source and label', async (t) => {
+  const old = spawnSync('git', ['-C', dirname(script), 'show', 'origin/main:skills/ship-ticket/scripts/run-log.mjs'], { encoding: 'utf8' });
+  if (old.status !== 0) { t.skip('origin/main is not available in this checkout'); return; }
+  const src = old.stdout;
+  const body = src.slice(src.indexOf('function rowsFromText'), src.indexOf('function carrierBinding'));
+  assert.ok(body.includes('function validCarrierTiming'), 'extracted the unmodified old reader');
+  const dir = mkdtempSync(join(tmpdir(), 'old-reader-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const url = (m) => new URL(`./${m}`, import.meta.url).href;
+  writeFileSync(join(dir, 'old.mjs'), `import { basename } from 'node:path';\nimport { buildRun } from '${url('run-summary.mjs')}';\n`
+    + `import { RUN_LOG_SCHEMA as SCHEMA, isEventName } from '${url('measure/events.mjs')}';\n`
+    + `const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);\nconst SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;\nexport ${body}`);
+  const { rowsFromText } = await import(new URL(`file://${join(dir, 'old.mjs').replaceAll('\\', '/').replace(/^([A-Za-z]:)/, '/$1')}`).href);
+  const f = fixture(t);
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  assert.equal(f.cli(...phaseArgs('start', 'a'), '--started-at', ago(60000)).status, 0);
+  assert.equal(f.cli(...phaseArgs('end', 'a'), '--ended-at', ago(30000)).status, 0);
+  const text = readText(f.path, 'utf8');
+  assert.match(text, /"timestamp_source":"supplied"/);
+  const { rows, warnings } = rowsFromText(text, f.path);
+  assert.deepEqual(warnings, []);
+  assert.equal(rows.length, 2);
+});
+
+// ------------------------------------------------------------------ S5 repair: in-lock ordering and bounds, capped carry-forward, accurate check
+const holdLock = (f) => writeFileSync(`${f.path}.lock`, JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'test', nonce: 'held-by-test' }));
+const releaseLock = (f) => rmSync(`${f.path}.lock`, { force: true });
+/** Spawn the CLI without waiting; resolves { status, stdout, stderr } when it exits. */
+const spawnCli = (f, ...args) => new Promise((done) => {
+  const child = spawnAsync(process.execPath, [script, ...args, '--repo', f.repo, '--ticket', 'T1']);
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  child.on('close', (status) => done({ status, stdout, stderr }));
+});
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const legacyStart = (id, ts, run = 'run-1') => ({ schema, ticket: 'T1', run_id: run, event: 'start', event_id: id, kind: 'phase', name: `P${id}`, timestamp: ts, metrics: {} });
+
+test('S5 (3) ordering under the lock: a clock-stamped row overtaken while it waits for the lock is re-stamped, never written earlier than its run', async (t) => {
+  const f = fixture(t);
+  holdLock(f);
+  t.after(() => releaseLock(f));
+  const waiting = spawnCli(f, ...phaseArgs('start', 'late'));
+  await pause(700); // the writer has stamped by the clock and is waiting for the lock
+  const ahead = new Date(Date.now() + 4000).toISOString();
+  writeFileSync(f.path, `${JSON.stringify(legacyStart('ahead', ahead))}\n`); // another writer appended a supplied now+4s row
+  releaseLock(f);
+  const r = await waiting;
+  assert.equal(r.status, 0, r.stderr);
+  const rows = rowsOf(f);
+  assert.deepEqual(rows.map((x) => x.event_id), ['ahead', 'late']);
+  assert.ok(Date.parse(rows[1].timestamp) >= Date.parse(rows[0].timestamp), `${rows[1].timestamp} < ${rows[0].timestamp}`);
+  assert.equal(Object.hasOwn(rows[1], 'timestamp_source'), false, 'still a default row');
+});
+
+test('S5 (4) the supplied-timestamp window is re-checked at the moment of writing (start and event): zero rows when it expired in the lock wait', async (t) => {
+  const f = fixture(t);
+  holdLock(f);
+  t.after(() => releaseLock(f));
+  const edge = new Date(Date.now() - 24 * 3600000 + 1200).toISOString(); // inside the window now, outside it in 2 s
+  const s = spawnCli(f, ...phaseArgs('start', 'w'), '--started-at', edge);
+  const e = spawnCli(f, 'event', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', 'sw', '--metric', 'label=estimated', '--started-at', edge, '--ended-at', edge);
+  await pause(2500);
+  releaseLock(f);
+  const [rs, re] = await Promise.all([s, e]);
+  assert.equal(rs.status, 1, `start: ${rs.stderr}`);
+  assert.equal(re.status, 1, `event: ${re.stderr}`);
+  assert.match(re.stderr, /within the last 24 h/);
+  assert.equal(bytesOf(f), '', 'zero rows appended');
+});
+
+test('S5 (5) carry-forward is capped at now+5s: a 2999 row is not adopted, not rewritten, and is reported as future_history', (t) => {
+  const future = '2999-01-01T00:00:00.000Z';
+  const f = fixture(t, [legacyStart('far', future)]);
+  const before = bytesOf(f);
+  const supplied = f.cli(...phaseArgs('start', 's'), '--started-at', new Date(Date.now() - 3600000).toISOString());
+  assert.equal(supplied.status, 0, `a supplied stamp is still accepted beside far-future history: ${supplied.stderr}`);
+  const d = f.cli(...phaseArgs('start', 'd'));
+  assert.equal(d.status, 0, d.stderr);
+  assert.ok(Math.abs(Date.parse(JSON.parse(d.stdout).timestamp) - Date.now()) < 60000, `the default stamp stays near now: ${JSON.parse(d.stdout).timestamp}`);
+  assert.ok(bytesOf(f).startsWith(before), 'the 2999 row is not rewritten');
+  const c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' });
+  assert.equal(c.status, 0, c.stdout);
+  assert.ok(JSON.parse(c.stdout).degraded.includes('future_history'), c.stdout);
+});
+
+test('S5 (6) check: a read-only existing log in a writable directory is exit 1 with a reason; nothing written', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const f = fixture(t, [legacyStart('a', new Date(Date.now() - 1000).toISOString())]);
+  chmodSyncSafe(f.path, 0o400);
+  let c;
+  try { c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' }); } finally { chmodSyncSafe(f.path, 0o600); }
+  assert.equal(c.status, 1, c.stdout);
+  assert.match(JSON.parse(c.stdout).reason, /not writable/);
+  assert.deepEqual(readdirSyncSafe(dirname(f.path)), ['T1.jsonl'], 'no probe, no lock');
+});
+
+test('S5 (7c) batch refuses a metric key containing "=" instead of re-splitting it', (t) => {
+  const f = fixture(t);
+  const r = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+    { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'phase', name: 'B', event_id: 'b', metrics: { 'a=b': 'c' } }]) });
+  assert.equal(r.status, 1);
+  assert.equal(bytesOf(f), '');
+});
+
+// ------------------------------------------------------------------ S5 review repair 2: check lock health, complete batch prevalidation
+test('S5 repair 2 (3) check judges <log>.lock exactly as the append would: foreign host refuses, dead pid recoverable, live pid waits; nothing written', (t) => {
+  const f = fixture(t, [legacyStart('a', new Date(Date.now() - 1000).toISOString())]);
+  const check = () => { const c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' }); return { status: c.status, out: JSON.parse(c.stdout) }; };
+  const lock = (o) => writeFileSync(`${f.path}.lock`, JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'x', nonce: 'n', ...o }));
+  t.after(() => releaseLock(f));
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+  lock({ host: 'another-host.invalid' });
+  const foreign = check();
+  assert.equal(foreign.status, 1, JSON.stringify(foreign.out));
+  assert.match(foreign.out.reason, /lock_foreign_host|another host|held by host/);
+  lock({ pid: Number(dead) });
+  const recoverable = check();
+  assert.equal(recoverable.status, 0, JSON.stringify(recoverable.out));
+  assert.ok(recoverable.out.degraded.includes('stale_lock_recoverable'));
+  lock({});
+  const live = check();
+  assert.equal(live.status, 0, JSON.stringify(live.out));
+  assert.ok(live.out.degraded.includes('lock_held'), 'a live holder: the next write waits for it (up to 10 s)');
+  writeFileSync(`${f.path}.lock.recovery`, '{}');
+  assert.equal(check().status, 0, 'a recovery marker is irrelevant while a live holder owns the lock (the append waits)');
+  lock({ pid: Number(dead) });
+  const recovering = check();
+  assert.equal(recovering.status, 1, 'a stale lock with an existing recovery marker: the append would refuse, so check says so');
+  rmSync(`${f.path}.lock.recovery`, { force: true });
+  releaseLock(f);
+  assert.deepEqual(readdirSyncSafe(dirname(f.path)), ['T1.jsonl'], 'check wrote nothing');
+});
+
+test('S5 repair 2 (4) batch validates EVERY op, including what encoding would refuse, before the first write: zero bytes on a bad later op', (t) => {
+  const f = fixture(t, [legacyStart('pre', new Date(Date.now() - 5000).toISOString())]);
+  const before = bytesOf(f);
+  const big = '9'.repeat(400);
+  const ok = { op: 'start', kind: 'phase', name: 'B', event_id: 'b' };
+  for (const bad of [{ n: big }, { n: `-${big}` }, { n: '9'.repeat(309) + '.5' }, { s: 'x'.repeat(513) }]) {
+    const r = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+      { encoding: 'utf8', input: JSON.stringify([ok, { op: 'start', kind: 'phase', name: 'C', event_id: 'c', metrics: bad }]) });
+    assert.equal(r.status, 1, JSON.stringify(bad).slice(0, 60));
+    assert.equal(JSON.parse(r.stdout.trim()).applied, 0);
+    assert.equal(bytesOf(f), before, `byte-identical log: ${JSON.stringify(bad).slice(0, 40)}`);
+  }
+  const single = f.cli(...phaseArgs('start', 'z'), '--metric', `n=${big}`);
+  assert.equal(single.status, 1, 'a 400-digit metric is refused on start too (never Infinity)');
+  assert.equal(bytesOf(f), before);
+});
+
+// ------------------------------------------------------------------ S5 review repair 3 (B): batch and the authority copy
+const reviewOp = (id) => ({ op: 'start', kind: 'phase', name: 'REVIEW', event_id: id, metrics: { candidate_id: 'sha-1', review_execution: `review-${id}` } });
+const runBatch = (f, ops) => spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'], { encoding: 'utf8', input: JSON.stringify(ops) });
+test('S5 repair 3 (B) batch refuses the WHOLE batch, zero rows, when a REVIEW op\'s authority copy is not writable', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const f = fixture(t);
+  const auth = join(dirname(f.path), 'review-auth');
+  mkdirSync(auth);
+  chmodSyncSafe(auth, 0o500);
+  let r;
+  try { r = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r')]); } finally { chmodSyncSafe(auth, 0o700); }
+  assert.equal(r.status, 1);
+  const out = JSON.parse(r.stdout.trim());
+  assert.equal(out.applied, 0);
+  assert.equal(out.failed.index, 1);
+  assert.match(out.failed.reason, /not writable/);
+  assert.equal(bytesOf(f), '', 'zero rows: nothing reached the shared log');
+});
+
+test('S5 repair 3 (B) a residual authority-copy failure is reported truthfully: committed shared rows counted, no retry of the shared row', (t) => {
+  const f = fixture(t);
+  // A residual failure the preflight cannot foresee: a live holder keeps the authority file's lock past the 10 s wait.
+  mkdirSync(join(dirname(f.path), 'review-auth'));
+  writeFileSync(join(dirname(f.path), 'review-auth', 'T1.jsonl.lock'), JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'x', nonce: 'held' }));
+  const r = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r'), { op: 'start', kind: 'phase', name: 'C', event_id: 'c' }]);
+  assert.equal(r.status, 1);
+  const out = JSON.parse(r.stdout.trim());
+  assert.equal(out.applied, 2, 'BUILD and the REVIEW start both committed to the shared log');
+  assert.deepEqual({ ...out.failed, reason: undefined }, { index: 1, reason: undefined, committed_shared: true, authority_copy: 'failed' });
+  assert.match(out.failed.reason, /new event id/, 'the recovery is named');
+  assert.deepEqual(rowsOf(f).map((x) => x.event_id), ['b', 'r'], 'op c never ran');
+  const single = f.cli(...phaseArgs('start', 'x').map((a) => (a === 'Px' ? 'REVIEW' : a)), '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-x');
+  assert.equal(single.status, 1);
+  assert.match(single.stderr, /committed_shared=true/, 'the single start path says the shared row committed');
+  rmSync(join(dirname(f.path), 'review-auth', 'T1.jsonl.lock'), { force: true });
+  const notCommitted = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }]);
+  assert.deepEqual(JSON.parse(notCommitted.stdout.trim()).failed.committed_shared, false, 'a refused op did not commit');
+});
+
+// ------------------------------------------------------------------ S5 review repair 4 (3): the authority-copy preflight mirrors the copy
+// Every state of review-auth/ and its file: `check` says ok exactly when a REVIEW start writes BOTH rows; otherwise the
+// REVIEW start (single or batched) writes ZERO rows, before any shared row exists.
+const posix = process.platform !== 'win32' && process.getuid?.() !== 0;
+const AUTH_STATES = [
+  ['absent', () => {}, true, true],
+  ['dir 0700', (a) => mkdirSync(a), true, true],
+  ['dir 0700 with the file 0600', (a) => { mkdirSync(a); writeFileSync(join(a, 'T1.jsonl'), ''); }, true, true],
+  ['dir 0500 with the file 0600', (a) => { mkdirSync(a); writeFileSync(join(a, 'T1.jsonl'), ''); chmodSync(a, 0o500); }, false, posix],
+  ['dir 0500, no file', (a) => { mkdirSync(a); chmodSync(a, 0o500); }, false, posix],
+  ['dir 0300 (not readable: the directory fsync opens it)', (a) => { mkdirSync(a); chmodSync(a, 0o300); }, false, posix],
+  ['dir 0600 (not searchable)', (a) => { mkdirSync(a); chmodSync(a, 0o600); }, false, posix],
+  ['dir 0500 inside a missing parent? no: parent 0500, review-auth absent', (a) => chmodSync(dirname(a), 0o500), false, posix],
+  ['a regular file named review-auth', (a) => writeFileSync(a, 'x'), false, true],
+  ['a symlink to a directory', (a) => { mkdirSync(`${a}-target`); symlinkSync(`${a}-target`, a); }, true, process.platform !== 'win32'],
+  ['a dangling symlink', (a) => symlinkSync(`${a}-missing`, a), false, process.platform !== 'win32'],
+  ['the file is a directory', (a) => { mkdirSync(join(a, 'T1.jsonl'), { recursive: true }); }, false, true],
+  ['the file is 0400', (a) => { mkdirSync(a); writeFileSync(join(a, 'T1.jsonl'), ''); chmodSync(join(a, 'T1.jsonl'), 0o400); }, false, posix],
+];
+for (const [state, make, ok, runs] of AUTH_STATES) {
+  test(`S5 repair 4 (3) authority dir state "${state}": check, single start and batch agree with what the copy can do`, { skip: !runs && 'needs POSIX permissions/symlinks as non-root' }, (t) => {
+    for (const mode of ['single', 'batch']) {
+      const f = fixture(t);
+      const auth = join(dirname(f.path), 'review-auth');
+      make(auth);
+      t.after(() => { for (const p of [dirname(auth), auth, join(auth, 'T1.jsonl')]) chmodSyncSafe(p, 0o700); });
+      const c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' });
+      assert.equal(c.status === 0, ok, `${state}: check ${c.stdout}`);
+      const r = mode === 'single'
+        ? f.cli('start', '--run-id', 'run-1', '--kind', 'phase', '--name', 'REVIEW', '--event-id', 'r', '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-r')
+        : runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r')]);
+      for (const p of [dirname(auth), auth, join(auth, 'T1.jsonl')]) chmodSyncSafe(p, 0o700);
+      if (ok) {
+        assert.equal(r.status, 0, `${state} ${mode}: ${r.stderr}${r.stdout}`);
+        assert.ok(rowsOf(f).some((x) => x.name === 'REVIEW'), 'the shared row');
+      } else {
+        assert.equal(r.status, 1, `${state} ${mode}`);
+        assert.equal(bytesOf(f), '', `${state} ${mode}: zero rows, nothing committed before the refusal (${r.stdout}${r.stderr})`);
+      }
+    }
+  });
+}
+
+// ------------------------------------------------------------------ S5 cutover: AC12 quarantine to a fixed point, AC15 reserved names
+const L = (o) => JSON.stringify({ schema, ticket: 'T1', run_id: 'run-1', event: 'start', event_id: 'x', kind: 'phase', name: 'P', timestamp: iso(0), metrics: {}, ...o }) + '\n';
+const LE = (o) => L({ event: 'end', duration_ms: 0, outcome: 'pass', ...o });
+const REFUSALS = [
+  ['invalid json line', '{"schema": broken\n'],
+  ['unsupported schema', L({ schema: 'other-v9' })],
+  ['invalid record', L({ kind: 'nope' })],
+  ['ticket mismatch', L({ ticket: 'T2' })],
+  ['orphan end', LE({ event_id: 'orph' })],
+  ['duplicate start', L({ event_id: 'd' }) + L({ event_id: 'd', timestamp: iso(5) })],
+  ['end before its start', L({ event_id: 'e', timestamp: iso(10) }) + LE({ event_id: 'e', timestamp: iso(5) })],
+  ['duration mismatch', L({ event_id: 'm' }) + LE({ event_id: 'm', timestamp: iso(10), duration_ms: 3 })],
+  ['identity mismatch', L({ event_id: 'i', metrics: { candidate_id: 'a' } }) + LE({ event_id: 'i', timestamp: iso(1), duration_ms: 1, metrics: { candidate_id: 'b' } })],
+  ['undecodable bytes', Buffer.concat([Buffer.from('{"schema":"'), Buffer.from([0xff]), Buffer.from('"}\n')]).toString('latin1')],
+  ['a cascade (two starts, two ends of one id, one orphan)', L({ event_id: 'c' }) + L({ event_id: 'c', timestamp: iso(2) }) + LE({ event_id: 'c', timestamp: iso(3), duration_ms: 3 }) + LE({ event_id: 'c', timestamp: iso(4), duration_ms: 4 }) + LE({ event_id: 'z' })],
+];
+for (const [kind, bad] of REFUSALS) {
+  test(`AC12 quarantine clears "${kind}" to a fixed point: writers refuse before, write after; the loss is recorded`, (t) => {
+    const f = fixture(t);
+    const good = L({ event_id: 'good', timestamp: iso(0) });
+    writeFileSync(f.path, Buffer.concat([Buffer.from(good), Buffer.from(bad, 'latin1')]));
+    assert.equal(f.cli(...phaseArgs('start', 'n')).status, 1, `${kind}: refused before`);
+    const q = f.cli('quarantine');
+    assert.equal(q.status, 0, q.stderr);
+    assert.ok(JSON.parse(q.stdout).quarantined, 'something was moved to a sidecar');
+    const w = f.cli(...phaseArgs('start', 'n'));
+    assert.equal(w.status, 0, `${kind}: writes resume: ${w.stderr}`);
+    assert.ok(readText(f.path, 'utf8').startsWith(good), 'valid lines are kept');
+    assert.ok(readText(f.path, 'utf8').includes('"log_loss"'), 'a log_loss record');
+    assert.equal(spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' }).status, 0, 'check ok');
+    assert.deepEqual(JSON.parse(f.cli('quarantine').stdout), { quarantined: null }, 'a fixed point: nothing left to move');
+  });
+}
+
+test('AC15 reserved abandon names and ids are refused by every writer, case-insensitively', (t) => {
+  const f = fixture(t);
+  for (const [name, id] of [['legacy_abandoned', 'a'], ['LEGACY_ABANDONED', 'b'], ['Legacy_Abandoned', 'c'], ['P', 'legacy-abandoned.0123456789ab'], ['P', 'LEGACY-ABANDONED.x'], ['P', 'legacy-abandoned']]) {
+    const r = f.cli('start', '--run-id', 'run-1', '--kind', 'activity', '--name', name, '--event-id', id);
+    assert.equal(r.status, 1, `${name} ${id}`);
+    assert.match(r.stderr, /reserved/);
+    const b = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+      { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'activity', name, event_id: id }]) });
+    assert.equal(b.status, 1, `batch ${name} ${id}`);
+  }
+  assert.equal(bytesOf(f), '');
 });

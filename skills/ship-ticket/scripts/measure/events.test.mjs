@@ -331,13 +331,14 @@ test('structural: one module holds the row schema literal, only run-log.mjs impo
   assert.equal((runLog.match(/\bappendLocked\(/g) ?? []).length, 1);
   assert.match(runLog, /await appendLocked\(path, encodeRecords\(records\), \{ marker: \(info\) => encodeRecords\(\[encodeLoss\(/);
   assert.equal((runLog.match(/\bquarantineLocked\(/g) ?? []).length, 1);
-  assert.equal((runLog.match(/check: \(after(, before)?\) => \{? ?assertCleanLog\(after, path\)/g) ?? []).length, 2, 'both write paths validate the whole resulting file');
+  assert.equal((runLog.match(/check: \(after(, before)?\) => \{? ?(?:if \(guard\) guard\(before\); )?assertCleanLog\(after, path(, context)?\)/g) ?? []).length, 2, 'both write paths validate the whole resulting file');
 });
 
 // ---- CLI ---------------------------------------------------------------------------------------------------------------
 /** The CLI child's clock is pinned (a preloaded `Date` whose no-argument constructor and `now()` return FIXED_NOW), so neither a real
- *  clock before T0 nor one beyond year 2999 can change an outcome. FIXED_NOW is after T1 and before the 2999 "future" the tests use. */
-const FIXED_NOW = '2026-06-01T00:00:00.000Z';
+ *  clock before T0 nor one beyond year 2999 can change an outcome. FIXED_NOW is after T1 and before the 2999 "future" the tests use,
+ *  and within the 24 h window run-log.mjs (S5) allows a supplied --started-at/--ended-at. */
+const FIXED_NOW = '2026-01-01T00:02:00.000Z';
 const PIN_CLOCK = `data:text/javascript,${encodeURIComponent(`const R = Date, F = ${Date.parse(FIXED_NOW)};
 globalThis.Date = class extends R { constructor(...a) { if (a.length) super(...a); else super(F); } static now() { return F; } };`)}`;
 function repo(t) {
@@ -898,7 +899,8 @@ test('T-C2 / T-C3 / T-C6: with every event kind added (and an events-only ticket
   const got = await capture(SCRIPTS, { injectLogs: (logs) => (injected = instrumented(logs)) });
   // S-01b2 P5r (AMD-P5r-2): the ONE intended difference from the pinned base capture. Policy v2 makes the refusal of the
   // policy_version:99 fixture name both supported versions; the golden itself stays the pure origin/main capture.
-  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4;'; // F12a: versions 3 and 4 (format-3 security block) are supported too
+  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4, 5, 6, 7, 8;'; // F12a: versions 3 and 4 (format-3 security block) are supported too
+  // S-12: versions 5-8 (1-4 with a pinned remote base) are supported too
   assert.equal(expected.policy_refusal.stderr.split(V1).length, 2, 'the base capture names version 1 exactly once');
   expected.policy_refusal.stderr = expected.policy_refusal.stderr.replace(V1, V12);
   assert.equal(JSON.stringify(got, null, 1), JSON.stringify(expected, null, 1));

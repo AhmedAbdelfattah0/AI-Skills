@@ -40,9 +40,11 @@ Facts are the input to selection. Each fact in the catalog's `fact_vocabulary`:
   `false`; an unknown fact keeps its controls selected;
 - uses only vocabulary values (`fact_out_of_vocabulary` otherwise).
 
-A surface path should name a file. S1 does not check its filesystem type (L1), and a
-directory string such as `src/auth/` can still match a path signal. Paths use forward
-slashes: a backslash in a surface path or a changed path is refused `bad_input`.
+A surface path should name a file. Only the path of a surface that lowers a fact (block
+format 3, below) is checked to be one exact repository file; any other surface path is
+taken as written, and a directory string such as `src/auth/` can still match a path
+signal. Paths use forward slashes: a backslash in a surface path or a changed path is
+refused `bad_input`.
 
 **Surface-level facts (block format 3).** A change-level fact is the OR of its
 surfaces, so one `true` fact is applied to every surface; each pair still follows its
@@ -98,6 +100,22 @@ surface**, under five rules, each refused when broken:
   author and the workers cannot set.
   The check proves that the cited text exists, not that it supports the claim: that
   judgment is the review row (section 9).
+- only on a surface whose own `path` is **one exact repository file** (X1). The path
+  follows the citation path rule with no `:symbol`: no trailing slash, glob character,
+  whitespace or placeholder, a `.` or a `/` in it, not docs-only, not inside `.git/` or
+  `node_modules/` (`surface_fact_not_lowerable` at select, `plan_block_invalid` when a
+  block is replayed). In the tree checked, at the same places and times as the
+  citations above, every segment must exist with exactly that case on every OS, no
+  component may be a symlink (a link out of the repository, to a file inside it or
+  dangling alike), the path must be a regular file, and it must be tracked or
+  untracked as `git ls-files -z` lists it (an exact entry; a file in a nested
+  repository, or one the index spells otherwise, is neither) and, untracked, not
+  gitignored (`citation_missing`, a reason starting `surface <id> path <path>:`). At `init` and `preflight` only, a path
+  with no entry at all under a DAG node's `writes` is deferred (a file the change
+  creates); at the gates nothing is deferred. No repository at or above the tree, no
+  git, or a git failure fails closed here, unlike a citation: the path must be
+  checkable against Git. Git runs with every inherited `GIT_*` variable dropped. A
+  non-lowering surface and a format-2 block are not checked.
 - never on every surface (`surface_fact_reinflates`), and never so that a control
   the change selects is left with **no effective pair** (`surface_fact_reinflates`).
   A surface that keeps the fact but whose kind cannot pair the control is no keeper;
@@ -403,9 +421,12 @@ The end-to-end paths are covered by the ubuntu and macOS harness legs.
   `security-plan-legacy.capture.test-helper.mjs` (regenerate from be63aea's
   `security-plan.mjs` under the new catalog); `[S59]` itself fails as a plain
   equality assertion.
-- The lowering-surface path check, the confirmation dispute handling and the
-  second-opinion `subject_id` rule are known limitations of this slice (section 13,
-  L1 to L3).
+- The confirmation dispute handling and the second-opinion `subject_id` rule are
+  known limitations of this slice (section 13, L2 and L3). The lowering-surface path
+  is checked to be one exact repository file (section 3, X1). A **decoy** stays a
+  residual: a real, tracked file that is simply not where the boundary's code lives
+  passes every path check, so a signal in the real file does not reopen the drop. The
+  mandatory review row of the dropped pair (section 9) is the control for it.
 
 **What reopening does not cover (residuals, documented).**
 
@@ -546,15 +567,9 @@ may omit it.
 ## 13. Known limitations of S1 (tracked separately)
 
 S1 does not enforce the following. Each is tracked for a separate change; this file
-and the engine comments are written not to claim otherwise.
+and the engine comments are written not to claim otherwise. (L1, lowering-surface
+paths not checked to be one exact repository file, is closed by X1: section 3.)
 
-- **L1, lowering-surface paths are not required to be the exact Git file path.** The
-  path of a surface that lowers a fact is not mechanically checked to be one exact
-  tracked file: a symlink, a gitignored file, a case alias, a directory or a
-  `path:symbol` string can bind as that path, so a signal at the real file may not
-  reopen the drop (a plain decoy file, a real file that is not where the boundary's
-  code lives, is the documented reopening residual in section 7). Tracked for a
-  separate hardening PR.
 - **L2, a confirmation does not record disputes.** A `FAIL` row or a finding on a
   dropped pair inside a confirmation (primary or second opinion) is not added to
   `disputed_na`; an owner `RETRY` is not bound to the confirmation `FAIL`, and the

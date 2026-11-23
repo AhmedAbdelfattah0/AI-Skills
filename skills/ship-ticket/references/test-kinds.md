@@ -100,10 +100,69 @@ and/or `unmapped_lifecycle_item`, or `refused` with an error code (`unknown_tag`
 (numbers and enums only) in RUN-STATE. **Exit 1 is never a freeze permission:** do not freeze a candidate while
 `check` exits 1, as with T0's `verify`.
 
-**Status: advisory.** No engine step runs `check` at freeze yet (S-01b2); the rule above is the orchestrator's. A title marker is the worker's claim and
+**Status.** The `check` command above is advisory: no engine step runs `check`, and for a run that has not opted in to
+engine-enforced evidence (next section) the rule above is the orchestrator's. A title marker is the worker's claim and
 does not prove that the test exercises the property; mutation (S-01c) and the reviewers cover that. Only the
 `async-state`, `ui-lifecycle`, `entrypoint` and `shared-contract` rows are pinned by acceptance tests; the other
 rows and `SURFACE_TAGS` are provisional. `async-state` and `ui-lifecycle` stay exactly as the acceptance test pins
 them: add `concurrency` for overlapping or out-of-order requests (`race`) and `tenancy` or `auth` for cross-visit or
 cross-user ownership. The script's declaration read is a temporary copy of the hardened git helper, to be replaced by
 the shared git library (S-02a0).
+
+## Engine-enforced test-kind evidence (opt-in, L-ran)
+
+A run can opt in to a second, engine-side gate that does not use `check` or the worker's `test_titles`. The engine runs
+the declared test command itself and decides from the runner's own report.
+
+> Test-kind evidence is **L-ran**: the engine itself ran the declared test command on the exact candidate and received, through a channel no test file can write after the run, the runner's report that a test carrying the marker in its own title executed and passed. It does not show the test would fail if the behaviour broke (mutation testing and independent review cover that). It does not yet cover Angular/nx tests, tests run in a `threads` pool, or tampering with installed dependencies.
+
+Where it applies: in an opted-in run the engine decides at the review freeze (the original and the confirmation) and at
+ship-ready (before the proof, then a re-check after it), through `ensureEvidence` (`scripts/engine-gates.mjs:193`, `:339`,
+`:385`). A review repair's own re-freeze is not checked; the repaired candidate cannot be confirmed or shipped until the
+confirmation and ship-ready checks pass. **T0 (`fast-checks.mjs`) is not engine-enforced yet**: the engine never calls
+`fast-checks.mjs` or `verify`; see [prove.md](prove.md).
+
+### How to declare it
+
+All of these go in the DAG and the plan, before approval (the DAG digest is bound):
+
+1. `config.testKinds: { "policy": 1 }` (exactly that object; `scripts/engine-dag.mjs`, the `testKinds` check in
+   `validateEngineDag`).
+2. `config.securityPolicy: 2`. On a current approval a MISSING value is refused first as `security_policy_required`
+   (`scripts/run-engine.mjs:274`, called at `:397`) and an INVALID value as `dag_invalid` (`scripts/engine-dag.mjs:133`);
+   `test_kinds_needs_security_policy` (`scripts/run-engine.mjs:372`) applies only after those pass.
+3. The plan opts in (a `test-triggers:` line or a committed `.ship-ticket/test-triggers.json`) and carries the
+   `risk_floor:` line, as above.
+4. Exactly ONE `config.testCommands` entry with an `evidence` object:
+   `{"cmd":"node_modules/.bin/vitest","format":"vitest-json","args":["run","--pool=forks","--reporter=json","--outputFile={report}"],"evidence":{"report":"fd","covers":["<glob>"],"files":false,"config_paths":["<vitest config path>"]}}`.
+   `{report}` becomes the report channel (`/dev/fd/3`); an optional last `{files}` arg is replaced by the changed
+   test files matching `covers`, and `files` must be `true` exactly when `args` holds `{files}`
+   (`engine-dag.mjs`, evidence check; the exact grammar is the allowlist in `scripts/engine-test-kinds-io.mjs`, header and
+   `RUNNER`). Any other runner, flag or order is `runner_unsupported`. `--pool=forks` is part of the qualified invocation.
+
+Refusals at `init`: `test_kinds_policy_required` (the plan or declaration opts in but the DAG has no `config.testKinds`),
+`plan_tags_missing` (`config.testKinds` without an opt-in), `test_kinds_runner_missing` (no `evidence` entry),
+`multi_entry_unsupported_v0` (more than one; `scripts/run-engine.mjs:370-377`).
+
+At a gate: when no stored record fits the current evidence identity, the engine runs the runner, stores the record and
+returns `evidence_refreshed` **without deciding**; re-issue the identical call and it decides on that record
+(`engine-gates.mjs:474`, `:537`). `evidence_unquiet` means another attempt is live: wait for it
+(`engine-gates.mjs:505`). A failing or non-zero run is `evidence_run_failed`, never "missing". A kind counts only from a
+passed test whose own (leaf) title carries `[kind:<id>]` or `[plan:<id>]`, in a changed-path file that matches the test
+globs and `covers`; skipped, todo and pending tests never count, and a failed test or non-zero exit fails the whole run
+(`engine-test-kinds-io.mjs`, header: result, marker, file). The test's age is not checked: an old test that already
+carries the marker credits when it passes, and whether it is relevant is for the reviewers. RED runs are never evidence.
+
+### Limits
+
+- **R-L2:** a vacuous or assertion-free test, or one that `test.fails` inverts, passes. Mutation testing and independent review cover that.
+- **R-T2:** code that holds the report channel during the run can shape the report: a `threads` or `vmThreads` pool,
+  main-process config code (global setup, plugins, reporters), and on Linux a same-user reopen of `/proc/<pid>/fd/N`
+  (the last two are reasoned, not measured; the Linux vector is moot while the evidence channel is darwin-only,
+  `scripts/engine-io.mjs:257-259`). Mitigations: `--pool=forks`, `runner_config_changed` on any change to the
+  entry's `config_paths`, and the forging code being in the reviewed diff.
+- **R-TC:** a worker can edit git-ignored `node_modules`, including the runner. The evidence identity and `config_paths`
+  do not bind it. Review covers it.
+- **R-cov:** no Angular/nx coverage; only the Vitest runner is supported. The report channel is measured on macOS
+  (darwin) only: on any other platform the evidence run is refused `channel_unsupported`
+  (`scripts/engine-io.mjs:257-259`), so an opted-in run needs a macOS host.

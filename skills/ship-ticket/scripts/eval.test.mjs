@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildRun, attachUsage, aggregateUsage } from './run-summary.mjs';
-import { evaluateRun, suggest, evaluate } from './eval.mjs';
+import { evaluateRun, suggest, evaluate, lostSignal } from './eval.mjs';
 
 const script = fileURLToPath(new URL('./eval.mjs', import.meta.url));
 const schema = 'ship-ticket-run-log-v1';
@@ -542,7 +542,8 @@ test('T-C1 legacy golden: eval, run-summary and run-log summary output for old l
   const got = await capture(dirname(fileURLToPath(import.meta.url)));
   // S-01b2 P5r (AMD-P5r-2): the ONE intended difference from the pinned base capture. Policy v2 makes the refusal of the
   // policy_version:99 fixture name both supported versions; the golden itself stays the pure origin/main capture.
-  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4;'; // F12a: versions 3 and 4 (format-3 security block) are supported too
+  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4, 5, 6, 7, 8;'; // F12a: versions 3 and 4 (format-3 security block) are supported too
+  // S-12: versions 5-8 (1-4 with a pinned remote base) are supported too
   assert.equal(expected.policy_refusal.stderr.split(V1).length, 2, 'the base capture names version 1 exactly once');
   expected.policy_refusal.stderr = expected.policy_refusal.stderr.replace(V1, V12);
   assert.equal(JSON.stringify(got, null, 1), JSON.stringify(expected, null, 1));
@@ -589,4 +590,49 @@ test('T-C1 generator: re-captures the golden from the pinned base even under hos
     const { lf } = await import('./legacy-golden.mjs');
     assert.equal(lf(readFileSync(out, 'utf8')), lf(readFileSync(join(here, 'legacy-figures.golden.json'), 'utf8')), 'the committed golden is exactly what the base produces');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('S5: report from a linked worktree (and its subdirectory) pairs a start in its pre-S5 log with the end in the common log', (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'eval-s5-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const g = (cwd, ...a) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...a], { cwd, encoding: 'utf8' }).status, 0, a.join(' '));
+  const main = join(base, 'main'), wt2 = join(base, 'wt2');
+  mkdirSync(main);
+  g(main, 'init', '-q');
+  g(main, 'commit', '-q', '--allow-empty', '-m', 'init');
+  g(main, 'worktree', 'add', '-q', wt2);
+  mkdirSync(join(wt2, 'sub'));
+  const row = (event, ts, extra = {}) => JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T1', run_id: 'run-1', event, event_id: 'b', kind: 'phase',
+    name: 'BUILD', timestamp: ts, metrics: {}, ...extra }) + '\n';
+  const legacy = join(main, '.git', 'worktrees', 'wt2', 'ai-skills', 'ship-ticket'), common = join(main, '.git', 'ai-skills', 'ship-ticket');
+  mkdirSync(legacy, { recursive: true });
+  mkdirSync(common, { recursive: true });
+  writeFileSync(join(legacy, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z'));
+  // Cutover: the pre-S5 start in the legacy log is never read; only the shared log (here holding the full pair) counts.
+  writeFileSync(join(common, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z') + row('end', '2026-01-01T00:00:05.000Z', { duration_ms: 5000, outcome: 'pass' }));
+  for (const repo of [wt2, join(wt2, 'sub')]) {
+    for (const sel of [['--ticket', 'T1'], ['--all']]) {
+      const r = spawnSync(process.execPath, [script, 'report', '--repo', repo, ...sel], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.runs.length, 1, `${repo} ${sel}`);
+      assert.equal(out.runs[0].wall_ms_by_phase.BUILD, 5000);
+      assert.equal(JSON.stringify(out).includes('duplicate_start'), false);
+    }
+  }
+});
+
+test('S5 lostSignal list form: counts summed over every log directory; engine state read from stateDir (else the first dir)', (t) => {
+  const a = mkdtempSync(join(tmpdir(), 'lost-a-')), b = mkdtempSync(join(tmpdir(), 'lost-b-'));
+  t.after(() => { rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }); });
+  writeFileSync(join(a, 'T1.jsonl'), '{"torn"');
+  writeFileSync(join(b, 'T1.jsonl'), 'not json\n{"x"');
+  writeFileSync(join(b, 'T1.state.json'), '{bad');
+  const one = lostSignal(a, 'T1');
+  const both = lostSignal([a, b], 'T1');
+  assert.equal(both.torn_bytes, one.torn_bytes + lostSignal(b, 'T1').torn_bytes);
+  assert.equal(both.malformed_lines, 1);
+  assert.equal(both.state_unreadable, false, 'state from the first dir');
+  assert.equal(lostSignal([a, b], 'T1', { stateDir: b }).state_unreadable, true);
+  assert.deepEqual(lostSignal(a, 'T1'), lostSignal([a], 'T1'), 'the old one-directory signature is unchanged');
 });
