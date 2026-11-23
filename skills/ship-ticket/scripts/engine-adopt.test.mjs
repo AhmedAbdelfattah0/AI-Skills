@@ -83,7 +83,7 @@ test('[D8] a changed deps, writes or redSpecs is node_scope_changed (AC2 scope),
 });
 
 test('node definition compare covers every listed field, in any key order', () => {
-  assert.deepEqual([...ADOPT_NODE_FIELDS].sort(), ['deps', 'evidence', 'id', 'modelTier', 'othersOwned', 'phase', 'promptFile', 'reads', 'redSpecs', 'resources', 'risk', 'role', 'writes'].sort());
+  assert.deepEqual([...ADOPT_NODE_FIELDS].sort(), ['acceptance', 'checks', 'deps', 'evidence', 'id', 'modelTier', 'othersOwned', 'phase', 'promptFile', 'reads', 'redSpecs', 'resources', 'risk', 'role', 'writes'].sort());
   const reordered = GRAPH().map(n => (n.id === 'api-red' ? { ...n, redSpecs: [{ name: SPEC.name, file: SPEC.file }] } : n));
   assert.deepEqual(run(archived(), fresh(reordered)).adopted.length, 5, 'key order inside a spec object is not a scope change');
   const prompt = GRAPH().map(n => (n.id === 'web-ui' ? { ...n, promptFile: '/p/other.txt' } : n));
@@ -271,4 +271,45 @@ test('readArchive refuses a symlinked state file inside the archive', { skip: LI
   rmSync(join(dir, 'state.json'));
   symlinkSync(join(top, 'real-state.json'), join(dir, 'state.json'));
   assert.throws(() => readArchive(dir, opts(root)), refusedWith('adopt_archive_invalid'));
+});
+
+// ------------------------------------------------------------------ Round 1 repair: independence records adoption must carry
+
+const ROSTER = [{ provider: 'claude', model: 'sonnet', node: 'api-red', identity: 'claude:sonnet' },
+  { provider: 'claude', model: 'opus', node: 'api-impl', identity: 'claude:opus' }, { provider: 'claude', model: 'haiku', node: 'r-1', identity: 'claude:haiku' }];
+
+test('[D14] applyAdoption carries the archived builder roster (every builder, repairs included), deduplicated, and keeps it through a chained adoption', () => {
+  const s = fresh();
+  s.builders = [];
+  const old = archived(GRAPH(), { builders: structuredClone(ROSTER) });
+  applyAdoption(s, { dir: '/a/run-1-1', manifest_sha256: 'sha256:m', state: old }, run(old, fresh(), world({ changedFps: ['src/web-ui.txt'] })));
+  assert.deepEqual(s.builders.map(b => `${b.identity}@${b.node}`).sort(), ROSTER.map(b => `${b.identity}@${b.node}`).sort(), 'the whole roster, never only adopted nodes');
+  // chained: the adopted run is archived and adopted again; its roster (with the carried builders) travels on
+  const mid = { ...structuredClone(s), run_id: 'run-2' };
+  mid.builders.push({ provider: 'claude', model: 'sonnet', node: 'web-ui', identity: 'claude:sonnet' });
+  const third = fresh(GRAPH(), { run_id: 'run-3' });
+  third.builders = [{ provider: 'claude', model: 'opus', node: 'api-impl', identity: 'claude:opus' }];
+  applyAdoption(third, { dir: '/a/run-2-1', manifest_sha256: 'sha256:n', state: mid }, run(mid, fresh(GRAPH(), { run_id: 'run-3' })));
+  assert.deepEqual(third.builders.map(b => `${b.identity}@${b.node}`).sort(), [...ROSTER, { identity: 'claude:sonnet', node: 'web-ui' }].map(b => `${b.identity}@${b.node}`).sort());
+});
+
+test('[D15] [D16] [D17] source refusals of the independence class: a latched REAPPROVAL, an outstanding judgment, a trusted line the archive found untrusted', () => {
+  assert.equal(sourceRefusal(archived(GRAPH(), { security: { reapproval: { candidate_id: 'c' } } }), fresh())?.code, 'adopt_reapproval_pending');
+  assert.equal(sourceRefusal(archived(GRAPH(), { security: { reapproval: null } }), fresh()), null);
+  assert.equal(sourceRefusal(archived(GRAPH(), { judgments: [{ code: 'ownership_violation', node: 'web-ui', reason: 'x' }] }), fresh())?.code, 'adopt_source_judged');
+  const line = JSON.stringify({ run_id: 'run-2', event: 'START', approved_plan_digest: 'sha256:plan' });
+  const planted = archived(GRAPH(), { authority: { through: 1, trusted: [], untrusted: [{ line, seq: 4 }] } });
+  assert.equal(sourceRefusal(planted, fresh(GRAPH(), { authority: { through: 0, trusted: [line], untrusted: [] } }))?.code, 'adopt_authority_untrusted');
+  assert.equal(sourceRefusal(planted, fresh(GRAPH(), { authority: { through: 0, trusted: ['{"event":"START","run_id":"run-2","x":1}'], untrusted: [] } })), null);
+});
+
+test('node definition compare also covers acceptance and checks (the builder brief and unit checks)', () => {
+  const g = GRAPH().map(n => (n.id === 'web-ui' ? { ...n, acceptance: ['AC2'] } : n));
+  assert.equal(codeOf(run(archived(), fresh(g)), 'web-ui'), 'node_scope_changed');
+});
+
+test('the RED judgment names a fresh run as the clearing path (a second adopt is always adoption_window_closed)', () => {
+  const v = run(archived(), fresh(), world({ red: () => ({ changed: ['spec/api.test.mjs'], moved: false }) }));
+  assert.match(v.judgments[0].reason, /start a fresh run/);
+  assert.doesNotMatch(v.judgments[0].reason, /adopt again/);
 });

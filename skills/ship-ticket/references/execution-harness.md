@@ -482,17 +482,23 @@ node pending, no RED, freeze, review or earlier adoption: else `adoption_window_
 directly under `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/` after resolving symlinks (`adopt_source_outside`); a
 manifest or file that does not verify (`adopt_archive_invalid`); a live or unretired archived attempt (`adopt_source_live`); a
 different plan digest (`adopt_plan_mismatch`: cross-plan adoption is refused); policy semantics that differ other than the
-pinned base (`adopt_policy_mismatch`); units on either side (`adopt_units_unsupported`). Per node, an archived `done` node is
+pinned base and the repository identity flag (`adopt_policy_mismatch`; the identity-equality check itself arrives with S-28a,
+R14); units on either side (`adopt_units_unsupported`); a latched security REAPPROVAL (`adopt_reapproval_pending`); an
+outstanding archived judgment (`adopt_source_judged`); a RUN-STATE line this run trusts that the archived run saw appear while
+its work could run (`adopt_authority_untrusted`). The binding of the new run (narrative, START and DAG bytes) is re-verified
+first, as by every mutating command. Per node, an archived `done` node is
 adopted only when its definition (id, deps, reads, writes, othersOwned, resources, redSpecs, evidence, phase, role, risk,
-modelTier, promptFile path) is unchanged (`node_scope_changed`), its read and write fingerprints equal the work tree
+modelTier, promptFile path, acceptance, checks; not complexity or estimatedMemoryMb, which only schedule) is unchanged (`node_scope_changed`), its read and write fingerprints equal the work tree
 (`node_files_changed`) and every dependency is adopted (`dep_not_adopted`: a changed node invalidates every dependent). A
 RED-bearing node also needs its archived RED evidence to bind the new run's specs and runner and to be unchanged by the
 engine's own RED-validity check (same spec bytes, same base); the evidence is then carried verbatim. Otherwise the node is not
 adopted and the run stops on the judgment `adopt_red_unverified` (or `adopt_red_missing`; exit 2): re-running RED after the
 dependents' implementation is in the tree would only report `spec_not_failing`. A moved base always gives
-`adopt_red_unverified` in this slice. There is no command that clears it: restore the archived bytes and adopt into a fresh
-run, or start a run without adoption. Adopted nodes carry `adopted: { run_id, archive, manifest_sha256 }`; one `ADOPTED`
-engine note lists the adopted and rejected nodes (no RUN-STATE line). Review records, the freeze, repairs, security state,
+`adopt_red_unverified` in this slice. No command clears it in that run, and a second `adopt` is always
+`adoption_window_closed`: the clearing path is a fresh run (`archive --retire true`, a new START, `init`), adopted after the
+archived bytes are restored, or not adopted at all. Adopted nodes carry `adopted: { run_id, archive, manifest_sha256 }`; one `ADOPTED`
+engine note lists the adopted and rejected nodes (no RUN-STATE line). The archived builder roster (every builder, repairs
+included, and through a chained adoption) is carried, so an original builder is still `reviewer_is_builder` at the final review. Review records, the freeze, repairs, security state,
 test-kinds records, unit evidence and usage rows are never adopted; the archived usage stays in its archive.
 
 **Plan roots are not node writes.** A node whose `writes` or `othersOwned` sit under `.specs/` or

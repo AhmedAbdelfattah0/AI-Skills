@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { POSIX, fixture, narrativeDigest } from './engine-test-fixture.mjs';
+import { POSIX, fixture, narrativeDigest, passReview, primaryReview } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 import { archive } from './run-engine.mjs';
 
@@ -303,4 +303,46 @@ test('[A9] a run that never adopts carries no adoption trace, and archive withou
   ok(r);
   assert.equal(r.out.retired, undefined);
   assert.equal(digest(fx.stateFile()), before);
+});
+
+// ------------------------------------------------------------------ Round 1 repair (Codex BLOCKER, Opus minor a)
+
+/** A final review of the adopting run whose primary reviewer is `identity`. */
+const reviewBy = (fx, rx, identity, runId) => fx.gate('review', passReview(rx, fx.candidate(), { primary: primaryReview(fx.candidate(), { reviewer_identity: identity }) }), { runId });
+
+test('[D14] [BLOCKER] an original builder can never review its adopted outputs: reviewer_is_builder per builder, a fresh reviewer accepted, also after a chained adoption', { skip: WIN_SKIP }, (t) => {
+  const fx = completedRun(t);
+  const roster = fx.readState().builders;
+  assert.ok(roster.length >= 5, JSON.stringify(roster));
+  const dir = retireAndStart(fx);
+  ok(adoptCli(fx, dir));
+  // chained: run 2 (which built nothing itself) is archived and adopted by run 3
+  const r2 = fx.cli('archive', { retire: 'true' }, R2);
+  ok(r2);
+  fx.appendRunState({ run_id: 'run-3', event: 'START', timestamp: '2026-11-05T00:00:00Z', approved_plan_digest: narrativeDigest(readFileSync(fx.planFile, 'utf8')) });
+  ok(fx.cli('init', { dag: fx.dagFile }, { runId: 'run-3' }));
+  ok(fx.cli('adopt', { from: r2.out.archive }, { runId: 'run-3' }));
+  assert.deepEqual(fx.readState().builders.map(b => `${b.identity}@${b.node}`).sort(), roster.map(b => `${b.identity}@${b.node}`).sort());
+  for (const b of roster) {
+    const r = reviewBy(fx, `rx-${b.node}`, b.identity, 'run-3');
+    assert.equal(r.out?.code, 'reviewer_is_builder', `${b.identity} built ${b.node}: ${r.stdout}${r.stderr}`);
+  }
+  const fresh = reviewBy(fx, 'rx-fresh', 'gemini:pro', 'run-3');
+  assert.equal(fresh.out?.code, 'review_accepted', fresh.stdout + fresh.stderr);
+});
+
+test('[D13] [AC2] the approval leg: a narrative or DAG changed after init refuses adopt (binding re-verified), nothing written', { skip: WIN_SKIP }, (t) => {
+  const fx = completedRun(t);
+  const dir = retireAndStart(fx);
+  const before = digest(fx.stateFile());
+  const dag = readFileSync(fx.dagFile);
+  writeFileSync(fx.dagFile, Buffer.concat([dag, Buffer.from('\n')]));
+  refused(adoptCli(fx, dir), 'dag_mismatch');
+  writeFileSync(fx.dagFile, dag);
+  const plan = readFileSync(fx.planFile, 'utf8');
+  writeFileSync(fx.planFile, plan.replace('Approved narrative.', 'Approved narrative, edited after init.'));
+  refused(adoptCli(fx, dir), 'approval_mismatch');
+  assert.equal(digest(fx.stateFile()), before);
+  writeFileSync(fx.planFile, plan);
+  ok(adoptCli(fx, dir), 'restored bytes adopt');
 });

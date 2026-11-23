@@ -24,8 +24,11 @@ import { closure, coded, judgment, note, isObj, sha } from './engine-dag.mjs';
 import { runPolicy } from './engine-policy.mjs';
 import { LIVE, unretired } from './engine-quiesce.mjs';
 
-/** The node definition fields that must be equal for a node to be adopted (AC2 "scope"; promptFile by path, R11). */
-export const ADOPT_NODE_FIELDS = Object.freeze(['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'redSpecs', 'evidence', 'phase', 'role', 'risk', 'modelTier', 'promptFile']);
+/**
+ * The node definition fields that must be equal for a node to be adopted (AC2 "scope"; promptFile by path, R11). Omitted on
+ * purpose: complexity and estimatedMemoryMb (admission and scheduling only, never what a builder produces) and unit (refused).
+ */
+export const ADOPT_NODE_FIELDS = Object.freeze(['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'redSpecs', 'evidence', 'phase', 'role', 'risk', 'modelTier', 'promptFile', 'acceptance', 'checks']);
 /** The files an archive may list (run-engine.mjs archive). */
 const ARCHIVE_FILES = ['state.json', 'engine.jsonl', 'usage.jsonl'];
 /** Retire order: the state, the only handle a retry needs and the only thing that blocks `init`, is renamed last. */
@@ -112,6 +115,12 @@ export function sourceRefusal(oldS, newS, engine = null) {
   if (semanticsKey(oldP.semantics) !== semanticsKey(newP.semantics))
     return { code: 'adopt_policy_mismatch', reason: `archived policy_version ${oldP.version} and this run's ${newP.version} differ in semantics other than ${OWN_FLAGS.join(', ')}` };
   if (withUnits(oldS) || withUnits(newS)) return { code: 'adopt_units_unsupported', reason: 'adoption does not cover runs with units (their evidence bindings are not adopted)' };
+  // the independence class: records the old run derived from its execution history that a fresh run would not re-derive
+  if (oldS.security?.reapproval) return { code: 'adopt_reapproval_pending', reason: 'the archived run is latched on a security REAPPROVAL: re-plan and re-approve; its work is not adopted' };
+  if ((oldS.judgments ?? []).length) return { code: 'adopt_source_judged', reason: `the archived run has outstanding judgment(s) ${oldS.judgments.map(j => j?.code).join(', ')}: resolve them in the old run, then archive it again` };
+  const planted = new Set((oldS.authority?.untrusted ?? []).map(u => u?.line));
+  const trusted = (newS.authority?.trusted ?? []).filter(l => planted.has(l));
+  if (trusted.length) return { code: 'adopt_authority_untrusted', reason: `this run trusts RUN-STATE line(s) the archived run saw appear while its work could run: ${trusted.join(' ')}` };
   return null;
 }
 
@@ -153,8 +162,9 @@ export function adoptable({ newS, oldS, fingerprints, redChanges }) {
       const r = redCarry(id, n, oldS, newS, redChanges);
       if (r.code) {
         verdict[id] = { code: r.code, changed: r.changed, moved: r.moved };
-        judgments.push(judgment(r.code, id, `${r.reason}; not adopted, and RED is not re-run (the dependents' implementation is in the tree): `
-          + 'restore the archived bytes and adopt again, or start a run without adoption (WAIT_FOR_USER)'));
+        judgments.push(judgment(r.code, id, `${r.reason}; not adopted, and RED is not re-run (the dependents' implementation is in the tree). `
+          + 'No command clears this judgment in this run: start a fresh run (archive --retire, a new START, init) and adopt there after '
+          + 'restoring the archived bytes, or do not adopt (WAIT_FOR_USER)'));
         continue;
       }
       red[id] = r.ev;
@@ -182,6 +192,10 @@ export function applyAdoption(S, src, v) {
     Object.assign(S.nodes[id], { state: 'done', fps: structuredClone(o.fps), attempts: o.attempts ?? 0, retries: o.retries ?? 0, adopted: { ...from } });
   }
   for (const [id, ev] of Object.entries(v.red)) S.gates.red[id] = structuredClone(ev);
+  // Independence (gate.mjs reviewer_is_builder): every archived builder, adopted node or not, repairs included, stays a builder of
+  // this run, so a chained adoption carries the roster on; the work tree may hold any of their bytes.
+  const known = new Set((S.builders ??= []).map(b => `${b.identity}\u0000${b.node}`));
+  for (const b of src.state.builders ?? []) if (isObj(b) && !known.has(`${b.identity}\u0000${b.node}`)) { known.add(`${b.identity}\u0000${b.node}`); S.builders.push(structuredClone(b)); }
   S.judgments.push(...v.judgments);
   // R10: the archived run's usage stays in its archive; the note is the join key for a cumulative cost
   note(S, 'ADOPTED', { from_run: from.run_id, archive: from.archive, manifest_sha256: from.manifest_sha256, adopted: v.adopted,

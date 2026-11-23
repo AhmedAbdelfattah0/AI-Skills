@@ -1,5 +1,5 @@
 /**
- * S-13a (ASTF-7): every adoption guard has a named mutant (PLAN-S13 §5, D1-D12), on the ONE shared harness
+ * S-13a (ASTF-7): every adoption guard has a named mutant (PLAN-S13 §5, D1-D12; Round 1 repair D13-D17), on the ONE shared harness
  * (lib/mutation.test-helper.mjs: CRLF-safe anchors, a kill only when every failure is an assertion). Each mutant copies skills/
  * with ONE exact-once replacement and runs only the tests of its target file tagged with its own tag; the unpatched copy (the
  * control) must pass every tagged test of both files, or the verdicts would say nothing. Runs with ENGINE_MUTATION=1 or
@@ -48,6 +48,17 @@ export const ADOPT_MUTANTS = [
     from: "  if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep) || rel.includes(sep)) throw outside(", to: '  if (false) throw outside(' },
   { tag: 'D12', test: CLI, name: 'retire renames on a byte mismatch', file: ADOPT,
     from: "      throw coded('retire_mismatch',", to: "      void ('retire_mismatch'," },
+  // Round 1 repair (Opus minor a; Codex BLOCKER and its independence-class audit)
+  { tag: 'D13', test: CLI, name: 'adopt skips the binding re-check (a narrative or DAG changed after init is adopted)', file: ENGINE,
+    from: "    if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));\n    const closed = windowRefusal(E.S);", to: '    const closed = windowRefusal(E.S);' },
+  { tag: 'D14', test: PURE, name: 'the archived builder roster is dropped (an original builder reviews its adopted outputs)', file: ADOPT,
+    from: '  for (const b of src.state.builders ?? []) if (isObj(b)', to: '  for (const b of []) if (isObj(b)' },
+  { tag: 'D15', test: PURE, name: 'a latched security REAPPROVAL is adopted past', file: ADOPT,
+    from: '  if (oldS.security?.reapproval) return', to: '  if (false) return' },
+  { tag: 'D16', test: PURE, name: 'an outstanding archived judgment is adopted past', file: ADOPT,
+    from: '  if ((oldS.judgments ?? []).length) return', to: '  if (false) return' },
+  { tag: 'D17', test: PURE, name: 'a RUN-STATE line the archive found untrusted is trusted by the adopting run', file: ADOPT,
+    from: "  if (trusted.length) return { code: 'adopt_authority_untrusted'", to: "  if (false) return { code: 'adopt_authority_untrusted'" },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];
