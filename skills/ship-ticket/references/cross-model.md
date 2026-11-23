@@ -330,7 +330,7 @@ because the relay result does not record HEAD. It prints `outcome`, `debate_qual
 by owner decision D-15 as optional telemetry outside closure), `attestation_sha256`
 and `run_log_metrics`. A refusal is fixed inside Plan Mode. Because the RUN-STATE body is outside the
 digest, state `attestation_sha256` in the text accompanying `ExitPlanMode`; START
-records it as `debate_attestation_sha256` and `start-check` re-verifies it. Present
+records it as `debate_attestation_sha256` and `start-check` re-verifies it. The ExitPlanMode text also quotes the `debate-dispositions-v1:` line verbatim beside that hash, so the owner approves exactly the bytes the checker reads. A debate_policy 2 narrative may hold only single-line HTML comments: every `<!--` outside the RUN-STATE body must close with `-->` on the same line (`debate_narrative_hidden_markup`), so no comment can hide another line; the mandated `<!-- security-plan: ... -->` line is single-line. Residual: other ways to hide text in a rendered Markdown view (collapsed HTML, styling) are not scanned; the verbatim quote in the approval text and the host's native presentation are the control. Present
 outstanding choices through the normal native approval; unresolved product,
 security or scope decisions must be explicit in that request. Never invent
 consensus or promise an objectively best plan.

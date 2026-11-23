@@ -720,6 +720,26 @@ async function mutant(find, replace) {
   try { return await import(pathToFileURL(path).href); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 const MUTANTS = [
+  ['D-A9: no comment spans a line', "if (lines[n].indexOf('-->', at + 4) < 0) return", 'if (false) return',
+    (t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: ')); return { x: converged(t, { narr: base.replace(line, `<!--\n${line}\n-->`) }), code: 'debate_narrative_hidden_markup' }; }],
+  ['dispositions debate_id binding', "if (D && D.debate_id !== att.debate_id) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
+    (t) => ({ x: converged(t, { narr: narrative({ attestationRef: 'Attestation: debate-T-1-20261122T0900Z' }) }), code: 'debate_attestation_invalid' })],
+  ['dispositions carrier_degraded binding', "if (D && D.carrier_degraded !== carrier.degraded) add('debate_carrier_invalid'", "if (false) add('debate_carrier_invalid'",
+    (t) => ({ x: converged(t, { over: { carrier: { agent: 'fable', kind: 'native_session', identity: 'claude:fable', degraded: true } }, r1: { kind: 'native_session', session: 'f1' }, r2: { kind: 'native_session', session: 'f1' } }), code: 'debate_carrier_invalid' })],
+  ['round verdict equals the response object', "if (parsed.obj.verdict !== r.verdict) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
+    (t) => ({ x: converged(t, { r1: { verdict: 'AGREE', message: respond({ verdict: 'CHANGES_REQUESTED', request_id: 'req-1', plan_version: 'v1', plan_digest: OLD_DIGEST, findings: [{ id: 'P1', status: 'new', severity: 'major' }] }) } }), code: 'debate_attestation_invalid' })],
+  ['brief plan_digest binding', 'if (b.request_id !== r.request_id || b.plan_version !== r.plan_version || b.plan_digest !== r.plan_digest) {', 'if (b.request_id !== r.request_id || b.plan_version !== r.plan_version) {',
+    (t) => ({ x: converged(t, { r2: { brief: `request_id: req-final\nplan_version: v2\nplan_digest: sha256:${'9'.repeat(64)}\n` } }), code: 'debate_request_mismatch' })],
+  ['derivation: the highest severity wins', 'Math.max(cur?.rank ?? 0, f.severity ? RANK[f.severity] : (cur ? 0 : 4))', '(f.severity ? RANK[f.severity] : (cur ? cur.rank : 4))',
+    (t) => ({ x: unresolved(t, { r1: { findings: [{ id: 'P3', status: 'new', severity: 'blocker' }] }, r2: { findings: [{ id: 'P3', status: 'maintained', severity: 'minor' }] }, findings: [FIND({ id: 'P3', severity: 'minor', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] }), code: 'debate_attestation_invalid' })],
+  ['derivation: a never-opened maintained id has unknown severity', ': (cur ? 0 : 4));', ': (cur ? 0 : 1));',
+    (t) => ({ x: unresolved(t, { r2: { findings: [{ id: 'P3', status: 'maintained' }, { id: 'P5', status: 'maintained' }] }, findings: [FIND({ id: 'P3', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' }), FIND({ id: 'P5', severity: 'minor', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] }), code: 'debate_attestation_invalid' })],
+  ['dispositions top-level keys', 'if (!sameKeys(d, DISPO_KEYS)) return { error:', 'if (false) return { error:',
+    (t) => ({ x: converged(t, { narr: withResult(narrative(), 'CONVERGED', { extra: 1 }) }), code: 'debate_attestation_invalid' })],
+  ['dispositions exception shape', 'if (d.exception !== null && !(sameKeys(d.exception, EXCEPTION_KEYS)', 'if (d.exception !== null && false && !(sameKeys(d.exception, EXCEPTION_KEYS)',
+    (t) => ({ x: converged(t, { narr: withResult(narrative(), 'CONVERGED', { exception: { kind: 'WAIVED', reason: 'r', scope: 'this ticket', ack: 'a', extra: 1 } }) }), code: 'debate_attestation_invalid' })],
+  ['dispositions unique ids', 'if (ids.has(row.id)) return { error:', 'if (false) return { error:',
+    (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', 'One.', 'no'], ['P3', 'decided', 'Two.', 'no']] }) }), code: 'debate_attestation_invalid' })],
   ['digest binding', 'if (final.plan_digest !== digest) add(\'debate_digest_mismatch\'', 'if (false) add(\'debate_digest_mismatch\'',
     (t) => { const x = converged(t); return { x, text: planText(narrative({ body: 'Edited.' }), [x.line]), code: 'debate_digest_mismatch' }; }],
   ['evidence hash', 'if (sha256Of(bytes) !== want) add(\'debate_evidence_mismatch\'', 'if (false) add(\'debate_evidence_mismatch\'',
@@ -878,6 +898,8 @@ for (const [name, find, replace, make] of MUTANTS) {
   });
 }
 const START_MUTANTS = [
+  ['waived needs the frozen exception', "if (row.kind === 'waived' && !exceptionOk(D, 'WAIVED') && !exceptionOk(D, 'SKIPPED')) return ['debate_disposition_pending'", "if (false) return ['debate_disposition_pending'",
+    (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'waived', 'Out of scope.', 'no']] }) }), code: 'debate_disposition_pending' })],
   ['pending disposition', "if (placeholder(row.resolution)) return ['debate_disposition_pending'", "if (false) return ['debate_disposition_pending'",
     (t) => { const x = unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', '', 'no']] }) }); return { x, code: 'debate_disposition_pending' }; }],
   ['attestation hash at START', "if (start.debate_attestation_sha256 !== got.sha256) add('debate_attestation_changed'", "if (false) add('debate_attestation_changed'",
@@ -1488,4 +1510,39 @@ test('differential: the checker accepts EXACTLY what an independent reference pa
   assert.equal(n, 24000, 'the loop ran every case');
   assert.ok(accepted > 1000, `accepted ${accepted}`);
   for (const op of names.filter((x) => x !== 'none')) assert.ok(refusedBy[op] > 0, `operator ${op} produced a refusal`);
+});
+
+// ================================================================== D-A9 (2026-11-23): no hidden markup in a debate_policy 2 narrative
+// Raw-substring rule, no Markdown context: every raw `<!--` outside the RUN-STATE body must be followed by `-->` later on the
+// SAME line, so a comment can never span (and hide) another line. Only the exact substring `<!--` opens a comment.
+const DISPO_LINE = (narr) => narr.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
+test('[da9] a dispositions line hidden inside a multi-line HTML comment is refused (permanent negative of the hidden-line probe)', (t) => {
+  const base = withResult(narrative(), 'CONVERGED');
+  const x = converged(t, { narr: base.replace(DISPO_LINE(base), `<!--\n${DISPO_LINE(base)}\n-->`) });
+  assert.ok(codes(pre(x)).includes('debate_narrative_hidden_markup'), JSON.stringify(pre(x).errors));
+});
+test('[da9] multi-line, empty-form and unclosed comments anywhere in the narrative are refused; single-line comments, RUN-STATE and look-alikes are not', (t) => {
+  const base = withResult(narrative(), 'CONVERGED');
+  const refused = (narr) => codes(pre(converged(t, { narr }))).includes('debate_narrative_hidden_markup');
+  assert.ok(refused(base.replace('Do the thing.', 'Do the thing.\n<!-- a note\nthat spans lines -->')), 'a multi-line comment elsewhere');
+  assert.ok(refused(base.replace('Do the thing.', 'Do the thing. <!-->')), 'the HTML5 empty comment <!--> has no later --> on the line');
+  assert.ok(refused(base.replace('Do the thing.', 'Do the thing. <!--->')), 'nor does <!--->');
+  assert.ok(refused(base.replace('Do the thing.', 'Do the thing. <!-- a --> <!-- b')), 'a second opener left unclosed');
+  assert.deepEqual(pre(converged(t, { narr: base.replace('Do the thing.', 'Do the thing.\n<!-- security-plan: {"policy":2} -->') })).errors, [], 'a single-line comment such as the mandated security-plan line is allowed');
+  assert.deepEqual(pre(converged(t, { narr: base.replace('Do the thing.', 'Do the thing. <!- - and <! -- are not comment openers') })).errors, [], 'only the exact substring <!-- opens a comment');
+  const x = converged(t);
+  assert.deepEqual(pre(x, planText(x.narr, [x.line, '<!-- a note', 'inside RUN-STATE -->'])).errors, [], 'the RUN-STATE body is out of scope');
+  const behind = base.replace(DISPO_LINE(base), `<!-- a --> ${DISPO_LINE(base)}`);
+  assert.ok(codes(pre(converged(t, { narr: behind }))).includes('debate_attestation_invalid'), 'a dispositions line behind a single-line comment does not start at column 1');
+});
+test('[da9] debate-serialize --dispositions prints the canonical line; one of --attestation or --dispositions is required', (t) => {
+  const d = tmp(t);
+  const obj = dispoFrom({ rows: [['P3', 'accept_risk', 'The owner accepts it.', 'no']] }, 'UNRESOLVED');
+  const f = join(d, 'dispo.json');
+  writeFileSync(f, JSON.stringify(Object.fromEntries(Object.entries(obj).reverse())));
+  const r = run('debate-serialize', '--dispositions', f);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, `${B.serializeDispositions(obj)}\n`);
+  assert.equal(run('debate-serialize', '--dispositions', f, '--attestation', f).status, 2);
+  assert.equal(run('debate-serialize').status, 2);
 });

@@ -172,7 +172,7 @@ export const DEBATE_OUTCOMES = Object.freeze(['CONVERGED', 'UNRESOLVED', 'LIMIT_
 export const DEBATE_CODES = Object.freeze(['debate_policy_missing', 'debate_attestation_missing', 'debate_attestation_invalid', 'debate_attestation_changed',
   'debate_evidence_missing', 'debate_evidence_mismatch', 'debate_digest_mismatch', 'debate_request_mismatch', 'debate_response_invalid', 'debate_carrier_invalid',
   'debate_degradation_unacknowledged', 'debate_open_finding', 'debate_outcome_invalid', 'debate_limit_invalid', 'debate_exception_missing',
-  'debate_disposition_pending', 'debate_reconfirm_required', 'debate_workdir_unbound']);
+  'debate_disposition_pending', 'debate_reconfirm_required', 'debate_workdir_unbound', 'debate_narrative_hidden_markup']);
 /** The frozen acknowledgement sentences of the `debate-dispositions-v1` line (exact text). */
 export const DEGRADED_ACK = 'The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply.';
 export const SKIP_ACK = 'The owner approves skipping the Planning Debate for this ticket only.';
@@ -280,11 +280,10 @@ function readDispositions(narr) {
   const count = text.split(DISPO_TOKEN).length - 1;
   if (count !== 1) return { error: `the narrative must hold exactly one ${DISPO_TOKEN} line (found ${count} occurrences of the token)` };
   const line = text.split('\n').find((l) => l.includes(DISPO_TOKEN));
-  if (!line.startsWith(DISPO_HEAD)) return { error: `the ${DISPO_TOKEN} line must be a whole line from column 1: \`${DISPO_HEAD}<canonical JSON>\`` };
   let d;
   try { d = JSON.parse(line.slice(DISPO_HEAD.length)); } catch (err) { return { error: `the ${DISPO_TOKEN} JSON does not parse: ${err.message}` }; }
   if (!sameKeys(d, DISPO_KEYS)) return { error: `the ${DISPO_TOKEN} object must hold exactly ${DISPO_KEYS.join(', ')}` };
-  if (serializeDispositions(d) !== line) return { error: `the ${DISPO_TOKEN} line is not in canonical form (use \`brief.mjs debate-serialize --dispositions\`)` };
+  if (serializeDispositions(d) !== line) return { error: `the ${DISPO_TOKEN} line is not exactly \`${DISPO_HEAD}<canonical JSON>\` from column 1 (use \`brief.mjs debate-serialize --dispositions\`)` };
   if (d.v !== 1 || typeof d.debate_id !== 'string' || !DEBATE_OUTCOMES.includes(d.outcome) || typeof d.carrier_degraded !== 'boolean'
     || !(d.degradation_ack === null || typeof d.degradation_ack === 'string')) return { error: `${DISPO_TOKEN}: v 1, debate_id, outcome, carrier_degraded and degradation_ack have the wrong type or value` };
   if (d.exception !== null && !(sameKeys(d.exception, EXCEPTION_KEYS) && ['SKIPPED', 'WAIVED'].includes(d.exception.kind)
@@ -299,6 +298,24 @@ function readDispositions(narr) {
     ids.add(row.id);
   }
   return { d };
+}
+
+/**
+ * D-A9 (2026-11-23): why the narrative of a debate_policy 2 plan could hide a line, or null. Raw substrings only, no
+ * Markdown context: every exact `<!--` outside the RUN-STATE body (the two markers excluded) must be followed by `-->`
+ * later on the SAME line, so no comment can span, and hide, another line. `<!-->` and `<!--->` have no later `-->` and
+ * are refused (fail closed); a single-line comment such as the mandated `<!-- security-plan: ... -->` line is allowed.
+ * Only the exact substring `<!--` opens a comment (HTML recognises no other opener). Other hiding techniques in a
+ * rendered view are not scanned: the verbatim quote of the dispositions line in the ExitPlanMode text is the control.
+ */
+function hiddenMarkup(narr) {
+  const lines = normalise(narr.replace(RUN_STATE_BEGIN, '').replace(RUN_STATE_END, '')).split('\n');
+  for (let n = 0; n < lines.length; n += 1) {
+    for (let at = lines[n].indexOf('<!--'); at >= 0; at = lines[n].indexOf('<!--', at + 4)) {
+      if (lines[n].indexOf('-->', at + 4) < 0) return `narrative line ${n + 1} opens an HTML comment that does not close on the same line: only single-line comments are allowed in a debate_policy 2 narrative`;
+    }
+  }
+  return null;
 }
 
 /** Whether the dispositions line carries the owner exception of `kind` (SKIPPED or WAIVED): reason, scope this ticket and the exact acknowledgement. */
@@ -539,6 +556,10 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   const narr = narrativeOf(planText);
   const policy = debatePolicy(narr);
   if (policy.value !== '2') add('debate_policy_missing', policy.count > 1 ? 'the plan header holds more than one debate_policy line' : 'the plan header must carry `debate_policy: 2` (every new implementation plan)');
+  else {
+    const hidden = hiddenMarkup(narr);
+    if (hidden) add('debate_narrative_hidden_markup', hidden);
+  }
   const got = readAttestation(planText);
   if (!got.ok) { add(got.error.code, got.error.message); return done(); }
   const att = got.attestation;
@@ -735,7 +756,6 @@ function verifyRound(r, att, bundleDir, add) {
   const hashes = isObject(r.sha256) ? r.sha256 : {};
   if (r.read_only !== true) add('debate_carrier_invalid', `round ${r.n} is not recorded read_only: true`);
   if (r.status === 'completed' && !nonEmpty(r.session_id)) add('debate_carrier_invalid', `round ${r.n}: a completed round needs its non-empty session or thread id`);
-  if (r.status === 'completed' && !DIGEST_FORMAT.test(String(r.plan_digest))) add('debate_attestation_invalid', `round ${r.n}: a completed round records the plan_digest its brief carried`);
   const read = (name) => {
     const rel = files[name];
     if (!relativeEvidence(rel)) { add('debate_attestation_invalid', `round ${r.n} ${name}: evidence paths are bundle-relative (no absolute path, no ..); out_dir is provenance only`); return null; }

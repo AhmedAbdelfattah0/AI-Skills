@@ -287,6 +287,12 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   // approved amendment 2026-11-23: Markdown in section 7 is human-readable only; the authority is one dispositions line
   assert.ok(plan.includes('debate-dispositions-v1: <canonical JSON printed by debate-serialize --dispositions>'));
   assert.ok(plan.includes('The Markdown below is the human-readable ledger only and is never authoritative.'));
+  // D-A9: the approval text quotes the line verbatim; only single-line comments; the rendered-view residual is stated
+  assert.ok(x.includes('The ExitPlanMode text also quotes the `debate-dispositions-v1:` line verbatim beside that hash, so the owner approves exactly the bytes the checker reads.'));
+  assert.ok(x.includes('every `<!--` outside the RUN-STATE body must close with `-->` on the same line (`debate_narrative_hidden_markup`)'));
+  assert.ok(x.includes('Residual: other ways to hide text in a rendered Markdown view (collapsed HTML, styling) are not scanned; the verbatim quote in the approval text and the host\'s native presentation are the control.'));
+  assert.ok(skill.includes('Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.'));
+  assert.ok(plan.includes('the ExitPlanMode text quotes this line verbatim beside the attestation hash. Only single-line HTML comments may appear in the narrative.'));
   assert.ok(x.includes('A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text.'));
   assert.ok(x.includes('instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence.'));
   assert.ok(x.includes('the last counterpart response object is schema-valid and AGREE for the exact plan_version/plan_digest/request_id, verified from the retained relay evidence; the canonical ledger DERIVED from the response objects has no open blocker/major'));
