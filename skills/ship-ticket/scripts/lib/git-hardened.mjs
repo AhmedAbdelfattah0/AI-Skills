@@ -26,14 +26,18 @@ const RD_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOC
  * A cell is the full `git --version` line x OS x CPU arch x Node major. Only a cell whose full suite passed (start-up,
  * error, timeout and overflow paths, canary positive controls, the post-SIGKILL process check) is listed; it enters
  * through a PR that records that run. Everything else, newer gits included, refuses loudly (O-7).
- * Local darwin cells recorded by the S-02a0c PR (full suite incl. the 30k cost cell, on the committed lib); the CI
- * runner cells enter the same way once their logged strings have a green full-suite run.
+ * Recorded by the S-02a0c PR: four local darwin cells (full suite incl. the 30k cost cell, on the committed lib) and the
+ * four CI runner cells (git 2.56.1 on ubuntu-latest and macos-latest, Node 18/22) whose first full-suite run was green.
  */
 export const QUALIFIED_CELLS = Object.freeze([
   Object.freeze({ git: 'git version 2.50.1 (Apple Git-155)', os: 'darwin', arch: 'arm64', node: 18 }),
   Object.freeze({ git: 'git version 2.50.1 (Apple Git-155)', os: 'darwin', arch: 'arm64', node: 22 }),
   Object.freeze({ git: 'git version 2.55.0', os: 'darwin', arch: 'arm64', node: 18 }),
   Object.freeze({ git: 'git version 2.55.0', os: 'darwin', arch: 'arm64', node: 22 }),
+  Object.freeze({ git: 'git version 2.56.1', os: 'darwin', arch: 'arm64', node: 18 }),
+  Object.freeze({ git: 'git version 2.56.1', os: 'darwin', arch: 'arm64', node: 22 }),
+  Object.freeze({ git: 'git version 2.56.1', os: 'linux', arch: 'x64', node: 18 }),
+  Object.freeze({ git: 'git version 2.56.1', os: 'linux', arch: 'x64', node: 22 }),
 ]);
 export class GitCellUnqualified extends GitCapabilityError {
   constructor(cell) {

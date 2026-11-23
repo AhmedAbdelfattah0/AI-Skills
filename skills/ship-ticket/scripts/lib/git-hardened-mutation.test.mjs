@@ -18,7 +18,11 @@ const TEST = 'scripts/lib/git-hardened.test.mjs';
 const LIB = 'scripts/lib/git-hardened.mjs';
 const SKIP = process.platform === 'win32' ? 'POSIX only (win32 refuses)' : process.env.GIT_HARDENED_MUTATION !== '1' ? 'slow: runs with GIT_HARDENED_MUTATION=1' : false;
 
-/** [tag, what the mutant removes, from, to, also?]: each `from` must occur exactly once in lib/git-hardened.mjs. */
+/**
+ * [tag, what the mutant removes, from, to, also?, platform?]: each `from` must occur exactly once in lib/git-hardened.mjs. A
+ * platform-bound mutant runs only there: M29 (name normalisation) is equivalent on a normalisation-sensitive filesystem
+ * (Linux: the NFC path then simply does not exist, so the walk still reports `missing`); its kill needs APFS (darwin).
+ */
 export const MUTANTS = [
   ['M01', 'skip the win32 refusal', "  if (process.platform === 'win32') throw fail('platform_unsupported', 'context.create');\n", ''],
   ['M02', 'cells ignore the git version string', 'const sameCell = (a, b) => a.git === b.git && a.os', 'const sameCell = (a, b) => a.os'],
@@ -57,7 +61,7 @@ export const MUTANTS = [
   ['M26', 'descend into a symlinked tracked dir', '      if (cs.isSymbolicLink() || !cs.isDirectory()) {', '      if (!cs.isDirectory() && !cs.isSymbolicLink()) {'],
   ['M27', 'skip the nested .git refusal', "    for (const n of names) if (isDotGit(n) && (rel.length > 0 || !n.equals(B('.git')))) throw fail('worktree_entry_unsupported', op);\n", ''],
   ['M28', 'no FIFO/socket/device refusal at a tracked path', "  if (!lst) return diff(e.path, 'missing');\n  if (special(lst)) throw fail('worktree_entry_unsupported', op);\n", "  if (!lst) return diff(e.path, 'missing');\n"],
-  ['M29', 'normalise listed names (NFC)', '    const present = new Set(names.map(hexKey));', "    const present = new Set(names.map((n) => Buffer.from(n.toString().normalize('NFC')).toString('hex')));"],
+  ['M29', 'normalise listed names (NFC)', '    const present = new Set(names.map(hexKey));', "    const present = new Set(names.map((n) => Buffer.from(n.toString().normalize('NFC')).toString('hex')));", [], 'darwin'],
   ['M30', 'an exclusion matches as a string prefix', '(p.length > e.length && p.subarray(0, e.length + 1).equals(Buffer.concat([e, SLASH])))', '(p.length > e.length && p.subarray(0, e.length).equals(e))'],
   ['M31', 'drop the info/exclude copy', '  const exBytes = lstatOrNull(ex) ? readBounded(ex, MIB, op) : EMPTY;', '  const exBytes = EMPTY;'],
   ['M32', 'ignore self-ignoring .gitignore files', "  const gitignoreUntracked = others.ignored.filter((p) => !excluded(p) && p.subarray(p.lastIndexOf(0x2f) + 1).equals(B('.gitignore')));", '  const gitignoreUntracked = [];'],
@@ -94,7 +98,8 @@ test('mutation: every guard mutant is killed by an assertion in its tagged tests
   assert.equal(classify(control).verdict, 'survived', `control passes: ${control.stdout.slice(-2000)}`);
   assert.equal(ran(control), want, 'the control ran every tagged test');
   const verdicts = [];
-  for (const [tag, what, from, to, also = []] of MUTANTS) {
+  for (const [tag, what, from, to, also = [], platform] of MUTANTS) {
+    if (platform && platform !== process.platform) { t.diagnostic(`${tag} ${what}: not run (${platform}-only kill)`); continue; }
     const mutated = apply(SRC, [[from, to], ...also]);
     const r = await runMutantAsync({ root: ROOT, testRel: TEST, overrides: { [LIB]: mutated }, env: CHILD_ENV, args: pattern([tag]), timeout: 10 * 60 * 1000 });
     const v = classify(r);

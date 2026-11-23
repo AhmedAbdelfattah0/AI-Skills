@@ -11,7 +11,7 @@ import { deflateSync } from 'node:zlib';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { probeGit } from './git-capability.mjs';
-import { cellQualified, commitAll, currentCell, fixtureEnv, loadHardened, makeRepo, out, sh, tmp, writeTree } from './git-hardened.test-helper.mjs';
+import { cellQualified, commitAll, currentCell, fixtureEnv, loadHardened, makeRepo, out, sh, tmp, writeTree } from './hardened-fixtures.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const WIN = process.platform === 'win32';

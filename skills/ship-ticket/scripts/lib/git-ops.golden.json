@@ -337,6 +337,30 @@
       "os": "darwin",
       "arch": "arm64",
       "node": 22
+    },
+    {
+      "git": "git version 2.56.1",
+      "os": "darwin",
+      "arch": "arm64",
+      "node": 18
+    },
+    {
+      "git": "git version 2.56.1",
+      "os": "darwin",
+      "arch": "arm64",
+      "node": 22
+    },
+    {
+      "git": "git version 2.56.1",
+      "os": "linux",
+      "arch": "x64",
+      "node": 18
+    },
+    {
+      "git": "git version 2.56.1",
+      "os": "linux",
+      "arch": "x64",
+      "node": 22
     }
   ]
 }
