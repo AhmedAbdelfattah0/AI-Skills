@@ -1,5 +1,6 @@
 // FR-4b: the read-only review-cycles view of eval.mjs (existing records only: review_chain, state.repairs/judgments, run-log intervals).
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { buildRun } from './run-summary.mjs';
 import { evaluateRun, evaluate } from './eval.mjs';
@@ -131,7 +132,7 @@ test('CLI: report --cycles prints review_cycles, the default report does not', a
     const dir = join(repo, git('rev-parse', '--git-path', 'ai-skills/ship-ticket').stdout.trim());
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'T-1.state.json'), JSON.stringify({ run_id: 'run-1', review_chain: [original('rx-1', 'PASS')] }));
-    const script = new URL('./eval.mjs', import.meta.url).pathname;
+    const script = fileURLToPath(new URL('./eval.mjs', import.meta.url));
     const run = (...extra) => spawnSync('node', [script, 'report', '--repo', repo, '--ticket', 'T-1', ...extra], { encoding: 'utf8' });
     const withCycles = JSON.parse(run('--cycles').stdout);
     assert.equal(withCycles.runs[0].review_cycles.attempt_count, 1);
