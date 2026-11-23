@@ -232,8 +232,12 @@ const ROLE_KIND = { primary: 'original', second_opinion: 'original', confirmatio
  */
 export function dispatchKind(S, d) {
   if (d.role !== 'second_opinion') return ROLE_KIND[d.role];
-  const rec = (S.review_chain ?? []).find(r => r.kind === 'repair' && r.review_execution === d.review_execution);
-  return rec && d.candidate_id === rec.new_candidate ? 'confirmation' : 'original';
+  const chain = S.review_chain ?? [];
+  const rec = chain.find(r => r.kind === 'repair' && r.review_execution === d.review_execution);
+  if (!rec) return 'original';
+  // a candidate-less (legacy) second opinion is the confirmation's, pessimistically, until a confirmation record exists
+  if (d.candidate_id == null) return chain.some(r => r.kind === 'confirmation' && r.review_execution === d.review_execution) ? 'original' : 'confirmation';
+  return d.candidate_id === rec.new_candidate ? 'confirmation' : 'original';
 }
 /** Whether a chain record of the dispatch's review (execution, kind and candidate) consumed it. */
 export const consumedBy = (chain, d, kind) => chain.some(r => r.review_execution === d.review_execution && r.kind === kind
@@ -250,10 +254,13 @@ function context(S, f) {
     && e.authorized_by.length > 0 && !chain.some(r => r.review_execution === e.review_execution)) ?? null : null;
   const stageOf = (j) => (j.node && (S.nodes?.[j.node] || S.unit_checks?.[j.node]) ? 'BUILD' : j.node && (S.repairs ?? []).some(r => r.id === j.node) ? 'REPAIR' : 'loose');
   const judgments = { BUILD: [], REPAIR: [], loose: [] };
-  for (const j of f.blockers ?? []) judgments[stageOf(j)].push(j);
+  // a trusted RETRY of rx supersedes the failure of rx's own repair (the gate cancels it when the new review is recorded)
+  const superseded = (j) => retry && j.code === 'repair_failed' && (S.repairs ?? []).some(r => r.id === j.node && r.review_execution === rx);
+  const blockers = (f.blockers ?? []).filter(j => !superseded(j));
+  for (const j of blockers) judgments[stageOf(j)].push(j);
   const attempts = { BUILD: [], REPAIR: [], SHIP_READY: [] };
   for (const a of f.attempts ?? []) attempts[RUNNER_STAGE[a.kind] ?? 'BUILD'].push(a);
-  return { S, chain, O, rx, retry, repairRecord: mine('repair'), confirmation: mine('confirmation'),
+  return { S, chain, O, rx, retry, blockers, repairRecord: mine('repair'), confirmation: mine('confirmation'),
     repair: rx ? (S.repairs ?? []).find(r => r.kind === 'review' && r.review_execution === rx) ?? null : null,
     authorizing: last && ['original', 'confirmation'].includes(last.kind) && last.outcome === 'PASS' ? last : null, judgments, attempts };
 }
@@ -305,12 +312,12 @@ function reviewRules(stage, kind, want) {
     const rx = w.rx ?? curRx ?? done.at(-1) ?? null;
     const list = w.rx || rx !== curRx ? of(rx) : of(rx).filter(sameCand);
     const roles = rolesOf(list);
-    return { ...w, rx, roles, mine: list.filter(d => roles.includes(d.role)) };
+    return { ...w, kind, rx, roles, mine: list.filter(d => roles.includes(d.role)) };
   };
   const item = (d) => ({ role: d.role, event_id: d.event_id, review_execution: d.review_execution, candidate_id: d.candidate_id,
     started_at: d.started_at, marker: d.marker, deadline: d.deadline });
   const all = (w) => complete(w.roles, w.mine);
-  return {
+  return { rows,
     results: [
       { id: `${p}.gate`, stage, when: (S, f, x) => { const w = rows(S, f, x);
         return all(w) && res('READY', 'results_ready', 'gate_review', { reasons: [`every ${kind} result of ${w.rx} is in: reconcile and run gate review with them (close each run-log interval with end --carrier-result; never re-dispatch)`],
@@ -363,7 +370,7 @@ export const RULES = Object.freeze([
   // RECONCILE
   { id: 'reconcile.not_needed', stage: 'RECONCILE', when: (S, f, x) => x.O?.outcome === 'PASS' && done('not_needed') },
   { id: 'reconcile.reconciled', stage: 'RECONCILE', when: (S, f, x) => x.repair && done('reconciled') },
-  { id: 'reconcile.terminal', stage: 'RECONCILE', when: (S, f, x) => x.O?.outcome === 'FAIL' && !x.repair && res('NEEDS_APPROVAL', 'review_terminal', 'owner_retry',
+  { id: 'reconcile.terminal', stage: 'RECONCILE', when: (S, f, x) => x.O?.outcome === 'FAIL' && !x.repair && !x.retry && res('NEEDS_APPROVAL', 'review_terminal', 'owner_retry',
     { reasons: [`review ${x.rx} FAILED with no repair (overflow or nothing to fix): only an owner RETRY linked to it continues`] }) },
   // REPAIR
   { id: 'repair.not_needed', stage: 'REPAIR', when: (S, f, x) => (x.O?.outcome === 'PASS' || !x.repair) && done('not_needed') },
@@ -374,11 +381,11 @@ export const RULES = Object.freeze([
   { id: 'repair.done', stage: 'REPAIR', when: (S, f, x) => ['done', 'cancelled'].includes(x.repair?.state) && done(x.repair.state === 'done' ? 'repaired' : 'superseded') },
   // CONFIRMATION
   { id: 'confirmation.not_needed', stage: 'CONFIRMATION', when: (S, f, x) => !x.repairRecord && done('not_needed') },
-  { id: 'confirmation.failed', stage: 'CONFIRMATION', when: (S, f, x) => x.confirmation?.outcome === 'FAIL'
+  { id: 'confirmation.failed', stage: 'CONFIRMATION', when: (S, f, x) => x.confirmation?.outcome === 'FAIL' && !x.retry
     && res('FAILED', 'confirmation_failed', 'owner_retry', { reasons: [`the targeted confirmation of ${x.rx} FAILED: that is the result (never a new review cycle); only an owner RETRY continues`] }) },
   { id: 'confirmation.recorded', stage: 'CONFIRMATION', when: (S, f, x) => x.confirmation && done('confirmed', { review_execution: x.rx, candidate_id: x.confirmation.candidate_id }) },
   ...confirmationReview.results,
-  { id: 'confirmation.drift', stage: 'CONFIRMATION', when: (S, f, x) => x.repairRecord && f.candidate?.id !== x.repairRecord.new_candidate
+  { id: 'confirmation.drift', stage: 'CONFIRMATION', when: (S, f, x) => x.repairRecord && !x.retry && f.candidate?.id !== x.repairRecord.new_candidate
     && refusal('post_freeze_drift', [`the work tree is ${f.candidate?.id ?? f.candidate?.reason}, the repaired candidate is ${x.repairRecord.new_candidate}: revert the drift, or the owner appends a RETRY`]) },
   ...confirmationReview.waiting,
   // SHIP_READY
@@ -393,8 +400,9 @@ export const RULES = Object.freeze([
 ]);
 
 /** A trusted, unconsumed owner RETRY of the last original review: the new original review is owed under its id. */
+const retryRules = (f, x) => reviewRules('REVIEW', 'original', () => ({ candidate: f.candidate?.id, rx: x.retry.review_execution, roles: ['primary', 'second_opinion'] }));
 function retryReview(S, f, x) {
-  const rules = reviewRules('REVIEW', 'original', () => ({ candidate: f.candidate?.id, rx: x.retry.review_execution, roles: ['primary', 'second_opinion'] }));
+  const rules = retryRules(f, x);
   for (const r of [...rules.results, ...rules.waiting]) {
     const out = r.when(S, f, x);
     if (out) return { ...out, detail: { ...out.detail, retry: { review_execution: x.retry.review_execution, predecessor: x.rx } } };
@@ -427,22 +435,45 @@ function attemptSignal(a, f) {
 }
 
 /**
+ * Whether the latest review refusal of the current candidate still binds.
+ * - A trusted RETRY supersedes the refusals of the execution it retries, and only those: a row naming that execution, or a
+ *   row older than every result of the retry execution (the predecessor's submission).
+ * - A human-owned refusal (SECURITY, APPROVAL, ENGINE install, UNKNOWN) persists until validly resolved: a later accepted
+ *   gate row of this candidate (then it is not the latest row) or a RETRY; a later result never clears it.
+ * - An input refusal (orchestrator-owned) binds only while the current execution is complete and none of ITS results is
+ *   newer than the refusal: a pending or missing lane is waited for or dispatched first, and a corrected result clears it.
+ */
+export function reviewRefusalBinds(r, f, x, bucket) {
+  if (x.retry) {
+    const rx = x.retry.review_execution;
+    if (r.review_execution ? r.review_execution === x.retry.predecessor
+      : !(f.dispatches ?? []).some(d => d.review_execution === rx && (d.result_ms ?? Infinity) <= r.at_ms)) return false;
+  }
+  if (ACTIONS[refusal(r.code, []).action] === 'human') return true;
+  if (!bucket) return false; // an input refusal belongs to a review execution: none is current, so nothing is to be resubmitted
+  return complete(bucket.roles, bucket.mine) && !bucket.mine.some(d => (d.result_ms ?? -Infinity) > r.at_ms);
+}
+
+/**
  * Every signal of the run, flat and never filtered by stage: the current stage's own answer (its action label), every judgment,
  * every live attempt, the latest gate refusals of the CURRENT candidate (candidate-less rows apply to it), drift from the accepted
  * review's candidate, and the lock.
  */
-export function signals(S, f, x, stageResult) {
+export function signals(S, f, x, stageResult, bucket = null) {
   const out = stageResult ? [stageResult] : [];
   const cur = f.candidate?.id ?? null;
-  for (const j of [...(f.unbound ?? []), ...(f.blockers ?? [])]) out.push({ rule: 'signal.judgment', ...judgmentSignal(S, j, [`${j.node ? `${j.node}: ` : ''}${j.reason}`], { judgments: [{ code: j.code, ...(j.node ? { node: j.node } : {}) }] }) });
+  for (const j of [...(f.unbound ?? []), ...x.blockers]) out.push({ rule: 'signal.judgment', ...judgmentSignal(S, j, [`${j.node ? `${j.node}: ` : ''}${j.reason}`], { judgments: [{ code: j.code, ...(j.node ? { node: j.node } : {}) }] }) });
   for (const a of f.attempts ?? []) out.push({ rule: 'signal.attempt', ...attemptSignal(a, f) });
   const r = latestRow(f.gates, 'review', cur);
-  // a review refusal binds until a result of this candidate is written after it (the corrected input to submit again)
-  if (r && !r.ok && !(f.dispatches ?? []).some(d => (d.candidate_id == null || d.candidate_id === cur) && (d.result_ms ?? -Infinity) > r.at_ms))
-    out.push({ rule: 'signal.gate.review', ...refusal(r.code, [`gate review refused (${r.code}) for this candidate`], { action: 'gate_review', repeat: repeatOf(f.gates, 'review', cur) }) });
+  if (r && !r.ok && reviewRefusalBinds(r, f, x, bucket)) out.push({ rule: 'signal.gate.review',
+    ...refusal(r.code, [`gate review refused (${r.code}) for this candidate`], { action: 'gate_review', repeat: repeatOf(f.gates, 'review', cur),
+      detail: { kind: bucket?.kind ?? null, review_execution: bucket?.rx ?? r.review_execution ?? null } }) });
   const g = latestRow(f.gates, 'ship-ready', cur);
-  if (g && !g.ok && g.at_ms >= (latestRow(f.gates, 'review', cur)?.at_ms ?? -Infinity))
+  // a ship-ready refusal judged the authorization a trusted RETRY supersedes (the retried review's): it binds again only after the new review
+  if (g && !g.ok && !x.retry && g.at_ms >= (latestRow(f.gates, 'review', cur)?.at_ms ?? -Infinity))
     out.push({ rule: 'signal.gate.ship_ready', ...refusal(g.code, [`gate ship-ready refused (${g.code}) for this candidate`], { action: 'gate_ship_ready', repeat: repeatOf(f.gates, 'ship-ready', cur) }) });
+  // a budget stop with work owed is the owner's whatever stage answers first
+  if (f.work === true && f.budgetStop === true) out.push({ rule: 'signal.budget', ...refusal('budget_stop', ['the budget admits no further dispatch']) });
   // an uncomputable candidate is a fact of every stage (nothing about the work tree can be verified): never left to one bucket
   if (!cur) out.push({ rule: 'signal.candidate', ...unavailable(f) });
   else if (x.authorizing && !x.retry && cur !== x.authorizing.candidate_id)
@@ -478,7 +509,10 @@ export function derive(S, f, { omit = [] } = {}) {
     stages[st] = { disposition: r.disposition, code: r.code, rule: r.rule, owner: ACTIONS[r.action] };
     if (r.disposition !== 'COMPLETED') { current = st; stageResult = r; }
   }
-  let w = fold([...signals(S, f, x, stageResult ?? { rule: 'completed', disposition: 'COMPLETED', code: 'completed', action: 'none', reasons: ['every stage is complete'] }), ...later]);
+  // the review execution owed now, whatever stage is current (an attempt or a judgment elsewhere never hides its refusal)
+  const bucket = !x.O || x.retry ? (x.retry ? retryRules(f, x) : originalReview).rows(S, f, x)
+    : x.repairRecord && !x.confirmation ? confirmationReview.rows(S, f, x) : null;
+  let w = fold([...signals(S, f, x, stageResult ?? { rule: 'completed', disposition: 'COMPLETED', code: 'completed', action: 'none', reasons: ['every stage is complete'] }, bucket), ...later]);
   if (!omit.includes(LOCK_RULE) && w.disposition === 'READY' && f.lock?.state === 'held')
     w = { rule: LOCK_RULE, ...res('RUNNING', 'engine_running', 'wait', { reasons: [`an engine command holds the run lock; ${w.action} follows once it returns`], detail: { then: w.action } }) };
   w = humanGuard(w);
@@ -563,7 +597,7 @@ export function gateRows(file, runId) {
     let e;
     try { e = JSON.parse(line); } catch { continue; }
     if (e?.event !== 'GATE' || e.run_id !== runId) continue;
-    out.push({ gate: e.gate, ok: e.ok, code: e.code, candidate_id: e.candidate_id ?? null, at_ms: ms(e.timestamp) ?? 0 });
+    out.push({ gate: e.gate, ok: e.ok, code: e.code, candidate_id: e.candidate_id ?? null, review_execution: e.review_execution ?? null, at_ms: ms(e.timestamp) ?? 0 });
   }
   return out;
 }

@@ -15,7 +15,7 @@ import { POSIX } from './engine-test-fixture.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILLS = join(HERE, '..', '..');
-const PURE = 'ship-ticket/scripts/engine-next.test.mjs', CLI = 'ship-ticket/scripts/run-engine-next.test.mjs';
+const PURE = 'ship-ticket/scripts/engine-next.test.mjs', CLI = 'ship-ticket/scripts/run-engine-next.test.mjs', PROP = 'ship-ticket/scripts/engine-next-property.test.mjs';
 const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
   : process.env.ENGINE_MUTATION !== '1' && process.env.ENGINE_NEXT_MUTATION !== '1'
     ? 'slow: runs with ENGINE_MUTATION=1 (engine-properties CI job) or ENGINE_NEXT_MUTATION=1' : false;
@@ -52,7 +52,7 @@ export const NEXT_MUTANTS = [
   { tag: 'N14', test: PURE, name: 'a review is ready while a dispatched lane (partition) is still pending', file: NEXT,
     from: '&& list.length > 0 && list.every(ready);', to: '&& list.length > 0;' },
   { tag: 'N15', test: PURE, name: 'a confirmation second opinion is filed under the original review', file: NEXT,
-    from: "return rec && d.candidate_id === rec.new_candidate ? 'confirmation' : 'original';", to: "return 'original';" },
+    from: "return d.candidate_id === rec.new_candidate ? 'confirmation' : 'original';", to: "return 'original';" },
   { tag: 'N16', test: PURE, name: 'a repeated ENGINE verification refusal stays with the orchestrator', file: NEXT,
     from: "if (cls[0] === 'ENGINE_FAILURE' && cls[1] === 'verification') return repeat > 1 ?", to: "if (cls[0] === 'ENGINE_FAILURE' && cls[1] === 'verification') return false ?" },
   { tag: 'N17', test: PURE, name: 'a lock holder of unknown liveness is reported free', file: NEXT,
@@ -66,11 +66,11 @@ export const NEXT_MUTANTS = [
   { tag: 'N21', test: PURE, name: 'a result is timed by its interval close, not its file', file: NEXT,
     from: '(d.marker_exists && Number.isFinite(d.mtime) ? d.mtime : d.ended ? d.ended_ms : null)', to: '(d.ended ? d.ended_ms : d.marker_exists ? d.mtime : null)' },
   // Attempt 2 (PR #125 round 2): the fold order, the null-candidate rule and the history retention die by the invariant property test
-  { tag: 'N22', test: PURE, name: 'fold order: a human-owned signal ranks like an orchestrator BLOCKED', file: NEXT,
+  { tag: 'N22', test: PROP, name: 'fold order: a human-owned signal ranks like an orchestrator BLOCKED', file: NEXT,
     from: "if (ACTIONS[r.action] === 'human') return", to: 'if (false) return' },
-  { tag: 'N23', test: PURE, name: 'a candidate-less (legacy) lane is dropped instead of applying to the current candidate', file: NEXT,
+  { tag: 'N23', test: PROP, name: 'a candidate-less (legacy) lane is dropped instead of applying to the current candidate', file: NEXT,
     from: 'const sameCand = (d) => d.candidate_id == null || d.candidate_id === w.candidate;', to: 'const sameCand = (d) => d.candidate_id === w.candidate;' },
-  { tag: 'N24', test: PURE, name: 'gate history keeps one row per gate (the last), not every row per candidate', file: NEXT,
+  { tag: 'N24', test: PROP, name: 'gate history keeps one row per gate (the last), not every row per candidate', file: NEXT,
     from: "export const latestRow = (gates, gate, c) => (gates ?? []).filter(g => g.gate === gate && (g.candidate_id == null || g.candidate_id === c)).at(-1) ?? null;",
     to: 'export const latestRow = (gates, gate, c) => { const l = (gates ?? []).filter(g => g.gate === gate).at(-1); return l && (l.candidate_id == null || l.candidate_id === c) ? l : null; };' },
   { tag: 'N25', test: PURE, name: 'consumption ignores the candidate', file: NEXT,
@@ -79,6 +79,18 @@ export const NEXT_MUTANTS = [
     from: '{ repeat: unavailableRepeat(f.gates) }', to: '{ repeat: 1 }' },
   { tag: 'N27', test: PURE, name: 'a spent quiescence_unknown stays a human stop', file: NEXT,
     from: "const spentQuiescence = (S, j) => j.code === 'quiescence_unknown'", to: "const spentQuiescence = (S, j) => false && j.code === 'quiescence_unknown'" },
+  // Attempt 2 round 1 repair (PR #125 @ 77da744): N28-N31 die by the property tests (independent oracle), N32 by its pin
+  { tag: 'N28', test: PROP, name: 'a trusted RETRY never supersedes the retried execution\'s review refusals (deadlock)', file: NEXT,
+    from: '  if (x.retry) {\n    const rx = x.retry.review_execution;', to: '  if (false) {\n    const rx = x.retry.review_execution;' },
+  { tag: 'N29', test: PROP, name: 'a human-class review refusal clears like an input refusal (a later result clears it)', file: NEXT,
+    from: "  if (ACTIONS[refusal(r.code, []).action] === 'human') return true;\n", to: '' },
+  { tag: 'N30', test: PROP, name: 'a candidate-less second opinion during the confirmation is filed under the original', file: NEXT,
+    from: "if (d.candidate_id == null) return chain.some(r => r.kind === 'confirmation' && r.review_execution === d.review_execution) ? 'original' : 'confirmation';",
+    to: "if (d.candidate_id == null) return 'original';" },
+  { tag: 'N31', test: PROP, name: 'an input refusal binds over a pending or missing lane', file: NEXT,
+    from: '  return complete(bucket.roles, bucket.mine) && !bucket.mine.some(', to: '  return !bucket.mine.some(' },
+  { tag: 'N32', test: PURE, name: 'an input refusal never clears (a corrected result is ignored)', file: NEXT,
+    from: '&& !bucket.mine.some(d => (d.result_ms ?? -Infinity) > r.at_ms);', to: ';' },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];
@@ -89,7 +101,7 @@ const taggedCount = (file, tag) => [...readFileSync(join(SKILLS, file), 'utf8').
 const tapCount = (r, kind) => Number(new RegExp(`^# ${kind} (\\d+)$`, 'm').exec(r.stdout ?? '')?.[1] ?? NaN);
 
 test('S-14a mutation: the tagged next_action tests pass on the unpatched copy and each guard mutant is killed by its own tag', { skip: SKIP, timeout: 40 * 60 * 1000 }, async (t) => {
-  for (const file of [PURE, CLI]) {
+  for (const file of [PURE, CLI, PROP]) {
     const raw = await runMutantAsync({ root: SKILLS, testRel: file, env: CHILD_ENV, args: ['--test-name-pattern', '\\[N\\d+\\]'], timeout: TIMEOUT_MS });
     assert.equal(classify(raw).verdict, 'survived', `${file}: the control passes every tagged test: ${JSON.stringify(classify(raw))}`);
     assert.ok(taggedCount(file, null) > 0 && tapCount(raw, 'pass') >= taggedCount(file, null) && tapCount(raw, 'fail') === 0,

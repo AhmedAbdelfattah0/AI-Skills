@@ -443,76 +443,64 @@ test('A2 an in-progress execution of the current candidate is never hidden by an
   assert.equal(a.detail.item.review_execution, 'review-2');
 });
 
-// ---- invariant property test: a deterministic enumeration (>= 5,000 combinations) ------------------------------
-const BASES = {
-  build_pending: () => [S0({ nodes: { a: { id: 'a', state: 'pending', deps: [], redSpecs: [] } } }), { work: true }],
-  review_none: () => [S0(), {}],
-  review_partial: () => [S0(), { dispatches: [ready('primary')] }],
-  review_ready: () => [S0(), { dispatches: [ready('primary'), ready('second_opinion')] }],
-  reviewed_pass: () => [reviewed(), {}],
-  shipready_recorded: () => [reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), {}],
-  repairing: () => [repairing('pending'), {}],
-  confirming: () => [confirming(), {}],
-  confirmed_pass: () => [confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'PASS', candidate_id: C2 }] }), {}],
-};
-const JUDGMENTS = { none: [], node_failed: [{ code: 'node_failed', node: 'a', reason: 'x' }],
-  ownership_pair: [{ code: 'ownership_unavailable', node: 'a', reason: 'x' }, { code: 'ownership_violation', node: 'a', reason: 'y' }],
-  loose_approval: [AUTH('addendum_conflict')], loose_security: [AUTH('stale_candidate')], quiescence_spent: [{ code: 'quiescence_unknown', node: 'a', reason: 'x' }] };
-const CANDS = { C1, C2, none: null };
-const PARTITIONS = { none: [], legacy_pending: [disp('primary', { event_id: 'be', name: 'backend_review', candidate_id: null })], extra_done: [ready('primary', { event_id: 'cr', name: 'contract_review' })] };
-const HISTORY = { none: [], review_input: row('review', false, 'missing_reconciliation', C1, NOW - 5), review_security: row('review', false, 'stale_candidate', C1, NOW - 5),
-  ship_ok: [...row('review', true, 'review_accepted', C1, NOW - 60), ...row('ship-ready', true, 'ship_ready', C1, NOW - 50)],
-  ship_revert: [...row('review', true, 'review_accepted', C1, NOW - 60), ...row('ship-ready', true, 'ship_ready', C1, NOW - 50),
-    ...row('ship-ready', false, 'catalog_unavailable', C1, NOW - 40), ...row('ship-ready', false, 'evidence_run_failed', C2, NOW - 30)],
-  ship_refused_c2: row('ship-ready', false, 'evidence_run_failed', C2, NOW - 5) };
-const ATTEMPTS = { none: [], in_flight: [att()], overdue: [att({ deadline_ms: NOW - 1 })] };
+// The invariant property tests (independent oracle, enumeration, seeded fuzz, I6 walk) live in engine-next-property.test.mjs.
 
-function* combinations() {
-  for (const [b, base] of Object.entries(BASES)) for (const [j, judgments] of Object.entries(JUDGMENTS)) for (const [c, cand] of Object.entries(CANDS))
-    for (const [p, parts] of Object.entries(PARTITIONS)) for (const [h, gates] of Object.entries(HISTORY)) for (const [t, attempts] of Object.entries(ATTEMPTS)) {
-      const [S, over] = base();
-      if (j === 'quiescence_spent') S.attempts = [{ attempt_id: 'r1', node: 'a', status: 'abandoned', quiesced: true }];
-      const dispatches = over.dispatches ? [...over.dispatches, ...parts] : [];
-      yield { name: `${b}/${j}/${c}/${p}/${h}/${t}`, S, f: F0({ ...over, dispatches, blockers: judgments, candidate: { id: cand, reason: cand ? undefined : 'git failed' }, gates, attempts }), j, t };
-    }
-}
-/** An output's restrictiveness, read from the answer alone (lower is more restrictive); READY, RUNNING and WAITING are one progress tier; owner_publish is the end tier. */
-const metric = (a) => (a.turn_end === 'FAIL' ? 0 : a.turn_end === 'COMPLETE' || a.action === 'owner_publish' ? 4 : a.turn_end === 'WAIT_FOR_USER' ? 1 : a.disposition === 'BLOCKED' ? 2 : 3);
-const authorizingOf = (S) => { const l = (S.review_chain ?? []).at(-1); return l && ['original', 'confirmation'].includes(l.kind) && l.outcome === 'PASS' ? l : null; };
+// ---- Attempt 2 Round 1 repair (PR #125 @ 77da744): each test RED there, by assertion ----------------------------
+const RETRY_AUTH = { trusted: [JSON.stringify({ run_id: 'run-1', event: 'RETRY', review_execution: 'review-2', predecessor: 'review-1', authorized_by: 'owner' })], untrusted: [] };
+const owesReview2 = (a, name) => { assert.deepEqual([a.action, a.disposition, a.turn_end], ['dispatch_review', 'READY', 'CONTINUE'], `${name}: ${JSON.stringify([a.action, a.code])}`); assert.equal(a.detail.retry?.review_execution, 'review-2', name); };
 
-test('A2 invariants [N22] [N23] [N24] over >= 5,000 enumerated combinations: I1 human never CONTINUE, I2 publish only a valid current SHIP_READY, I3 no executor, I4 monotone, I5 no gate over a pending lane', () => {
-  let n = 0;
-  const fails = [];
-  for (const { name, S, f, j, t } of combinations()) {
-    n++;
-    const a = derive(S, f).next_action;
-    const cur = f.candidate.id;
-    // I1: a human-owned signal present (a judgment the owner resolves, or an overdue attempt) never continues silently
-    const human = f.blockers.some(x => j !== 'quiescence_spent' && ACTIONS[refusal(x.code, ['x']).action] === 'human') || t === 'overdue';
-    if (human && a.owner !== 'human' && a.turn_end === 'CONTINUE') fails.push(`I1 ${name}: ${a.action}/${a.turn_end}`);
-    // I2: owner_publish (or COMPLETE) only for the CURRENT candidate's SHIP_READY of the accepted review, with no later refusal of it
-    if (a.action === 'owner_publish' || a.turn_end === 'COMPLETE') {
-      const rows = f.gates.filter(g => g.gate === 'ship-ready' && (g.candidate_id == null || g.candidate_id === cur));
-      const lastOk = rows.map(g => g.ok).lastIndexOf(true);
-      const ok = cur && S.ship_ready?.candidate_id === cur && authorizingOf(S)?.candidate_id === cur && !rows.slice(lastOk + 1).some(g => !g.ok);
-      if (!ok) fails.push(`I2 ${name}`);
-    }
-    // I3: no model-owned action carries an executor; the owner is the action's
-    if (a.executor !== null || a.owner !== ACTIONS[a.action]) fails.push(`I3 ${name}`);
-    // I5: gate review is never offered while a dispatched lane of that execution (a legacy candidate-less one included) is pending
-    if (a.action === 'gate_review' && a.disposition === 'READY') {
-      const pending = f.dispatches.filter(d => d.review_execution === a.detail.review_execution && (d.candidate_id == null || a.detail.results.length) && !(d.ended || d.marker_exists));
-      if (pending.length) fails.push(`I5 ${name}`);
-    }
-    // I4: adding a signal (a judgment, an attempt) never makes the answer less restrictive
-    if (j === 'none' && t === 'none') {
-      for (const [jj, list] of Object.entries(JUDGMENTS)) for (const [tt, attempts] of Object.entries(ATTEMPTS)) {
-        if (jj === 'quiescence_spent') continue;
-        const more = derive(S, { ...f, blockers: list, attempts }).next_action;
-        if (metric(more) > metric(a)) fails.push(`I4 ${name} + ${jj}/${tt}: ${metric(a)} -> ${metric(more)}`);
-      }
-    }
-  }
-  assert.ok(n >= 5000, `enumerated ${n} combinations`);
-  assert.deepEqual(fails.slice(0, 15), [], `${fails.length} invariant violations`);
+test('A2r1 [N28] a trusted RETRY supersedes the refusals and terminal state of the execution it retries, and only those (no deadlock)', () => {
+  owesReview2(derive(retrying(), F0({ gates: row('review', false, 'stale_candidate', C1, NOW - 50) })).next_action, 'security refusal of review-1');
+  owesReview2(derive(retrying(), F0({ gates: row('review', false, 'confirmation_spent', C1, NOW - 50) })).next_action, 'approval refusal of review-1');
+  owesReview2(derive(S0({ freeze: { candidate: C1 }, review_chain: [FAIL], authority: RETRY_AUTH }), F0()).next_action, 'terminal original');
+  owesReview2(derive(confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'FAIL', candidate_id: C2 }], authority: RETRY_AUTH }), F0()).next_action, 'failed confirmation');
+  owesReview2(derive(repairing('failed', { authority: RETRY_AUTH }), F0({ blockers: [{ code: 'repair_failed', node: 'repair-review-1', reason: 'x' }] })).next_action, 'failed repair');
+  // only those: a refusal of the retry's own results stays the owner's stop
+  const own = derive(retrying(), F0({ dispatches: [ready('primary', { review_execution: 'review-2' }), ready('second_opinion', { review_execution: 'review-2' })],
+    gates: row('review', false, 'stale_candidate', C1, NOW) })).next_action;
+  assert.deepEqual([own.code, own.owner], ['stale_candidate', 'human']);
+  const other = derive(retrying(), F0({ blockers: [AUTH('addendum_conflict')] })).next_action;
+  assert.equal(other.code, 'addendum_conflict', 'a RETRY never supersedes another stop');
+});
+
+test('A2r1 [N29] a human-class review refusal persists until validly resolved; a later result of another execution never clears it', () => {
+  const a = derive(S0(), F0({ dispatches: [ready('primary', { result_ms: NOW - 100 }), ready('second_opinion', { result_ms: NOW - 100 }), ready('primary', { event_id: 'x9', review_execution: 'review-9', result_ms: NOW })],
+    gates: row('review', false, 'reviewer_is_builder', C1, NOW - 50) })).next_action;
+  assert.deepEqual([a.code, a.owner, a.turn_end], ['reviewer_is_builder', 'human', 'WAIT_FOR_USER']);
+  const b = derive(reviewed({ ship_ready: { candidate_id: C1 } }), F0({ dispatches: [ready('primary', { event_id: 'x9', review_execution: 'review-9', result_ms: NOW })],
+    gates: [...row('review', true, 'review_accepted', C1, NOW - 90), ...row('ship-ready', true, 'ship_ready', C1, NOW - 80), ...row('review', false, 'reviewer_is_builder', C1, NOW - 50)] })).next_action;
+  assert.notEqual(b.action, 'owner_publish');
+  assert.equal(b.owner, 'human');
+});
+
+test('A2r1 [N30] during the confirmation a candidate-less second opinion is the confirmation\'s lane: pending until a confirmation record exists', () => {
+  const a = derive(confirming(), F0({ candidate: { id: C2 }, dispatches: [ready('confirmation', { candidate_id: C2 }), disp('second_opinion', { event_id: 'so-legacy', candidate_id: null })] })).next_action;
+  assert.deepEqual([a.stage, a.action, a.disposition], ['CONFIRMATION', 'wait', 'WAITING'], JSON.stringify(a));
+});
+
+test('A2r1 [N31] lane readiness outranks an input refusal: a pending lane is WAITING, a missing role is dispatched (never a resubmission loop)', () => {
+  const lanes = [ready('primary', { event_id: 'fe', name: 'frontend_review', result_ms: NOW - 100 }), ready('second_opinion', { result_ms: NOW - 100 }), disp('primary', { event_id: 'be', name: 'backend_review', candidate_id: null })];
+  const a = derive(S0(), F0({ dispatches: lanes, gates: row('review', false, 'missing_reconciliation', C1, NOW - 50) })).next_action;
+  assert.deepEqual([a.action, a.disposition], ['wait', 'WAITING'], JSON.stringify([a.action, a.code]));
+  const b = derive(S0(), F0({ dispatches: [ready('primary', { result_ms: NOW - 100 })], gates: row('review', false, 'missing_second_opinion', C1, NOW - 50) })).next_action;
+  assert.deepEqual([b.action, b.detail.roles], ['dispatch_review', ['second_opinion']], JSON.stringify([b.action, b.code]));
+});
+
+test('A2r1 [N32] the clearing paths of a refusal: a corrected result clears an input refusal; a later accepted gate clears any refusal', () => {
+  const fixed = derive(S0(), F0({ dispatches: [ready('primary', { result_ms: NOW - 100 }), ready('second_opinion', { result_ms: NOW - 10 })], gates: row('review', false, 'missing_reconciliation', C1, NOW - 50) })).next_action;
+  assert.deepEqual([fixed.action, fixed.disposition], ['gate_review', 'READY']);
+  const stuck = derive(S0(), F0({ dispatches: [ready('primary', { result_ms: NOW - 100 }), ready('second_opinion', { result_ms: NOW - 100 })], gates: row('review', false, 'missing_reconciliation', C1, NOW - 50) })).next_action;
+  assert.deepEqual([stuck.action, stuck.disposition], ['gate_review', 'BLOCKED']);
+  const accepted = derive(reviewed(), F0({ gates: [...row('review', false, 'stale_candidate', C1, NOW - 60), ...row('review', true, 'review_accepted', C1, NOW - 50)] })).next_action;
+  assert.deepEqual([accepted.action, accepted.owner], ['gate_ship_ready', 'orchestrator']);
+  const shipFixed = derive(reviewed({ ship_ready: { candidate_id: C1 } }), F0({ gates: [...row('review', true, 'review_accepted', C1, NOW - 60), ...row('ship-ready', false, 'evidence_run_failed', C1, NOW - 50), ...row('ship-ready', true, 'ship_ready', C1, NOW - 40)] })).next_action;
+  assert.equal(shipFixed.action, 'owner_publish');
+});
+
+test('A2r1 [N26] the pessimistic uncomputable candidate also escalates in BUILD once repeated', () => {
+  const S = S0({ nodes: { a: { id: 'a', state: 'pending', deps: [], redSpecs: [] } } });
+  const once = derive(S, F0({ work: true, candidate: { id: null, reason: 'git' } })).next_action;
+  assert.deepEqual([once.code, once.action, once.owner], ['candidate_unavailable', 'resolve', 'orchestrator']);
+  const twice = derive(S, F0({ work: true, candidate: { id: null, reason: 'git' }, gates: row('review', false, 'candidate_unavailable', null, NOW) })).next_action;
+  assert.deepEqual([twice.code, twice.owner], ['candidate_unavailable', 'human']);
 });

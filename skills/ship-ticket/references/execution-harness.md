@@ -295,6 +295,14 @@ command reads it: the gates stay the enforcement, and a gate refusal always wins
   Gate history keeps every row, per gate and candidate. A record without a candidate applies to the
   current one. A SHIP_READY counts only for the current candidate with no later refusal of it. A spent
   `quiescence_unknown`, whose attempts are all retired, is the engine's `resume`.
+- **Refusals and RETRY:** a human-owned review refusal (security, approval, install or unknown) persists
+  until a later accepted gate of its candidate, or a RETRY. A later result never clears it. An input
+  refusal binds only while the owed execution has every lane's result and none newer than the refusal.
+  So a pending lane is waited for, a missing role is dispatched, and a corrected result clears the
+  refusal. A trusted, still-owed owner RETRY supersedes the retried execution's own review refusals, its
+  terminal FAIL, failed repair or failed confirmation, its drift and its ship-ready refusals, and only
+  those: the new review is dispatched, never asked for again. During a confirmation a candidate-less
+  second opinion is the confirmation's lane until a confirmation record exists.
 - **Dispositions:** READY, RUNNING, WAITING, BLOCKED, NEEDS_APPROVAL, COMPLETED, FAILED.
   `turn_end` is WAIT_FOR_USER for NEEDS_APPROVAL and for a BLOCKED the human owns, FAIL for FAILED,
   COMPLETE for COMPLETED, and CONTINUE otherwise. Progress never yields: an orchestrator- or

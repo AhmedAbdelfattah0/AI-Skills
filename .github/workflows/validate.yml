@@ -135,6 +135,7 @@ jobs:
           skills/ship-ticket/scripts/engine-base.test.mjs
           skills/ship-ticket/scripts/run-engine-base.test.mjs
           skills/ship-ticket/scripts/engine-next.test.mjs
+          skills/ship-ticket/scripts/engine-next-property.test.mjs
           skills/ship-ticket/scripts/run-engine-next.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
