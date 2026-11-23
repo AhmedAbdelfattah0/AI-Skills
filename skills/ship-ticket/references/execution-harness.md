@@ -91,6 +91,30 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
 - `admit` input `{ "phase", "estimatedMemoryMb", "members" }` re-reads live
   memory immediately before a wave starts. A refusal shrinks or delays that wave,
   never the plan. Neither command reserves memory.
+- `admitHost(snapshot, cls, running, history)` (library function in `harness.mjs`, pure, no I/O; the
+  reader is `hostSnapshot()`) decides whether ONE more task may start from kernel-sourced health only
+  (macOS memory pressure, swap USED growth, load averages, injected provider errors) and the caller's
+  `running` occupancy. It is fail-safe: any invalid snapshot, history or argument holds
+  (`snapshot_unavailable` / `invalid_args`), including every non-darwin host without an injected valid
+  snapshot; there is no fallback admit and it never terminates running work. HEAVY cap is 1, or 2 only
+  when healthy. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
+  `held_hysteresis`, `held_resample`. Caller contract: a host that is recovering (`held_hysteresis`)
+  needs two clean samples, each at least 15 s after the previous counted one, and the next sample must
+  arrive within 30 s or the recovery streak restarts. An already-open host also needs counted samples at
+  least 15 s apart, and may be polled at up to 3 minutes between counted samples; a longer unobserved gap
+  is treated as a cold start (two clean samples again). Unknown snapshot properties are rejected (fail-closed: a new snapshot field holds every call
+  until `admitHost` learns it).
+  Swap signal (POLICY NOTE, flagged for the owner): the recorded policy says "swap flat (no swapout
+  growth)"; `admitHost` uses swap USED growth (above a 2 MB tolerance, strictly greater, between any earlier and later
+  sample of the window) from the single-record `sysctl -n vm.swapusage`, the same intent from a numeric
+  one-line source instead of multi-line `vm_stat` text; high absolute swap alone never blocks. The snapshot
+  schema is `ship-ticket-host-snapshot-v2`. Every kernel input is matched by ONE whole-output grammar (no
+  splitting or line selection): pressure `/^[124]\n?$/`, swap `total = N.NNu  used = N.NNu  free = N.NNu`
+  with only `  (encrypted)` optional (`u` is K, M or G); any other shape is `snapshot_unavailable`. All swap
+  and load decisions use EXACT arithmetic: each `N.NN` is parsed to an integer count of hundredths (BigInt), converted to
+  one common integer unit (hundredths of KB), `used <= total` and `total == used + free` are compared exactly (no
+  tolerance; values beyond the safe-integer range are rejected, never rounded), growth is an exact integer difference
+  compared with the exact 2 MB tolerance, and load is compared as `5*load >= 3*cores`.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers
