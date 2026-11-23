@@ -255,21 +255,28 @@ const statusMap = (m) => {
 };
 
 /**
- * The one stdin form (S-02a0c, v3.1 R3): own data `{ kind: 'oid-lines', bytes }` and nothing else, where bytes is a
- * Buffer of 1..4096 bytes made only of `<40 lowercase hex>\n` lines. Returns a copy of the bytes, else null.
+ * The one stdin form (S-02a0c, v3.1 R3): own data `{ kind: 'oid-lines', bytes }` and nothing else. bytes must be a GENUINE
+ * Buffer (Buffer.compare's native Uint8Array check refuses a Proxy) carrying none of its own length, byteLength,
+ * byteOffset, buffer or valueOf. It is COPIED FIRST; the copy is validated (1..4096 bytes of `<40 lowercase hex>\n`
+ * lines) and only the copy is returned, so nothing the caller's object does after the check can change what git reads.
+ * Out of scope: same-realm tampering with Buffer.prototype or the TypedArray intrinsics themselves.
  */
 const STDIN_CAP = 4096;
+const OWN_STUFFING = ['length', 'byteLength', 'byteOffset', 'buffer', 'valueOf'];
+const genuineBuffer = (b) => { try { return Buffer.isBuffer(b) && Buffer.compare(b, b) === 0; } catch { return false; } };
 const oidLines = (s) => {
   if (!s || typeof s !== 'object' || Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;
   const b = ownValue(s, 'bytes');
-  if (!Buffer.isBuffer(b) || b.length === 0 || b.length > STDIN_CAP) return null;
+  if (!genuineBuffer(b) || OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;
+  const copy = Buffer.from(b);
+  if (copy.length === 0 || copy.length > STDIN_CAP) return null;
   let col = 0;
-  for (let i = 0; i < b.length; i++) {
-    const c = b[i];
+  for (let i = 0; i < copy.length; i++) {
+    const c = copy[i];
     if (col === 40 ? c !== 10 : !((c >= 48 && c <= 57) || (c >= 97 && c <= 102))) return null;
     col = col === 40 ? 0 : col + 1;
   }
-  return col === 0 ? Buffer.from(b) : null;
+  return col === 0 ? copy : null;
 };
 
 /** Conservative Windows environment-block bound in UTF-16 units (the real limit is UNVERIFIED, design R-A5). */

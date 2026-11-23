@@ -58,12 +58,13 @@ const sameCell = (a, b) => a.git === b.git && a.os === b.os && a.arch === b.arch
 const row = (id, policy, dir, write, argv, status, stdin) => Object.freeze({ id, policy, dir, write, argv: Object.freeze(argv), status: Object.freeze(status), stdin, callers: Object.freeze([]) });
 export const OPS_TABLE = Object.freeze([
   row('blob.read', 'raw-object', 'store', 'ro', ['cat-file', 'blob', '--end-of-options', '<oid>'], { 0: 'ok' }, null),
-  row('tree.list', 'raw-object', 'store', 'ro', ['ls-tree', '-r', '-z', '--full-tree', '--end-of-options', '<oid>'], { 0: 'ok' }, null),
+  row('tree.list', 'raw-object', 'store', 'ro', ['ls-tree', '-r', '-t', '-z', '--full-tree', '--end-of-options', '<oid>'], { 0: 'ok' }, null),
   row('tree.diff', 'raw-object', 'store', 'ro', ['diff-tree', '-z', '-r', '--raw', '--no-renames', '--no-ext-diff', '--no-textconv', '--end-of-options', '<oid>', '<oid>'], { 0: 'ok' }, null),
   row('commit.resolve', 'raw-object', 'store', 'ro', ['rev-parse', '--verify', '--quiet', '--end-of-options', '<oid>^{commit}'], { 0: 'ok', 1: 'absent' }, null),
   row('commit.tree', 'raw-object', 'store', 'ro', ['rev-parse', '--verify', '--quiet', '--end-of-options', '<oid>^{tree}'], { 0: 'ok', 1: 'absent' }, null),
   row('merge.base', 'raw-object', 'store', 'ro', ['merge-base', '--all', '--end-of-options', '<oid>', '<oid>'], { 0: 'ok', 1: 'none' }, null),
   row('object.exists', 'raw-object', 'store', 'ro', ['cat-file', '-e', '--end-of-options', '<oid>'], { 0: 'ok', 1: 'absent' }, null),
+  row('tree.raw', 'internal', 'store', 'ro', ['cat-file', '--batch'], { 0: 'ok' }, 'oid-lines'),
   row('store.init', 'internal', 'none', 'creates', ['init', '--bare', '--quiet', '--initial-branch=pin', '--object-format=sha1', '--template=<path>', '--end-of-options', '<path>'], { 0: 'ok' }, null),
   row('store.walk', 'internal', 'view', 'ro', ['rev-list', '--objects', '--no-object-names', '--end-of-options', '<oid>', '<oid>'], { 0: 'ok' }, null),
   row('store.sizes', 'internal', 'view', 'ro', ['cat-file', '--batch-check=%(objectsize) %(objectsize:disk)'], { 0: 'ok' }, 'oid-lines'),
@@ -111,7 +112,8 @@ const join = (a, name) => Buffer.concat([a, SLASH, name]);
 const B = (s) => Buffer.from(s);
 const str = (b) => decodeStrict(b, 'path_not_utf8');
 const missing = (e) => e.code === 'ENOENT' || e.code === 'ENOTDIR';
-const lstatOrNull = (p) => { try { return lstatSync(p); } catch (e) { if (missing(e)) return null; throw e; } };
+/** lstat, null when absent; any other failure (EACCES, ELOOP, ...) is a typed refusal, never a raw fs error. */
+const lstatOrNull = (p) => { try { return lstatSync(p); } catch (e) { if (missing(e)) return null; throw fail('worktree_entry_unsupported', 'lstat'); } };
 const sameNode = (a, b) => !!a && !!b && a.dev === b.dev && a.ino === b.ino;
 /** `child` equals or lies under `parent` (both realpath Buffers): a component-wise byte compare. */
 const inside = (child, parent) => child.equals(parent) || (child.length > parent.length && child.subarray(0, parent.length + 1).equals(Buffer.concat([parent, SLASH])));
@@ -129,6 +131,9 @@ const meter = (cap, code, op) => { let n = 0; return (k) => { n = n + k; if (n >
 /** Positive safe integers only; the caller may lower any default. */
 export const DEFAULTS = Object.freeze({
   timeoutMs: 120_000, maxFiles: 1_000_000, maxBytes: 16 * 1024 * MIB, maxObjectBytes: 512 * MIB, maxTotalObjectBytes: 4 * 1024 * MIB, removeEntries: 1_000_000,
+  // R2 cost bound: the size precheck batches at most 99 oids per cat-file (R3's 4 KiB stdin), about 4-6 ms per batch
+  // (MEASURED, darwin): 1,000,000 objects is about 10,100 batches, roughly 45-65 s, inside the 120 s default deadline.
+  maxObjects: 1_000_000,
 });
 
 /**
@@ -137,9 +142,9 @@ export const DEFAULTS = Object.freeze({
  * spawn or write (OC-4); an unqualified cell refuses after the probe and before any write (OC-5).
  */
 export function createContext({ timeoutMs = DEFAULTS.timeoutMs, maxFiles = DEFAULTS.maxFiles, maxBytes = DEFAULTS.maxBytes, maxObjectBytes = DEFAULTS.maxObjectBytes,
-  maxTotalObjectBytes = DEFAULTS.maxTotalObjectBytes, removeEntries = DEFAULTS.removeEntries, ...unknown } = {}) {
+  maxTotalObjectBytes = DEFAULTS.maxTotalObjectBytes, removeEntries = DEFAULTS.removeEntries, maxObjects = DEFAULTS.maxObjects, ...unknown } = {}) {
   if (process.platform === 'win32') throw fail('platform_unsupported', 'context.create');
-  if (Object.keys(unknown).length || ![timeoutMs, maxFiles, maxBytes, maxObjectBytes, maxTotalObjectBytes, removeEntries].every((n) => Number.isSafeInteger(n) && n > 0)) throw invalid();
+  if (Object.keys(unknown).length || ![timeoutMs, maxFiles, maxBytes, maxObjectBytes, maxTotalObjectBytes, removeEntries, maxObjects].every((n) => Number.isSafeInteger(n) && n > 0)) throw invalid();
   const runner = gitRunner({});
   const cell = Object.freeze({ git: runner.info.raw, os: process.platform, arch: process.arch, node: +process.versions.node.split('.')[0] });
   if (!QUALIFIED_CELLS.some((c) => sameCell(c, cell))) throw new GitCellUnqualified(cell);
@@ -153,7 +158,7 @@ export function createContext({ timeoutMs = DEFAULTS.timeoutMs, maxFiles = DEFAU
   const Rs = str(R);
   const env = composeEnv({ ambient: process.env, gitInfo: runner.info, hooksDir: `${Rs}/hooks`, policy: hermeticPolicy({ home: `${Rs}/home`, globalConfig: `${Rs}/empty.gitconfig` }) });
   const ctx = Object.freeze({ dispose: () => disposeContext(ctx) });
-  CTX.set(ctx, Object.freeze({ root: R, rootPath: Rs, rootStat: rst, runner, env, cell, timeoutMs, maxFiles, maxBytes, maxObjectBytes, maxTotalObjectBytes, removeEntries }));
+  CTX.set(ctx, Object.freeze({ root: R, rootPath: Rs, rootStat: rst, runner, env, cell, timeoutMs, maxFiles, maxBytes, maxObjectBytes, maxTotalObjectBytes, removeEntries, maxObjects }));
   return ctx;
 }
 
@@ -163,7 +168,9 @@ function live(ctx, op) {
   if (!st) throw invalid();
   if (DISPOSED.has(ctx)) throw fail('context_disposed', op);
   const now = lstatOrNull(st.root);
-  if (!sameNode(now, st.rootStat) || listDir(join(st.root, B('hooks')), () => 0).length !== 0) throw fail('context_tampered', op);
+  let hooks = null;
+  try { hooks = listDir(join(st.root, B('hooks')), () => 0); } catch { hooks = null; }
+  if (!sameNode(now, st.rootStat) || hooks === null || hooks.length !== 0) throw fail('context_tampered', op);
   return st;
 }
 function disposeContext(ctx) {
@@ -184,7 +191,8 @@ const handleOf = (h, kind) => { const s = HANDLES.get(h); if (!s || s.kind !== k
 
 /** Directory names as Buffers, one entry at a time, each charged to `spend` (no readdirSync: no full allocation first). */
 function listDir(p, spend) {
-  const d = opendirSync(p, { encoding: 'buffer' });
+  let d;
+  try { d = opendirSync(p, { encoding: 'buffer' }); } catch { throw fail('worktree_entry_unsupported', 'listdir'); }
   const names = [];
   try {
     for (let e = d.readSync(); e !== null; e = d.readSync()) { spend(1); names.push(e.name); }
@@ -192,12 +200,20 @@ function listDir(p, spend) {
   return names;
 }
 
+/** Whether a directory has any entry: one bounded read, charged one entry (a populated gitlink is never enumerated). */
+function hasEntry(p, spend) {
+  let d;
+  try { d = opendirSync(p, { encoding: 'buffer' }); } catch { throw fail('worktree_entry_unsupported', 'listdir'); }
+  try { const e = d.readSync(); spend(1); return e !== null; } finally { d.closeSync(); }
+}
+
 /** A regular file owned by the uid, at most `cap` bytes, read through a descriptor that matches the lstat. */
 function readBounded(p, cap, op) {
   const before = lstatSync(p);
   if (!before.isFile()) throw fail('worktree_entry_unsupported', op);
   if (before.uid !== uid()) throw fail('repo_owner_mismatch', op);
-  const fd = openSync(p, RD_FLAGS);
+  let fd;
+  try { fd = openSync(p, RD_FLAGS); } catch { throw fail('worktree_entry_unsupported', op); }
   try {
     const s = fstatSync(fd);
     if (!s.isFile() || !sameNode(s, before) || s.uid !== uid()) throw fail('worktree_entry_unsupported', op);
@@ -276,7 +292,7 @@ function recheckSource(s, op) {
 // ------------------------------------------------------------------ the store (v3 §2.2 + v3.1 R2): the only write path
 
 const STORE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n\tcommitGraph = false\n\tmultiPackIndex = false\n[gc]\n\tauto = 0\n';
-const VIEW_CONFIG = `${STORE_CONFIG}[pack]\n\tuseBitmaps = false\n\tthreads = 1\n`;
+const VIEW_CONFIG = `${STORE_CONFIG}[pack]\n\tuseBitmaps = false\n\treadReverseIndex = false\n\tthreads = 1\n`;
 const INDEX_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tcommitGraph = false\n\tmultiPackIndex = false\n\tuntrackedCache = false\n\tsparseCheckout = false\n\tsymlinks = true\n\tignorecase = false\n\tprecomposeUnicode = false\n[gc]\n\tauto = 0\n';
 const STORE_MARKER = 'ship-ticket-store v1\n';
 
@@ -329,18 +345,18 @@ export function initStore(ctx, { dir, source, oids, ...unknown } = {}) {
   try { real = realpathSync.native(parent, { encoding: 'buffer' }); } catch { throw fail('owned_dir_invalid', op); }
   if (!real.equals(parent) || [s.top, s.common, st.root].some((x) => inside(D, x) || inside(x, D)) || lstatOrNull(D)) throw fail('owned_dir_invalid', op);
   try { mkdir0700(D); } catch { throw fail('owned_dir_invalid', op); }
+  const created = lstatSync(D);
   const deadline = Date.now() + st.timeoutMs;
   try {
-    ingest(st, s, D, dir, head, base, deadline);
+    ingest(st, s, D, created, dir, head, base, deadline);
   } catch (e) {
-    discard(st, D, parent, deadline);
+    discard(st, D, created, parent, deadline);
     throw e;
   }
   return storeHandle(ctx, D, op);
 }
 
-function ingest(st, s, D, dir, head, base, deadline) {
-  const dst = lstatSync(D);
+function ingest(st, s, D, dst, dir, head, base, deadline) {
   git(st, 'store.init', null, [`${st.rootPath}/template`, dir], { deadline });
   unlinkSync(join(D, B('config')));
   writeNew(join(D, B('config')), STORE_CONFIG);
@@ -350,6 +366,7 @@ function ingest(st, s, D, dir, head, base, deadline) {
   // R2: every reachable object's inflated size, before any pack is parsed or written.
   const all = lines(corruptOnFail(() => git(st, 'store.walk', Vs, [head, base], { deadline }).stdout, 'store.walk'), 'store.walk');
   if (!all.every(isOid)) throw fail('object_corrupt', 'store.walk');
+  if (all.length > st.maxObjects) throw fail('object_too_large', 'store.walk');
   const total = meter(st.maxTotalObjectBytes, 'object_too_large', 'store.sizes');
   for (const chunk of oidChunks(all)) {
     const sizes = lines(corruptOnFail(() => git(st, 'store.sizes', Vs, [], { stdin: chunk, deadline }).stdout, 'store.sizes'), 'store.sizes');
@@ -382,7 +399,10 @@ function ingest(st, s, D, dir, head, base, deadline) {
 }
 
 /** The failure path of a lib-created dir: rename into `<parent>/.quarantine/`, then bounded removal (v3 §2.6, v3.1 R1). */
-function discard(st, D, parent, deadline) {
+function discard(st, D, created, parent, deadline) {
+  // Only the dir this call created is ever moved or removed: a replacement (another inode or owner) is left alone.
+  const now = lstatOrNull(D);
+  if (!sameNode(now, created) || !now.isDirectory() || now.uid !== uid()) throw fail('context_tampered', 'store.init');
   const q = join(parent, B('.quarantine'));
   try {
     const qs = lstatOrNull(q);
@@ -435,10 +455,11 @@ export function op(handle, id, operands = []) {
   const st = live(h.ctx, id);
   if (!sameNode(lstatOrNull(h.storeDir), h.stat)) throw fail('context_tampered', id);
   checkStore(h.storeDir, id);
-  const res = git(st, id, h.storePath, operands, { deadline: Date.now() + st.timeoutMs });
+  const deadline = Date.now() + st.timeoutMs;
+  if (id === 'tree.list') return listTree(st, h, operands, deadline);
+  const res = git(st, id, h.storePath, operands, { deadline });
   const oid = operands[0];
   if (id === 'blob.read') return verifiedBlob(res.stdout, oid, id);
-  if (id === 'tree.list') return treeEntries(res.stdout, id);
   if (id === 'tree.diff') return diffRecords(res.stdout, id);
   if (id === 'object.exists') return res.outcome === 'ok';
   const found = lines(res.stdout, id);
@@ -464,22 +485,70 @@ function unsafePath(p) {
 }
 const isDotGit = (c) => c.length === 4 && c[0] === 0x2e && (c[1] | 0x20) === 0x67 && (c[2] | 0x20) === 0x69 && (c[3] | 0x20) === 0x74;
 
-const ENTRY_HEAD = /^(100644|100755|120000|160000) (blob|commit) ([0-9a-f]{40})$/;
-/** ls-tree -r -z records. Every entry is checked (no last-wins): unsafe components, duplicates and a non-tree entry that is a prefix of another path refuse (R6). */
+/**
+ * tree.list: `ls-tree -r -t` records, every entry checked (R6), then the RAW bytes of every tree involved (the root and
+ * each subtree, through `cat-file --batch` in <= 99-oid batches) so an entry NAME holding a slash, which ls-tree prints
+ * exactly like a subtree path, is refused. Returns the non-tree entries.
+ */
+function listTree(st, h, operands, deadline) {
+  const id = 'tree.list';
+  const all = treeEntries(git(st, id, h.storePath, operands, { deadline }).stdout, id);
+  const root = lines(git(st, 'commit.tree', h.storePath, operands, { deadline }).stdout, id);
+  if (root.length !== 1 || !isOid(root[0])) throw fail('object_corrupt', id);
+  const trees = [root[0], ...all.filter((e) => e.type === 'tree').map((e) => e.oid)];
+  for (const chunk of oidChunks(trees)) rawTrees(git(st, 'tree.raw', h.storePath, [], { stdin: chunk, deadline }).stdout, chunk.bytes.length, id);
+  return Object.freeze(all.filter((e) => e.type !== 'tree'));
+}
+const NL = Buffer.from('\n');
+/** `cat-file --batch` output: exactly one `<oid> tree <size>` object per asked oid (41 bytes of stdin each), each tree's entries checked. */
+function rawTrees(buf, asked, id) {
+  let objects = 0;
+  for (let at = 0; at < buf.length;) {
+    const nl = buf.indexOf(0x0a, at);
+    const m = nl < 0 ? null : /^([0-9a-f]{40}) tree (\d{1,10})$/.exec(decodeStrict(buf.subarray(at, nl)));
+    if (!m) throw fail('object_corrupt', id);
+    const end = nl + 1 + +m[2];
+    if (end >= buf.length || !buf.subarray(end, end + 1).equals(NL)) throw fail('object_corrupt', id);
+    rawTreeNames(buf.subarray(nl + 1, end), id);
+    at = end + 1;
+    objects = objects + 1;
+  }
+  if (objects * 41 !== asked) throw fail('object_corrupt', id);
+}
+/** Raw tree entries `<mode> <name>\0<20-byte oid>`: a name holding a slash, or an unsafe component, refuses. */
+function rawTreeNames(t, id) {
+  for (let at = 0; at < t.length;) {
+    const sp = t.indexOf(0x20, at);
+    const nul = sp < 0 ? sp : t.indexOf(0, sp + 1);
+    if (nul < 0 || nul + 21 > t.length) throw fail('object_corrupt', id);
+    const name = t.subarray(sp + 1, nul);
+    if (name.indexOf(0x2f) >= 0 || unsafePath(name)) throw fail('tree_path_unsafe', id);
+    at = nul + 21;
+  }
+}
+
+const ENTRY_HEAD = /^(100644|100755|120000|160000|040000) (blob|commit|tree) ([0-9a-f]{40})$/;
+const typeOfMode = (m) => (m === '160000' ? 'commit' : m === '040000' ? 'tree' : 'blob');
+/** ls-tree -r -t -z records. Every entry is checked (no last-wins): unsafe components, duplicates, a path whose parent is no tree entry, and a non-tree entry that is a prefix of another path refuse (R6). */
 function treeEntries(stdout, id) {
   const out = [];
   for (const rec of zSplit(stdout)) {
     const tab = rec.indexOf(0x09);
     if (tab < 0) throw fail('object_corrupt', id);
     const m = ENTRY_HEAD.exec(decodeStrict(rec.subarray(0, tab)));
-    if (!m || (m[1] === '160000') !== (m[2] === 'commit')) throw fail('object_corrupt', id);
+    if (!m || typeOfMode(m[1]) !== m[2]) throw fail('object_corrupt', id);
     const path = Buffer.from(rec.subarray(tab + 1));
     if (unsafePath(path)) throw fail('tree_path_unsafe', id);
     out.push(Object.freeze({ mode: m[1], type: m[2], oid: m[3], path }));
   }
   const seen = new Set();
-  for (const e of out) { if (seen.has(hexKey(e.path))) throw fail('tree_path_unsafe', id); seen.add(hexKey(e.path)); }
-  for (const e of out) for (const pre of prefixes(e.path)) if (seen.has(hexKey(pre))) throw fail('tree_path_unsafe', id);
+  const leaves = new Set();
+  for (const e of out) {
+    if (seen.has(hexKey(e.path))) throw fail('tree_path_unsafe', id);
+    seen.add(hexKey(e.path));
+    if (e.type !== 'tree') leaves.add(hexKey(e.path));
+  }
+  for (const e of out) for (const pre of prefixes(e.path)) if (leaves.has(hexKey(pre)) || !seen.has(hexKey(pre))) throw fail('tree_path_unsafe', id);
   return Object.freeze(out);
 }
 /** Every proper directory prefix of a path (`a/b/c` gives `a`, `a/b`). */
@@ -599,6 +668,7 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
     }
   }
   const absOf = (rel) => (rel.length ? join(top, rel) : top);
+  const untrackedDirs = [];
   for (const queue = [EMPTY]; queue.length;) {
     const rel = queue.shift();
     const node = dirs.get(hexKey(rel));
@@ -606,6 +676,13 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
     const present = new Set(names.map(hexKey));
     for (const n of names) if (isDotGit(n) && (rel.length > 0 || !n.equals(B('.git')))) throw fail('worktree_entry_unsupported', op);
     const childRel = (name) => (rel.length ? Buffer.concat([rel, SLASH, name]) : name);
+    // Untracked (or ignored) directories here are scanned for a nested .git below (R5: tracked dir or not).
+    const tracked = new Set([...node.dirs, ...node.files.map((f) => f.name)].map(hexKey));
+    for (const n of names) {
+      if (tracked.has(hexKey(n)) || isDotGit(n) || excluded(childRel(n))) continue;
+      const us = lstatOrNull(absOf(childRel(n)));
+      if (us && us.isDirectory() && !us.isSymbolicLink()) untrackedDirs.push(childRel(n));
+    }
     // A tracked name must be listed byte-exactly; an absent gitlink is clean (an unpopulated submodule).
     const here = (name, gitlink = false) => {
       if (present.has(hexKey(name))) return true;
@@ -623,7 +700,17 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
     }
     for (const { name, entry } of node.files) {
       if (!here(name, entry.mode === '160000')) continue;
-      checkEntry(st, h, entry, absOf(entry.path), { diff, spendBytes, deadline, op });
+      checkEntry(st, h, entry, absOf(entry.path), { diff, spendFiles, spendBytes, deadline, op });
+    }
+  }
+  for (const queue = untrackedDirs; queue.length;) {
+    const rel = queue.shift();
+    if (Date.now() > deadline) throw fail('worktree_budget_exceeded', op);
+    for (const n of listDir(absOf(rel), spendFiles)) {
+      if (isDotGit(n)) throw fail('worktree_entry_unsupported', op);
+      const crel = Buffer.concat([rel, SLASH, n]);
+      const cs = lstatOrNull(absOf(crel));
+      if (cs && cs.isDirectory() && !cs.isSymbolicLink() && !excluded(crel)) queue.push(crel);
     }
   }
   const others = untrackedLists(st, h, top, s, oid, deadline);
@@ -639,17 +726,18 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
 }
 /** A raw-object row from inside the lib (same checks as op()). */
 function op_(st, h, id, operands, deadline) {
+  if (!sameNode(lstatOrNull(h.storeDir), h.stat)) throw fail('context_tampered', id);
   checkStore(h.storeDir, id);
-  const res = git(st, id, h.storePath, operands, { deadline });
-  return id === 'tree.list' ? treeEntries(res.stdout, id) : verifiedBlob(res.stdout, operands[0], id);
+  if (id === 'tree.list') return listTree(st, h, operands, deadline);
+  return verifiedBlob(git(st, id, h.storePath, operands, { deadline }).stdout, operands[0], id);
 }
 
-function checkEntry(st, h, e, abs, { diff, spendBytes, deadline, op }) {
+function checkEntry(st, h, e, abs, { diff, spendFiles, spendBytes, deadline, op }) {
   const lst = lstatOrNull(abs);
   if (!lst) return diff(e.path, 'missing');
   if (special(lst)) throw fail('worktree_entry_unsupported', op);
   if (e.mode === '160000') {
-    if (lst.isDirectory()) { if (listDir(abs, () => 0).length !== 0) diff(e.path, 'gitlink_populated'); return undefined; }
+    if (lst.isDirectory()) { if (hasEntry(abs, spendFiles)) diff(e.path, 'gitlink_populated'); return undefined; }
     return diff(e.path, 'kind');
   }
   if (e.mode === '120000') {

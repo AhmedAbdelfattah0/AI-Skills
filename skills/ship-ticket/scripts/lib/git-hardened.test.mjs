@@ -106,7 +106,7 @@ test('T1: the closed OPS table and the qualified cells equal lib/git-ops.golden.
   for (const r of H.OPS_TABLE) {
     assert.ok(r.argv.every((a) => typeof a === 'string'), r.id);
     if (r.policy === 'raw-object') assert.equal(r.write, 'ro', `${r.id}: raw-object rows never write`);
-    assert.equal(r.stdin === 'oid-lines', ['store.sizes', 'store.pack'].includes(r.id), `${r.id}: only the two R2/R3 rows take stdin`);
+    assert.equal(r.stdin === 'oid-lines', ['store.sizes', 'store.pack', 'tree.raw'].includes(r.id), `${r.id}: only the R2/R3 rows and the raw-tree batch take stdin`);
     for (const flag of ['--filters', '--textconv', '--ext-diff', '--recurse-submodules', '--follow-symlinks', '--strict']) assert.ok(!r.argv.includes(flag), `${r.id} never carries ${flag}`);
   }
   assert.ok(H.OPS_TABLE.find((r) => r.id === 'merge.base').argv.includes('--all'), 'merge.base keeps --all');
@@ -131,6 +131,7 @@ function t1(rel, src, ops = H.OPS_TABLE) {
   for (const d of ast.body) {
     if (!/^(?:Import|ExportNamed|ExportAll)Declaration$/.test(d.type) || !d.source) continue;
     const to = target(d.source.value);
+    if (/hardened-fixtures\.test-helper\./.test(d.source.value) || (rel.startsWith('lib/') && /\.test-helper\./.test(d.source.value))) off.push(`${rel} imports a test helper (${d.source.value})`);
     if (to === 'lib/git-exec.mjs' && !HARDENED_LIBS.includes(rel)) off.push(`${rel} imports lib/git-exec.mjs`);
     if (to !== 'lib/git-hardened.mjs') continue;
     if (d.type !== 'ImportDeclaration') { off.push(`${rel} re-exports from lib/git-hardened.mjs`); continue; }
@@ -142,6 +143,27 @@ function t1(rel, src, ops = H.OPS_TABLE) {
   const parents = new Map();
   const walk = (n, p) => { parents.set(n, p); for (const k of Object.keys(n)) { const v = n[k]; for (const c of Array.isArray(v) ? v : [v]) if (c && typeof c.type === 'string') walk(c, n); } };
   walk(ast, null);
+  // Round 1 repair: every loader or code-from-string form in a lib/ module (no dynamic path to the core or to op), and
+  // a dynamic import of a test helper anywhere.
+  for (const [n, p] of parents) {
+    if (n.type === 'ImportExpression') {
+      if (rel.startsWith('lib/')) off.push(`${rel}: dynamic import`);
+      // Outside lib/ only the hardened modules and the qualification helper are watched (legacy-golden.mjs already
+      // loads its own capture helper dynamically; that is not this slice's surface).
+      else if (n.source.type !== 'Literal' || /hardened-fixtures\.test-helper\.|git-exec\.mjs|git-hardened\.mjs/.test(String(n.source.value))) {
+        if (n.source.type === 'Literal') off.push(`${rel}: dynamic import of ${n.source.value}${/test-helper/.test(String(n.source.value)) ? ' (a test helper)' : ''}`);
+        else if (/git-exec|git-hardened|hardened-fixtures/.test(src)) off.push(`${rel}: dynamic import with a computed specifier in a module naming the hardened lib`);
+      }
+    }
+    if (!rel.startsWith('lib/') || n.type !== 'Identifier' || (p?.type === 'MemberExpression' && p.property === n && !p.computed && p.object?.name !== 'process')) continue;
+    if (n.name === 'require') off.push(`${rel}: require`);
+    if (n.name === 'createRequire') off.push(`${rel}: createRequire`);
+    if (n.name === 'eval') off.push(`${rel}: eval`);
+    if (n.name === 'Function') off.push(`${rel}: Function constructor`);
+    if (n.name === 'globalThis') off.push(`${rel}: globalThis (reflective global access)`);
+    if (n.name === 'process' && p?.type === 'MemberExpression' && p.object === n && !p.computed && p.property.name === 'binding') off.push(`${rel}: process.binding`);
+  }
+  for (const [n, p] of parents) if (rel.startsWith('lib/') && n.type === 'Identifier' && n.name === 'require' && p?.type === 'MemberExpression' && p.property === n) off.push(`${rel}: module.require`);
   const literalCall = (call) => {
     const id = call.arguments[1];
     if (!(id?.type === 'Literal' && typeof id.value === 'string')) return off.push(`${rel}: op id is not a literal`);
@@ -176,7 +198,7 @@ test('T1: no runtime module outside the hardened libs imports git-exec.mjs, and 
   assert.deepEqual(offences, []);
   assert.ok(scriptModules().includes('lib/git-hardened.mjs') && scriptModules().length > 20, 'the scan reached the scripts tree');
 });
-test('T1: the scan flags every planted pattern (positive controls)', () => {
+test('[M54] T1: the scan flags every planted pattern (positive controls)', () => {
   const ops = [{ id: 'blob.read', policy: 'raw-object', callers: ['x.mjs'] }, { id: 'store.init', policy: 'internal', callers: [] }];
   const cases = [
     ["import { gitRunner } from './lib/git-exec.mjs';", /imports lib\/git-exec\.mjs/],
@@ -190,6 +212,24 @@ test('T1: the scan flags every planted pattern (positive controls)', () => {
     ["import * as G from './lib/git-hardened.mjs';\nG['op'](h, 'blob.read');", /computed member/],
     ["import * as G from './lib/git-hardened.mjs';\nuse(G);", /namespace used as a value/],
   ];
+  // Round 1 repair [M54]: every dynamic loader form in a lib/ module, and any runtime import of a test helper.
+  const lib = [
+    ["const X = await import('./git-exec.mjs');", /dynamic import/],
+    ["const { op } = await import('./git-hardened.mjs');\nop(h, id);", /dynamic import/],
+    ["const m = 'git-exec.mjs';\nawait import(`./${m}`);", /dynamic import/],
+    ["const X = require('./git-exec.mjs');", /require/],
+    ["import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)('./git-exec.mjs');", /createRequire/],
+    ["module.require('./git-exec.mjs');", /require/],
+    ["process.binding('spawn_sync');", /process\.binding/],
+    ["new Function('return 1')();", /Function/],
+    ["eval('1');", /eval/],
+    ["globalThis['ev' + 'al']('1');", /globalThis/],
+  ];
+  for (const [src, why] of lib) assert.ok(t1('lib/x.mjs', src, ops).some((o) => why.test(o)), src);
+  assert.ok(t1('x.mjs', "const { loadHardened } = await import('./lib/hardened-fixtures.test-helper.mjs');", ops).some((o) => /test helper/.test(o)), 'dynamic helper import outside lib/');
+  for (const rel of ['x.mjs', 'lib/x.mjs']) {
+    assert.ok(t1(rel, "import { loadHardened } from './lib/hardened-fixtures.test-helper.mjs';".replace('./lib/', rel.startsWith('lib/') ? './' : './lib/'), ops).some((o) => /test helper/.test(o)), `${rel}: helper import`);
+  }
   for (const [src, why] of cases) assert.ok(t1('x.mjs', src, ops).some((o) => why.test(o)), src);
   assert.deepEqual(t1('x.mjs', "import { op } from './lib/git-hardened.mjs';\nop(h, 'blob.read', [o]);", ops), [], 'a registered literal call passes');
   assert.deepEqual(t1('y.mjs', "import { op } from './lib/git-hardened.mjs';\nop(h, 'blob.read', [o]);", ops), ['y.mjs: op blob.read is not registered for this caller']);
@@ -254,7 +294,7 @@ test('[M03] context: R is 0700, use after dispose is context_disposed, a planted
 });
 test('context options: unknown keys and non-positive budgets are refused', { skip: POSIX }, () => {
   for (const o of [{ x: 1 }, { timeoutMs: 0 }, { maxFiles: -1 }, { maxBytes: 1.5 }, { maxObjectBytes: '1' }, { timeoutMs: Infinity }]) assert.throws(() => H.createContext(o), code('git_op_invalid'), JSON.stringify(o));
-  assert.deepEqual(Object.keys(H.DEFAULTS).sort(), ['maxBytes', 'maxFiles', 'maxObjectBytes', 'maxTotalObjectBytes', 'removeEntries', 'timeoutMs']);
+  assert.deepEqual(Object.keys(H.DEFAULTS).sort(), ['maxBytes', 'maxFiles', 'maxObjectBytes', 'maxObjects', 'maxTotalObjectBytes', 'removeEntries', 'timeoutMs']);
 });
 
 // ------------------------------------------------------------------ openSource: layout, refusals, bounded reads (v3 §2.1, R4)
@@ -750,9 +790,8 @@ test('[M32] verify untracked: a self-ignoring untracked .gitignore (root or a ca
   const root = verify(t, { 'a.txt': 'a' }, (top) => writeTree(top, { '.gitignore': '*\n' }));
   assert.deepEqual(names(root.v.gitignoreUntracked), ['.gitignore']);
 });
-test('verify untracked: an untracked nested repository is listed (and refuses), never entered', { skip: POSIX }, (t) => {
-  const { v } = verify(t, { 'a.txt': 'a' }, (top) => makeRepo(t, { s: 's' }, { dir: join(top, 'vendor') }));
-  assert.deepEqual(names(v.untracked), ['vendor']);
+test('verify untracked: an untracked nested repository refuses (its .git is found by the bounded scan; nothing inside it runs)', { skip: POSIX }, (t) => {
+  assert.throws(() => verify(t, { 'a.txt': 'a' }, (top) => makeRepo(t, { s: 's' }, { dir: join(top, 'vendor') })), code('worktree_entry_unsupported'));
 });
 test('[M33] verify: a FIFO .gitignore hangs ls-files, the deadline kills it (git_timeout) and no git process survives SIGKILL (ps)', { skip: POSIX }, (t) => {
   const { top, head } = makeRepo(t, { 'a.txt': 'a' });
@@ -801,6 +840,90 @@ test('verify: a lane-style dir (no source) is verified the same way; a non-canon
   symlinkSync(lane, `${lane}-l`);
   assert.throws(() => H.verifyWorktree(ctx, { dir: `${lane}-l`, store, oid: head }), code('git_op_invalid'));
   assert.throws(() => H.verifyWorktree(ctx, { dir: lane, store, oid: head, source: H.openSource(ctx, { toplevel: top }) }), code('git_op_invalid'), 'both source and dir');
+});
+
+// ------------------------------------------------------------------ Round 1 repair (test-first)
+
+test('[M46] R5: a .git (dir, file, gitfile or symlink) anywhere inside an UNTRACKED or ignored directory refuses', { skip: POSIX }, (t) => {
+  const plants = {
+    'invalid repo dir': (top) => writeTree(top, { 'u/.git/payload': 'p' }),
+    'deep dir': (top) => writeTree(top, { 'u/v/w/.git/HEAD': 'ref: x\n' }),
+    'gitfile': (top) => writeTree(top, { 'u/.git': 'gitdir: /nowhere\n' }),
+    'symlink': (top) => { mkdirSync(join(top, 'u')); symlinkSync('/tmp', join(top, 'u', '.git')); },
+    'case variant': (top) => writeTree(top, { 'u/x/.GiT/payload': 'p' }),
+    'ignored dir': (top) => writeTree(top, { '.gitignore': 'u/\n', 'u/.git/payload': 'p' }),
+  };
+  for (const [what, plant] of Object.entries(plants)) assert.throws(() => verify(t, { 'a.txt': 'a', 'd/b': 'b' }, plant), code('worktree_entry_unsupported'), what);
+  const ok = verify(t, { 'a.txt': 'a' }, (top) => writeTree(top, { 'u/v/x.txt': 'x', 'u/git': 'g' }));
+  assert.deepEqual(names(ok.v.untracked), ['u/git', 'u/v/x.txt'], 'control: an untracked dir without .git is listed, not refused');
+});
+test('[M47] R4: a populated gitlink is detected from its first entry, charged to the file budget (a huge submodule dir is not enumerated)', { skip: POSIX }, (t) => {
+  const { head: subHead } = makeRepo(t, { s: 's' });
+  const { top, head } = makeRepo(t, { a: 'a' });
+  sh(top, ['update-index', '--add', '--cacheinfo', `160000,${subHead},vendor/sub`]);
+  sh(top, ['commit', '-q', '-m', 'gitlink']);
+  const withLink = out(top, ['rev-parse', 'HEAD']);
+  mkdirSync(join(top, 'vendor', 'sub'), { recursive: true });
+  for (let i = 0; i < 3000; i++) writeFileSync(join(top, 'vendor', 'sub', `f${i}`), '');
+  const ctx = ctxOf(t, { maxFiles: 100 });
+  const { store, source } = storeOf(t, ctx, top, [withLink, head]);
+  let v;
+  assert.doesNotThrow(() => { v = H.verifyWorktree(ctx, { source, store, oid: withLink }); }, 'within a 100-entry budget');
+  assert.deepEqual(diffsOf(v), [['vendor/sub', 'gitlink_populated']], 'refused by class');
+});
+test('[M48] rollback: a store dir replaced between create and rollback is never renamed or removed (context_tampered)', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const store = join(tmp(t), 'store');
+  const bin = wrapper(t, `case " $* " in *" update-ref "*) mv ${store} ${store}.orig && mkdir ${store} && echo theirs > ${store}/theirs && exit 3;; esac`);
+  onPath(bin, () => {
+    const ctx = ctxOf(t);
+    const source = H.openSource(ctx, { toplevel: top });
+    assert.throws(() => H.initStore(ctx, { dir: store, source, oids: [head] }), code('context_tampered'));
+  });
+  assert.equal(readFileSync(join(store, 'theirs'), 'latin1'), 'theirs\n', 'the replacement is untouched');
+  assert.ok(!existsSync(join(dirname(store), '.quarantine')) || readdirSync(join(dirname(store), '.quarantine')).length === 0, 'nothing was quarantined');
+});
+test('[M49] R6: a slash inside a tree entry name refuses tree_path_unsafe, alone or beside a real subtree', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { ok: 'ok' });
+  const b = blobOf(top, 'b\n');
+  const sub = literalTree(top, [['100644', 'a', b]]);
+  for (const [what, tree] of [['alone', literalTree(top, [['100644', 'a/b', b]])], ['beside a subtree', literalTree(top, [['40000', 'a', sub], ['100644', 'a/b', b]])],
+    ['nested', literalTree(top, [['40000', 'd', literalTree(top, [['100644', 'x/y', b]])]])]]) {
+    const bad = commitTree(top, tree, [head], what);
+    const ctx = ctxOf(t);
+    const { store } = storeOf(t, ctx, top, [bad, head]);
+    assert.throws(() => H.op(store, 'tree.list', [bad]), code('tree_path_unsafe'), what);
+  }
+});
+test('[M50] verify: an unreadable tracked directory (mode 000) is a typed refusal, never a raw fs error', { skip: POSIX || (process.getuid() === 0 && 'root reads mode-000 dirs') }, (t) => {
+  assert.throws(() => verify(t, { 'd/a': 'a', b: 'b' }, (top) => chmodSync(join(top, 'd'), 0)), code('worktree_entry_unsupported'));
+});
+test('[M51] verify: the store is checked like op(): a replaced store dir or a tampered store config is context_tampered', { skip: POSIX }, (t) => {
+  for (const tamper of ['replace', 'config']) {
+    const { top, head } = makeRepo(t, { a: 'a' });
+    const ctx = ctxOf(t);
+    const { store, source, dir } = storeOf(t, ctx, top, [head]);
+    if (tamper === 'replace') { renameSync(dir, `${dir}.orig`); sh(dirname(dir), ['clone', '-q', '--bare', '--no-local', `${dir}.orig`, dir]); writeFileSync(join(dir, 'config'), readFileSync(join(`${dir}.orig`, 'config'))); writeFileSync(join(dir, 'ship-ticket-store'), readFileSync(join(`${dir}.orig`, 'ship-ticket-store'))); }
+    else writeFileSync(join(dir, 'config'), '[core]\n\tbare = true\n');
+    assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: head }), code('context_tampered'), tamper);
+  }
+});
+test('[M52] R2: a batch-check answer with fewer lines than oids asked is object_corrupt', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a', b: 'b' });
+  const bin = wrapper(t, `case " $* " in *" --batch-check="*) ${JSON.stringify(REAL_GIT)} "$@" | head -n 1; exit 0;; esac`);
+  onPath(bin, () => {
+    const ctx = ctxOf(t);
+    const source = H.openSource(ctx, { toplevel: top });
+    assert.throws(() => H.initStore(ctx, { dir: join(tmp(t), 'store'), source, oids: [head] }), code('object_corrupt'));
+  });
+});
+test('[M53] R2 cost bound: more reachable objects than maxObjects is object_too_large before any batch-check', { skip: POSIX }, (t) => {
+  const files = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`f${i}`, `${i}`]));
+  const { top, head } = makeRepo(t, files);
+  const ctx = ctxOf(t, { maxObjects: 20 });
+  const source = H.openSource(ctx, { toplevel: top });
+  assert.throws(() => H.initStore(ctx, { dir: join(tmp(t), 'store'), source, oids: [head] }), code('object_too_large'));
+  assert.doesNotThrow(() => storeOf(t, ctxOf(t, { maxObjects: 50 }), top, [head]), 'control: 42 objects under 50');
 });
 
 // ------------------------------------------------------------------ the canary matrix (C1): hostile builder config never runs

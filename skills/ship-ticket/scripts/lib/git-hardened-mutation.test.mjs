@@ -18,6 +18,13 @@ const TEST = 'scripts/lib/git-hardened.test.mjs';
 const LIB = 'scripts/lib/git-hardened.mjs';
 const SKIP = process.platform === 'win32' ? 'POSIX only (win32 refuses)' : process.env.GIT_HARDENED_MUTATION !== '1' ? 'slow: runs with GIT_HARDENED_MUTATION=1' : false;
 
+/** Protected-core mutants (git-exec.mjs R3 gate), killed by the tagged tests of lib/git-exec.test.mjs. */
+export const EXEC_MUTANTS = [
+  ['S1', 'no genuine-Buffer check (a Proxy over a real Buffer passes)', '  if (!genuineBuffer(b) || OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;', '  if (OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;'],
+  ['S2', 'own length/byteLength/valueOf/buffer properties allowed', '  if (!genuineBuffer(b) || OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;', '  if (!genuineBuffer(b)) return null;'],
+  ['S5', 'any stdin kind accepted (input on any call)', "Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;", 'Object.keys(s).length !== 2) return null;'],
+  ['S6', 'the 4 KiB bound dropped', '  if (copy.length === 0 || copy.length > STDIN_CAP) return null;', '  if (copy.length === 0) return null;'],
+];
 /**
  * [tag, what the mutant removes, from, to, also?, platform?]: each `from` must occur exactly once in lib/git-hardened.mjs. A
  * platform-bound mutant runs only there: M29 (name normalisation) is equivalent on a normalisation-sensitive filesystem
@@ -27,7 +34,7 @@ export const MUTANTS = [
   ['M01', 'skip the win32 refusal', "  if (process.platform === 'win32') throw fail('platform_unsupported', 'context.create');\n", ''],
   ['M02', 'cells ignore the git version string', 'const sameCell = (a, b) => a.git === b.git && a.os', 'const sameCell = (a, b) => a.os'],
   ['M02', 'cells compare major.minor only', 'const sameCell = (a, b) => a.git === b.git && a.os', 'const sameCell = (a, b) => a.git.slice(0, 16) === b.git.slice(0, 16) && a.os'],
-  ['M03', 'skip the context tamper check', "  if (!sameNode(now, st.rootStat) || listDir(join(st.root, B('hooks')), () => 0).length !== 0) throw fail('context_tampered', op);\n", ''],
+  ['M03', 'skip the context tamper check', "  if (!sameNode(now, st.rootStat) || hooks === null || hooks.length !== 0) throw fail('context_tampered', op);\n", ''],
   ['M03', 'skip the disposed check', "  if (DISPOSED.has(ctx)) throw fail('context_disposed', op);\n", ''],
   ['M03', 'dispose removes a replaced R', "  if (!sameNode(lstatOrNull(st.root), st.rootStat)) throw fail('context_tampered', 'context.dispose');\n", ''],
   ['M04', 'skip the shallow refusal', "  if (lstatOrNull(join(common, B('shallow')))) throw fail('shallow_unsupported', op);\n", ''],
@@ -49,15 +56,24 @@ export const MUTANTS = [
   ['M16', 'drop the u+w restore', '    if ((ds.mode & 0o700) !== 0o700) chmodSync(d, (ds.mode & 0o7777) | 0o700);\n', ''],
   ['M16', 'treat a symlink as a directory to descend', '      if (s.isDirectory() && !s.isSymbolicLink()) queue.push(p);', '      if (s.isDirectory() || s.isSymbolicLink()) queue.push(p);'],
   ['M17', 'skip the blob hash check', "  if (!blobHash(bytes).equals(Buffer.from(oid, 'hex'))) throw fail('object_corrupt', id);\n", ''],
-  ['M18', 'last-wins path map (duplicates pass)', "  for (const e of out) { if (seen.has(hexKey(e.path))) throw fail('tree_path_unsafe', id); seen.add(hexKey(e.path)); }", '  for (const e of out) seen.add(hexKey(e.path));'],
-  ['M19', 'skip the prefix-collision check', "  for (const e of out) for (const pre of prefixes(e.path)) if (seen.has(hexKey(pre))) throw fail('tree_path_unsafe', id);\n", ''],
-  ['M19', 'skip the unsafe-component check', "    if (unsafePath(path)) throw fail('tree_path_unsafe', id);\n    out.push(Object.freeze({ mode", '    out.push(Object.freeze({ mode'],
+  ['M18', 'last-wins path map (duplicates pass)', "    if (seen.has(hexKey(e.path))) throw fail('tree_path_unsafe', id);\n", ''],
+  ['M19', 'skip the unsafe-component checks (listing and raw names)', "    if (unsafePath(path)) throw fail('tree_path_unsafe', id);\n    out.push(Object.freeze({ mode", '    out.push(Object.freeze({ mode',
+    [['    if (name.indexOf(0x2f) >= 0 || unsafePath(name)) throw', '    if (name.indexOf(0x2f) >= 0) throw']]],
+  ['M49', 'raw tree names may hold a slash', '    if (name.indexOf(0x2f) >= 0 || unsafePath(name)) throw', '    if (unsafePath(name)) throw'],
   ['M20', 'merge-base without --all', "['merge-base', '--all', '--end-of-options', '<oid>', '<oid>']", "['merge-base', '--end-of-options', '<oid>', '<oid>']"],
-  ['M21', 'skip the store integrity check in op()', '  checkStore(h.storeDir, id);\n  const res = git(st, id, h.storePath, operands, { deadline: Date.now() + st.timeoutMs });', '  const res = git(st, id, h.storePath, operands, { deadline: Date.now() + st.timeoutMs });'],
+  ['M21', 'skip the store integrity check in op()', '  checkStore(h.storeDir, id);\n  const deadline = Date.now() + st.timeoutMs;', '  const deadline = Date.now() + st.timeoutMs;'],
   ['M22', 'skip hashing (trust the stat)', '  const sum = hashFile(abs, lst, spendBytes, deadline, op);', "  const sum = lst.mtimeMs < Date.now() + 1 ? Buffer.from(e.oid, 'hex') : hashFile(abs, lst, spendBytes, deadline, op);"],
   ['M23', 'accept on eol_hint', "  if (!sum.equals(Buffer.from(e.oid, 'hex'))) diff(e.path, 'content', { eol_hint: eolHint(st, h, e, abs, lst, deadline, op) });",
     "  if (!sum.equals(Buffer.from(e.oid, 'hex')) && !eolHint(st, h, e, abs, lst, deadline, op)) diff(e.path, 'content', { eol_hint: false });"],
-  ['M25', 'treat a populated gitlink as clean', "if (listDir(abs, () => 0).length !== 0) diff(e.path, 'gitlink_populated');", 'listDir(abs, () => 0);'],
+  ['M25', 'treat a populated gitlink as clean', "if (hasEntry(abs, spendFiles)) diff(e.path, 'gitlink_populated');", 'hasEntry(abs, spendFiles);'],
+  ['M46', 'no scan of untracked directories for a nested .git', '      if (us && us.isDirectory() && !us.isSymbolicLink()) untrackedDirs.push(childRel(n));\n', ''],
+  ['M47', 'a populated gitlink is enumerated completely', 'if (hasEntry(abs, spendFiles)) diff', 'if (listDir(abs, spendFiles).length !== 0) diff'],
+  ['M48', 'rollback without the creation-identity check', "  if (!sameNode(now, created) || !now.isDirectory() || now.uid !== uid()) throw fail('context_tampered', 'store.init');\n", ''],
+  ['M50', 'raw fs error from an unreadable dir', "  try { d = opendirSync(p, { encoding: 'buffer' }); } catch { throw fail('worktree_entry_unsupported', 'listdir'); }\n  const names", "  d = opendirSync(p, { encoding: 'buffer' });\n  const names"],
+  ['M51', 'verifyWorktree skips the store identity check', "function op_(st, h, id, operands, deadline) {\n  if (!sameNode(lstatOrNull(h.storeDir), h.stat)) throw fail('context_tampered', id);\n", 'function op_(st, h, id, operands, deadline) {\n'],
+  ['M52', 'batch-check line count not checked', "    if (sizes.length * 41 !== chunk.bytes.length) throw fail('object_corrupt', 'store.sizes');\n", ''],
+  ['M53', 'no object-count bound', "  if (all.length > st.maxObjects) throw fail('object_too_large', 'store.walk');\n", ''],
+  ['M11', 'stdin passed to a row that declares none (the row binding must refuse it)', "git(st, 'store.walk', Vs, [head, base], { deadline })", "git(st, 'store.walk', Vs, [head, base], { stdin: { kind: 'oid-lines', bytes: B(`${head}\\n`) }, deadline })"],
   ['M26', 'descend into a symlinked tracked dir', '      if (cs.isSymbolicLink() || !cs.isDirectory()) {', '      if (!cs.isDirectory() && !cs.isSymbolicLink()) {'],
   ['M27', 'skip the nested .git refusal', "    for (const n of names) if (isDotGit(n) && (rel.length > 0 || !n.equals(B('.git')))) throw fail('worktree_entry_unsupported', op);\n", ''],
   ['M28', 'no FIFO/socket/device refusal at a tracked path', "  if (!lst) return diff(e.path, 'missing');\n  if (special(lst)) throw fail('worktree_entry_unsupported', op);\n", "  if (!lst) return diff(e.path, 'missing');\n"],
@@ -80,6 +96,10 @@ const TEST_SRC = readFileSync(join(ROOT, TEST), 'utf8');
 const taggedCount = (tag) => TEST_SRC.split('\n').filter((l) => /^test\('/.test(l) && l.includes(`[${tag}]`)).length;
 const ran = (r) => +(/^# tests (\d+)/m.exec(r.stdout)?.[1] ?? -1);
 const SRC = loadMutationSource(join(ROOT, LIB));
+const EXEC = 'scripts/lib/git-exec.mjs';
+const EXEC_TEST = 'scripts/lib/git-exec.test.mjs';
+const EXEC_SRC = loadMutationSource(join(ROOT, EXEC));
+const EXEC_TEST_SRC = readFileSync(join(ROOT, EXEC_TEST), 'utf8');
 function apply(src, pairs) {
   let s = src;
   for (const [from, to] of pairs) {
@@ -103,9 +123,16 @@ test('mutation: every guard mutant is killed by an assertion in its tagged tests
     const mutated = apply(SRC, [[from, to], ...also]);
     const r = await runMutantAsync({ root: ROOT, testRel: TEST, overrides: { [LIB]: mutated }, env: CHILD_ENV, args: pattern([tag]), timeout: 10 * 60 * 1000 });
     const v = classify(r);
-    verdicts.push({ tag, what, verdict: v.verdict, ran: ran(r), failing: v.failing, why: v.why });
+    verdicts.push({ tag, what, verdict: v.verdict, ran: ran(r), expected: taggedCount(tag), failing: v.failing, why: v.why });
     t.diagnostic(`${tag} ${what}: ${v.verdict} (${ran(r)} tests) ${v.failing.join(' | ')}`);
   }
-  const bad = verdicts.filter((v) => v.verdict !== 'killed' || v.ran !== taggedCount(v.tag));
+  for (const [tag, what, from, to] of EXEC_MUTANTS) {
+    const r = await runMutantAsync({ root: ROOT, testRel: EXEC_TEST, overrides: { [EXEC]: apply(EXEC_SRC, [[from, to]]) }, env: CHILD_ENV, args: pattern([tag]), timeout: 10 * 60 * 1000 });
+    const v = classify(r);
+    const expected = EXEC_TEST_SRC.split('\n').filter((l) => /^test\('/.test(l) && l.includes(`[${tag}]`)).length;
+    verdicts.push({ tag, what, verdict: v.verdict, ran: ran(r), expected, failing: v.failing, why: v.why });
+    t.diagnostic(`${tag} ${what} (git-exec): ${v.verdict} (${ran(r)} tests) ${v.failing.join(' | ')}`);
+  }
+  const bad = verdicts.filter((v) => v.verdict !== 'killed' || v.expected === 0 || v.ran !== v.expected);
   assert.deepEqual(bad, [], 'every mutant killed by an assertion, with exactly its tagged tests run');
 });

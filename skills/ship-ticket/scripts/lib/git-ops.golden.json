@@ -26,6 +26,7 @@
       "argv": [
         "ls-tree",
         "-r",
+        "-t",
         "-z",
         "--full-tree",
         "--end-of-options",
@@ -133,6 +134,21 @@
         "1": "absent"
       },
       "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "tree.raw",
+      "policy": "internal",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "cat-file",
+        "--batch"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": "oid-lines",
       "callers": []
     },
     {

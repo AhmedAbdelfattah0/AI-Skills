@@ -673,7 +673,7 @@ test('R3: without stdin the child reads an empty stdin (ignored), never the pare
   const r = stdinRun(t, undefined);
   assert.equal(r.stdout.length, 0);
 });
-test('R3: over the bound, a non-Buffer, a wrong kind, extra keys or non-oid-line bytes are refused before any spawn', (t) => {
+test('[S6] R3: over the bound, a non-Buffer, a wrong kind, extra keys or non-oid-line bytes are refused before any spawn', (t) => {
   const g = gitRunner();
   const cwd = tmp(t);
   const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
@@ -704,6 +704,59 @@ test('R3: over the bound, a non-Buffer, a wrong kind, extra keys or non-oid-line
   ];
   for (const [what, stdin] of bad) assert.throws(() => g.run({ ...ok, stdin }), code('git_op_invalid'), what);
   assert.throws(() => g.run({ ...ok, input: OIDL(1) }), code('git_op_invalid'), '`input` stays an unknown run key');
+});
+// Round 1 repair (R3 gate): only a GENUINE Buffer is accepted, it is copied first, the copy is validated, and only the
+// copy reaches the child. Each attack below passed the old checks while other bytes reached git (Opus + Codex, reproduced).
+const BAD_LINE = Buffer.from(`--not-an-oid-line\n${'x'.repeat(1 << 20)}`);
+test('[S1] R3: a Proxy posing as a Buffer (Buffer prototype, its own valueOf/length) is refused before any spawn', { skip: NOFAKE }, (t) => {
+  const real = OIDL(1);
+  const fake = new Proxy(Object.create(Buffer.prototype), {
+    get: (o, k) => (k === 'length' ? real.length : k === 'valueOf' ? () => BAD_LINE.toString('latin1') : typeof k === 'string' && /^\d+$/.test(k) ? real[+k] : Reflect.get(Buffer.prototype, k)),
+    has: (o, k) => k in real, ownKeys: () => [], getOwnPropertyDescriptor: () => undefined,
+  });
+  assert.equal(Buffer.isBuffer(fake), true, 'the fake passes Buffer.isBuffer');
+  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: fake }), code('git_op_invalid'));
+  const wrapped = new Proxy(Buffer.from(real), {});
+  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: wrapped }), code('git_op_invalid'), 'a transparent Proxy over a real Buffer');
+});
+test('[S2] R3: a genuine Buffer carrying its own length, byteLength, valueOf or buffer property is refused', { skip: NOFAKE }, (t) => {
+  for (const [what, prop, desc] of [
+    ['length getter', 'length', { get: () => 41 }], ['byteLength getter', 'byteLength', { get: () => 41 }],
+    ['valueOf', 'valueOf', { value: () => BAD_LINE.toString('latin1') }], ['buffer', 'buffer', { value: BAD_LINE.buffer }], ['byteOffset', 'byteOffset', { value: 0 }],
+  ]) {
+    const b = Buffer.concat([OIDL(1), Buffer.from(`--all\n${'0'.repeat(5000)}`)]);
+    Object.defineProperty(b, prop, desc);
+    assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: b }), code('git_op_invalid'), what);
+  }
+});
+test('[S3] R3: the child receives exactly the validated copy: a subarray of a larger buffer sends only its view', { skip: NOFAKE }, (t) => {
+  const big = Buffer.concat([Buffer.from('--all\n'), OIDL(2, 'b'), Buffer.from('--not\n')]);
+  const view = big.subarray(6, 6 + 82);
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: view }).stdout, OIDL(2, 'b'));
+  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: big.subarray(0, 88) }), code('git_op_invalid'), 'a view that includes the option line');
+});
+test('[S4] R3: a detached ArrayBuffer view is refused; a resizable-buffer view sends its bytes at copy time only', { skip: NOFAKE }, (t) => {
+  const ab = new ArrayBuffer(41);
+  const view = Buffer.from(ab);
+  OIDL(1).copy(view);
+  structuredClone(ab, { transfer: [ab] });
+  assert.equal(view.length, 0, 'detached');
+  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: view }), code('git_op_invalid'));
+  if (!new ArrayBuffer(1, { maxByteLength: 2 }).resizable) return t.diagnostic('no resizable ArrayBuffer on this Node');
+  const rab = new ArrayBuffer(82, { maxByteLength: 8192 });
+  const tracking = Buffer.from(rab);
+  OIDL(2, 'c').copy(tracking);
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: tracking }).stdout, OIDL(2, 'c'));
+  return undefined;
+});
+test('[S5] R3: stdin on an undeclared call (no {kind: oid-lines} declaration, or `input`) is refused', (t) => {
+  const g = gitRunner();
+  const cwd = tmp(t);
+  const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
+  for (const [what, extra] of [['raw Buffer', { stdin: OIDL(1) }], ['input key', { input: OIDL(1) }], ['other kind', { stdin: { kind: 'raw', bytes: OIDL(1) } }],
+    ['input beside a declaration', { stdin: { kind: 'oid-lines', bytes: OIDL(1) }, input: BAD_LINE }]]) {
+    assert.throws(() => g.run({ ...ok, ...extra }), code('git_op_invalid'), what);
+  }
 });
 test('R3: a stdin call keeps the timeout and overflow outcomes (no partial stdout)', { skip: NOFAKE }, (t) => {
   const { cwd, runner } = fakeRunner(t);
@@ -1313,7 +1366,7 @@ const GRAMMAR_OPS = new Map([
 const GRAMMAR_GLOBALS = new Map([
   ['Object', { members: new Map([['keys', 'call'], ['entries', 'call'], ['fromEntries', 'call'], ['hasOwn', 'call'], ['freeze', 'any'],
     ['getOwnPropertyDescriptor', 'ownValue'], ['defineProperty', 'defineThis']]) }],
-  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call'], ['concat', 'call'], ['alloc', 'call']]) }],
+  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call'], ['concat', 'call'], ['alloc', 'call'], ['compare', 'call']]) }],
   ['Array', { members: new Map([['isArray', 'call']]) }],
   ['Number', { members: new Map([['isSafeInteger', 'call']]) }],
   ['Symbol', { members: new Map([['for', 'methodKey']]) }],
@@ -1366,14 +1419,14 @@ const GRAMMAR_MEMBERS = new Set([
   'gitInfo', 'globalConfig', 'has', 'home', 'hooksDir', 'id', 'ignored', 'includes', 'indexOf', 'info', 'ino',
   'isAbsolute', 'isBlockDevice', 'isCharacterDevice', 'isDirectory', 'isExecutableFile', 'isFIFO', 'isFile',
   'isSocket', 'isSymbolicLink', 'join', 'keys', 'kind', 'lastIndexOf', 'length', 'map', 'maxBuffer', 'maxBytes',
-  'maxFiles', 'maxObjectBytes', 'maxTotalObjectBytes', 'message', 'mode', 'name', 'neutralisation', 'node',
-  'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'op', 'os', 'outcome', 'pairs',
-  'partialClone', 'PATH', 'path', 'platform', 'policy', 'posix', 'prerelease', 'push', 'raw', 'readSync', 'reduce',
-  'relative', 'removeEntries', 'replace', 'resolve', 'reverse', 'root', 'rootPath', 'rootStat', 'run', 'runner',
-  'selection', 'sep', 'set', 'shift', 'signal', 'size', 'slice', 'some', 'sort', 'source', 'spendBytes', 'split',
-  'startsWith', 'stat', 'status', 'stderr', 'stdin', 'stdout', 'store', 'storeDir', 'storePath', 'subarray', 'test',
-  'timeoutMs', 'TMPDIR', 'toLowerCase', 'top', 'toplevel', 'total', 'toUpperCase', 'trimEnd', 'uid', 'untracked',
-  'update', 'value', 'version', 'win32', 'workTree'
+  'maxFiles', 'maxObjectBytes', 'maxObjects', 'maxTotalObjectBytes', 'message', 'mode', 'name', 'neutralisation',
+  'node', 'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'op', 'os', 'outcome',
+  'pairs', 'partialClone', 'PATH', 'path', 'platform', 'policy', 'posix', 'prerelease', 'push', 'raw', 'readSync',
+  'reduce', 'relative', 'removeEntries', 'replace', 'resolve', 'reverse', 'root', 'rootPath', 'rootStat', 'run',
+  'runner', 'selection', 'sep', 'set', 'shift', 'signal', 'size', 'slice', 'some', 'sort', 'source', 'spendBytes',
+  'spendFiles', 'split', 'startsWith', 'stat', 'status', 'stderr', 'stdin', 'stdout', 'store', 'storeDir', 'storePath',
+  'subarray', 'test', 'timeoutMs', 'TMPDIR', 'toLowerCase', 'top', 'toplevel', 'total', 'toUpperCase', 'trimEnd',
+  'type', 'uid', 'untracked', 'update', 'value', 'version', 'win32', 'workTree'
 ]);
 /** Destructuring keys that are data fields here but name a decoder method elsewhere (`decode`): readable ONLY as a
  * destructuring key, never as a member expression (round 7). */
