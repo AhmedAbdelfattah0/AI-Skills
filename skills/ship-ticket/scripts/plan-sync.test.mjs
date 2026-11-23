@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import * as fsx from 'node:fs';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, readdirSync, statSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDigest } from './brief.mjs';
+import { isWaveFile, readPlanBytes, showLine } from './plan-sync.mjs';
 import { planNarrativeDigest } from './engine-dag.mjs';
 
 const CLI = fileURLToPath(new URL('./plan-sync.mjs', import.meta.url));
@@ -106,12 +108,12 @@ test('SCRUM-209 shape: an extra header line in the artifact outside the RUN-STAT
   assert.deepEqual(rm.json.first_difference, { line: 1, native: '# SCRUM-209', artifact: 'approval_status: approved' });
 });
 
-test('first differing line is bounded to 200 characters per side and trimmed', () => {
+test('first differing line is bounded to 200 characters per side', () => {
   const long = 'x'.repeat(5000);
   const r = check(put('l1.md', plan(`  ${long}  \n`)), put('l2.md', plan(`${long}y\n`)));
   assert.equal(r.status, 1);
-  assert.ok(r.json.first_difference.native.length <= 203);
-  assert.ok(r.json.first_difference.artifact.length <= 203);
+  assert.ok(r.json.first_difference.native.length <= 200);
+  assert.ok(r.json.first_difference.artifact.length <= 200);
   assert.ok(r.stdout.length < 1500);
   // a side with no such line is null
   const r2 = check(put('l3.md', plan('A\n')), put('l4.md', plan('A\nB\n')));
@@ -136,7 +138,12 @@ test('--approved: match, mismatch and malformed', () => {
   // stale + approved
   const s = check(put('ap3.md', plan('# X\n')), b, ['--approved', planDigest(plan('# X\n'))]);
   assert.equal(s.status, 1);
-  assert.equal(s.json.approved_match, true, 'the approval names the native plan, which the artifact no longer matches');
+  assert.equal(s.json.approved_match, false, 'approved_match is never true when the artifact is stale');
+  // marked native + stale artifact with an extra approval_status line: still false even if --approved is the artifact digest
+  const stale = `approval_status: approved\n${t}`;
+  const s2 = check(a, put('ap6.md', stale), ['--approved', planDigest(stale)]);
+  assert.deepEqual([s2.status, s2.json.in_sync, s2.json.approved_match], [1, false, false]);
+  assert.equal(check(a, put('ap7.md', stale), ['--approved', d]).json.approved_match, false);
   // marker-less native: approved matches only when in sync
   const art = `# P\n\n${B}\nx\n${E}\n`;
   const ml = check(put('ap4.md', '# P\n\n'), put('ap5.md', art), ['--approved', planDigest(art)]);
@@ -158,10 +165,10 @@ test('invalid plans exit 2 with code plan_invalid, naming the file', () => {
   assert.equal(check(put('rev2.md', `${E}\n${B}\n`), ok).json.which, 'native');
 });
 
-test('a wave file exits 3 plan_sync_unsupported, never parsed; distinct from 1 and 2', () => {
-  const wave = '# Wave 1\n\n## Ticket A\n\nPlan A.\n\n## Ticket B\n\nPlan B.\n';
+const WAVE = '# Plan\n\n## Ticket 3 - closing hardening\n\nPlan A.\n\n## Ticket 4 - closing record\n\nPlan B.\n';
+test('a wave file (two or more Ticket N sections) exits 3 plan_sync_unsupported; distinct from 1 and 2', () => {
   const ok = put('ok3.md', plan());
-  const wn = check(put('w1.md', wave), ok), wa = check(ok, put('w2.md', plan(wave)));
+  const wn = check(put('w1.md', WAVE), ok), wa = check(ok, put('w2.md', plan(WAVE)));
   for (const r of [wn, wa]) {
     assert.equal(r.status, 3);
     assert.equal(r.json.code, 'plan_sync_unsupported');
@@ -169,9 +176,30 @@ test('a wave file exits 3 plan_sync_unsupported, never parsed; distinct from 1 a
   }
   assert.equal(wn.json.which, 'native');
   assert.equal(wa.json.which, 'artifact');
-  assert.equal(check(put('w3.md', '## wave: tickets\n'), ok).status, 3);
-  assert.equal(check(put('nw.md', plan('A wave of the hand.\n# Waveform notes\n')), put('nw2.md', plan('A wave of the hand.\n# Waveform notes\n'))).status, 0, 'only a Wave heading counts');
+  assert.equal(check(put('w3.md', '   # Ticket 1\n\n### TICKET 2: x\n'), ok).status, 3, 'indented up to 3 spaces, any case');
   assert.deepEqual([check(ok, put('s1.md', plan('# other\n'))).status, check(ok, put('bad.md', 'x')).status, wn.status], [1, 2, 3]);
+});
+
+test('wave rule: not a wave when the plan only mentions waves, has one ticket section, or shows Ticket headings in fenced code', () => {
+  const single = [
+    '# Wave 1\n', '# Waves\n\n## Wave-based rollout\n', '### Wave 0\n\n### Wave 1\n', '# Wavelength plan\n', '# Ticket 1 - only one\n',
+    '# Ticket 1\n\n## Ticket 1 again\n', '    # Ticket 1\n\n    # Ticket 2\n', 'Ticket 1\nTicket 2\n',
+    '```md\n# Ticket 1\n\n# Ticket 2\n```\n', '~~~\n## Ticket 1\n## Ticket 2\n~~~\n# Ticket 3\n',
+  ];
+  for (const [i, narr] of single.entries()) {
+    const t = plan(narr), f = put(`sw${i}.md`, t);
+    assert.equal(isWaveFile(t), false, narr);
+    assert.equal(check(f, f).status, 0, narr);
+  }
+  assert.equal(isWaveFile('# Ticket 1\n\n```\n# x\n```\n# Ticket 2\n'), true, 'a closed fence ends the skip');
+});
+
+test('wave rule on the real .specs/plans corpus: only the multi-ticket closure plan is a wave file', () => {
+  const plansDir = fileURLToPath(new URL('../../../.specs/plans/', import.meta.url));
+  const files = readdirSync(plansDir).filter((n) => n.endsWith('.md'));
+  assert.ok(files.length >= 10);
+  const waves = files.filter((n) => isWaveFile(readFileSync(join(plansDir, n), 'utf8'))).sort();
+  assert.deepEqual(waves, ['AIS-HARNESS-4-closure.md']);
 });
 
 test('symlink, FIFO, directory, missing and oversize are refused (exit 2)', () => {
@@ -227,6 +255,82 @@ test('parity with brief.mjs plan-digest and the engine planNarrativeDigest on th
     assert.equal(r.json.narrative_digest, cli);
     assert.equal(check(p, p, ['--approved', cli]).json.approved_match, true);
   }
+});
+
+test('invalid UTF-8 is refused (plan_encoding), never replaced by U+FFFD; native_sha256 hashes the exact bytes', () => {
+  const art = Buffer.from(`# P\n\n${B}\nx\n${E}\n`);
+  const enc = (bytes) => { const p = join(dir, `enc-${bytes.join('-')}.md`); writeFileSync(p, Buffer.from(bytes)); return p; };
+  const artf = join(dir, 'enc-art.md'); writeFileSync(artf, art);
+  const r = check(enc([0x41, 0xff, 0x0a]), artf);
+  assert.deepEqual([r.status, r.json.code, r.json.which], [2, 'plan_encoding', 'native']);
+  assert.equal(check(enc([0x80]), enc([0x81])).status, 2);
+  // marked native whose narrative differs only by an invalid byte: refused, not in sync
+  const m1 = join(dir, 'enc-m1.md'), m2 = join(dir, 'enc-m2.md');
+  writeFileSync(m1, Buffer.concat([Buffer.from('A'), Buffer.from([0xff]), Buffer.from(`\n${B}\n${E}\n`)]));
+  writeFileSync(m2, Buffer.concat([Buffer.from('A'), Buffer.from([0xfe]), Buffer.from(`\n${B}\n${E}\n`)]));
+  const m = check(m1, m2);
+  assert.deepEqual([m.status, m.json.code], [2, 'plan_encoding']);
+  // valid multibyte: the hash is over the file bytes
+  const u = put('enc-ok.md', '# Ünï コード\n\n');
+  const ok = check(u, put('enc-ok-art.md', `# Ünï コード\n\n${B}\nx\n${E}\n`));
+  assert.equal(ok.status, 0);
+  assert.equal(ok.json.native_sha256, sha(readFileSync(u)));
+});
+
+test('a file that changes during the read is refused as file_changed (growth, same-size rewrite)', () => {
+  const f = join(dir, 'grow.md'); writeFileSync(f, plan());
+  const real = { lstatSync: fsx.lstatSync, openSync: fsx.openSync, fstatSync: fsx.fstatSync, readSync: fsx.readSync, closeSync: fsx.closeSync };
+  assert.equal(readPlanBytes(f, 'native', real).length, statSync(f).size, 'control: an unchanged file reads');
+  // growth after the first read: the EOF loop sees more bytes than the size at fstat
+  let n = 0;
+  const grow = { ...real, readSync: (...a) => { const r = real.readSync(...a); if (n++ === 0) fsx.appendFileSync(f, 'STALE NARRATIVE\n'); return r; } };
+  assert.throws(() => readPlanBytes(f, 'native', grow), (e) => e.reason === 'file_changed' && e.which === 'native');
+  // same-size rewrite and new mtime after the read: the second fstat differs
+  writeFileSync(f, plan());
+  const past = new Date('2021-01-01T00:00:00Z'); utimesSync(f, past, past);
+  const rewrite = { ...real, readSync: (...a) => { const r = real.readSync(...a); fsx.utimesSync(f, new Date(), new Date()); return r; } };
+  assert.throws(() => readPlanBytes(f, 'artifact', rewrite), (e) => e.reason === 'file_changed' && e.which === 'artifact');
+  // shrink
+  writeFileSync(f, plan());
+  const shrink = { ...real, readSync: (...a) => { fsx.truncateSync(f, 3); return real.readSync(...a); } };
+  assert.throws(() => readPlanBytes(f, 'native', shrink), (e) => e.reason === 'file_changed');
+});
+
+test('marker-less native: text after END must be empty or exactly one LF, else the artifact is refused', () => {
+  for (const tail of ['', '\n']) assert.equal(check(put('t1.md', `# P\n${tail}`), put('t2.md', `# P\n\n${B}\nx\n${E}${tail}`)).status, 0, JSON.stringify(tail));
+  for (const tail of ['\n\n', '\nextra\n', ' \n', 'x']) {
+    const r = check(put('t3.md', '# P\n'), put('t4.md', `# P\n\n${B}\nx\n${E}${tail}`));
+    assert.deepEqual([r.status, r.json.code, r.json.which], [2, 'plan_invalid', 'artifact'], JSON.stringify(tail));
+  }
+});
+
+test('first_difference snippets are escaped, never trimmed away, and at most 200 characters including the ellipsis', () => {
+  assert.equal(showLine('a b '), 'a b ');
+  assert.equal(showLine('a b'), 'a\\u2028b');
+  assert.equal(showLine('a\rb'), 'a\\u000db');
+  assert.equal(showLine('a\\b'), 'a\\u005cb');
+  assert.equal(showLine('x'.repeat(200)).length, 200);
+  assert.equal(showLine('x'.repeat(201)).length, 200);
+  assert.ok(showLine('x'.repeat(201)).endsWith('...'));
+  assert.equal(showLine('\u0001'.repeat(300)).length, 200);
+  assert.equal(showLine(undefined), null);
+  // whitespace-only and U+2028 and lone-CR differences are visible and detected end to end
+  const diff = (n, a) => check(put(`fd-${n}n.md`, plan(n)), put(`fd-${n.length}a.md`, plan(a)));
+  const ws = check(put('fd1n.md', plan('A \n')), put('fd1a.md', plan('A\n')));
+  assert.deepEqual([ws.status, ws.json.first_difference], [1, { line: 1, native: 'A ', artifact: 'A' }]);
+  const ls = check(put('fd2n.md', plan('A B\n')), put('fd2a.md', plan('A B\n')));
+  assert.equal(ls.json.first_difference.native, 'A\\u2028B');
+  const cr = check(put('fd3n.md', plan('A\rB\n')), put('fd3a.md', plan('AB\n')));
+  assert.deepEqual([cr.status, cr.json.first_difference.native], [1, 'A\\u000dB']);
+  const long = check(put('fd4n.md', plan(`${'x'.repeat(5000)}\n`)), put('fd4a.md', plan(`${'y'.repeat(5000)}\n`)));
+  assert.equal(long.json.first_difference.native.length, 200);
+  void diff;
+});
+
+test('docs: references/plan.md carries the read-only check and the WAIT_FOR_USER rule', () => {
+  const doc = readFileSync(fileURLToPath(new URL('../references/plan.md', import.meta.url)), 'utf8');
+  assert.match(doc, /plan-sync\.mjs check --native/);
+  assert.match(doc, /denied, that is `WAIT_FOR_USER`, never a START or REVISION over a stale artifact/);
 });
 
 // The spy preload patches every write-class fs and child_process function in the CHILD before the script loads and reports to fd 2.

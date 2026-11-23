@@ -284,6 +284,8 @@ the run ID already created by workflow telemetry. A later execution of the same
 ticket gets a new `run_id`; it never edits or clears prior entries. Approval
 without the matching start event is not executable.
 
+`node scripts/plan-sync.mjs check --native <approved plan file> --plan <repo artifact>` is a read-only comparison (exit 0 in sync, 1 stale, 2 refused input, 3 wave file); it grants no approval. If syncing the artifact to the approved plan is denied, that is `WAIT_FOR_USER`, never a START or REVISION over a stale artifact.
+
 Write the START only after the narrative is final. Compute `approved_plan_digest`
 with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
 `sha256:<64 hex>`: the digest of the plan with the RUN-STATE body removed), never
