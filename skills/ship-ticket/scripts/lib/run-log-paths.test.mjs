@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn as spawnAsync } from 'node:child_process';
 import { commonLogDir, legacyLogDirs, ownLogDir } from './run-log-paths.mjs';
@@ -226,6 +226,25 @@ test('cutover: run-log.mjs legacy prints the archive of the named worktree read-
   assert.deepEqual(summary(fx, fx.wt2).runs, [], 'never merged');
 });
 
+// Trace-path normaliser (F-104-1). Git prints forward-slash absolute paths on win32 while `join` yields backslashes, so
+// raw substring comparison could let a sibling access slip through. Every trace path is normalised BEFORE any comparison:
+// platform path rules (win32 collapses `/` and `\`), then every separator becomes `/`. Case is folded ONLY when the file
+// system is known to be case-insensitive: always on win32, on other platforms only when `fold` says so (a probe of the
+// real volume, below). Default is exact case, which fails closed: a case-different sibling name (`WT2` vs `wt2`) is a
+// sibling access, never the own worktree. darwin therefore compares exact-case unless the probe finds an insensitive volume.
+export const traceNorm = (p, platform = process.platform, fold = platform === 'win32') => {
+  const n = (platform === 'win32' ? win32 : posix).normalize(p).replace(/\\/g, '/').replace(/(.)\/+$/, '$1');
+  return fold ? n.toLowerCase() : n;
+};
+// One probe of the real volume: does a differently-cased name reach the same file? (APFS is insensitive by default, optionally sensitive.)
+export const fsFoldsCase = (dir) => {
+  const d = mkdtempSync(join(dir, 'case-probe-'));
+  try { writeFileSync(join(d, 'a'), ''); return existsSync(join(d, 'A')); } finally { rmSync(d, { recursive: true, force: true }); }
+};
+const tracePath = (line) => line.slice(line.indexOf(' ') + 1);
+export const traceTouchesWorktrees = (p, platform, fold) => `${traceNorm(p, platform, fold)}/`.includes('/.git/worktrees/');
+export const traceIsOwnWorktree = (p, name, platform, fold) => `${traceNorm(p, platform, fold)}/`.includes(`/.git/worktrees/${traceNorm(name, platform, fold)}/`);
+
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 // fs spy: a preloaded module records every path a child process touches through node:fs.
 const SPY = `data:text/javascript,${encodeURIComponent(`import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
@@ -237,6 +256,7 @@ test('cutover AC9-C (fs spy): no normal command opens a sibling legacy path; the
   const fx = three(t);
   legacyOf(fx);
   const spy = join(fx.base, 'spy.log');
+  const fold = fsFoldsCase(fx.base); // exact case unless this volume is case-insensitive (never weaker than the exact-case assertion on a sensitive one)
   const run = (repo, script, ...args) => spawnSync(process.execPath, ['--import', SPY, script, ...args], { encoding: 'utf8', env: { ...process.env, FS_SPY: spy } });
   const ops = [iv('start', 'q'), iv('end', 'q'), ['event', '--ticket', 'T1', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', 's', '--metric', 'label=measured'],
     ['summary', '--ticket', 'T1'], ['summary', '--all'], ['check', '--ticket', 'T1'], ['quarantine', '--ticket', 'T1']];
@@ -253,11 +273,11 @@ test('cutover AC9-C (fs spy): no normal command opens a sibling legacy path; the
     // Paths are escaped as regex literals: on win32 `join` yields backslashes (`\s`, `\T` would be regex escapes).
     assert.match(trace, new RegExp(`(openSync|readFileSync) .*${escapeRe(join('ai-skills', 'ship-ticket', 'T1.jsonl'))}`), `${name}: the shared log was read`);
     if (name !== 'main') assert.match(trace, new RegExp(`lstatSync .*${escapeRe(join('.git', 'worktrees', name, 'ai-skills', 'ship-ticket', 'T1.jsonl'))}`), `${name}: legacy_present lstat seen`);
-    const touched = trace.split('\n').filter((l) => l.includes(`${join('.git', 'worktrees')}`));
+    const touched = trace.split('\n').filter((l) => l && traceTouchesWorktrees(tracePath(l), undefined, fold));
     for (const line of touched) {
-      const [op, path] = [line.slice(0, line.indexOf(' ')), line.slice(line.indexOf(' ') + 1)];
-      assert.ok(path.includes(join('.git', 'worktrees', name)), `${name} touched a sibling path: ${line}`);
-      if (path.endsWith(join('ai-skills', 'ship-ticket', 'T1.jsonl'))) assert.ok(['lstatSync', 'openSync'].includes(op), `${name}: the own legacy log only via lstat/open (bounded read): ${line}`);
+      const [op, path] = [line.slice(0, line.indexOf(' ')), tracePath(line)];
+      assert.ok(traceIsOwnWorktree(path, name, undefined, fold), `${name} touched a sibling path: ${line}`);
+      if (traceNorm(path, undefined, fold).endsWith(`/ai-skills/ship-ticket/${traceNorm('T1.jsonl', undefined, fold)}`)) assert.ok(['lstatSync', 'openSync'].includes(op), `${name}: the own legacy log only via lstat/open (bounded read): ${line}`);
     }
   }
 });
@@ -488,4 +508,34 @@ test('repair 8 (2b) eval: an inaccessible shared log with readable engine state 
     assert.ok((out.degraded ?? []).some((d) => d.code === 'shared_log_unavailable'), `${mode}: ${JSON.stringify(out.degraded)}`);
     assert.deepEqual(out.runs, [], `${mode}: no empty synthetic run from the engine state`);
   }
+});
+
+test('trace-path normaliser (F-104-1): forward-slash, mixed and backslash forms compare equal; a forward-slash sibling is detected', () => {
+  // win32 rules are run explicitly through path.win32, so this holds on POSIX CI too.
+  const own = 'C:\\Repo\\.git\\worktrees\\wt2\\ai-skills\\ship-ticket\\T1.jsonl';
+  for (const form of [own, 'C:/Repo/.git/worktrees/wt2/ai-skills/ship-ticket/T1.jsonl', 'C:/Repo\\.git/worktrees\\wt2/ai-skills\\ship-ticket/T1.jsonl', 'c:/repo/./.git//worktrees/WT2/ai-skills/ship-ticket/t1.jsonl']) {
+    assert.equal(traceNorm(form, 'win32'), 'c:/repo/.git/worktrees/wt2/ai-skills/ship-ticket/t1.jsonl', form);
+    assert.ok(traceTouchesWorktrees(form, 'win32'), form);
+    assert.ok(traceIsOwnWorktree(form, 'wt2', 'win32'), form);
+  }
+  // case: folded on win32 only; every other platform compares exact-case unless the volume probe says insensitive
+  assert.equal(traceNorm('/R/.git/worktrees/Wt2/x', 'linux'), '/R/.git/worktrees/Wt2/x');
+  assert.equal(traceNorm('/R/.git/worktrees/Wt2/x', 'darwin'), '/R/.git/worktrees/Wt2/x', 'darwin default is exact-case (fail closed)');
+  assert.equal(traceNorm('/R/.git/worktrees/Wt2/x', 'darwin', true), '/r/.git/worktrees/wt2/x', 'darwin on a probed case-insensitive volume folds');
+  // case-sensitive model: WT2 and wt2 are distinct worktrees, so a WT2 open is a SIBLING access of wt2 (the old exact-case assertion refused it)
+  for (const platform of ['linux', 'darwin']) {
+    assert.equal(traceIsOwnWorktree('/r/.git/worktrees/WT2/ai-skills/x', 'wt2', platform, false), false, `${platform}: WT2 is a sibling of wt2`);
+    assert.equal(traceIsOwnWorktree('/r/.git/worktrees/WT2/ai-skills/x', 'wt2', platform), false, `${platform} default: WT2 is a sibling of wt2`);
+    assert.ok(traceIsOwnWorktree('/r/.git/worktrees/wt2/ai-skills/x', 'wt2', platform), `${platform}: exact name is own`);
+  }
+  assert.ok(traceIsOwnWorktree('/r/.git/worktrees/WT2/ai-skills/x', 'wt2', 'darwin', true), 'case-insensitive volume: an alias is still the own worktree');
+  assert.equal(traceIsOwnWorktree('C:/Repo/.git/worktrees/WT2/x', 'wt2', 'win32'), true, 'win32 alias stays own-worktree');
+  assert.equal(typeof fsFoldsCase(tmpdir()), 'boolean');
+  // mutant-style negative control: a sibling reached through a raw git (forward-slash) path MUST be detected
+  for (const sibling of ['C:/Repo/.git/worktrees/wt3/ai-skills/ship-ticket/T1.jsonl', 'C:/Repo\\.git/worktrees\\wt3/ai-skills', 'c:/repo/.git/worktrees/wt20/x']) {
+    assert.ok(traceTouchesWorktrees(sibling, 'win32'), `${sibling} is a worktrees path`);
+    assert.equal(traceIsOwnWorktree(sibling, 'wt2', 'win32'), false, `${sibling} must be detected as a sibling of wt2`);
+  }
+  assert.equal(traceIsOwnWorktree('/r/.git/worktrees/wt3/x', 'wt2', 'linux'), false);
+  assert.equal(traceTouchesWorktrees('C:/Repo/src/main.js', 'win32'), false);
 });

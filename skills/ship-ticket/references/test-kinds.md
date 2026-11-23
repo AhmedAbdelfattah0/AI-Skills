@@ -128,9 +128,11 @@ All of these go in the DAG and the plan, before approval (the DAG digest is boun
 
 1. `config.testKinds: { "policy": 1 }` (exactly that object; `scripts/engine-dag.mjs`, the `testKinds` check in
    `validateEngineDag`).
-2. `config.securityPolicy: 2`. On a current approval a MISSING value is refused first as `security_policy_required`
-   (`scripts/run-engine.mjs:274`, called at `:397`) and an INVALID value as `dag_invalid` (`scripts/engine-dag.mjs:133`);
-   `test_kinds_needs_security_policy` (`scripts/run-engine.mjs:372`) applies only after those pass.
+2. `config.securityPolicy: 2`. DAG validation runs first: an INVALID value, or `config.catalogDigest` / `config.controlCoverage`
+   kept while `securityPolicy` is omitted, is refused as `dag_invalid` (`scripts/engine-dag.mjs:150` and `:152`, inside
+   `validateSecurity`). Once DAG validation has passed, a MISSING value on a current approval is refused as
+   `security_policy_required` (`scripts/run-engine.mjs:281`, in `bindSecurity`, called at `:407`);
+   `test_kinds_needs_security_policy` (`scripts/run-engine.mjs:382`) applies only after those pass.
 3. The plan opts in (a `test-triggers:` line or a committed `.ship-ticket/test-triggers.json`) and carries the
    `risk_floor:` line, as above.
 4. Exactly ONE `config.testCommands` entry with an `evidence` object:
@@ -142,7 +144,7 @@ All of these go in the DAG and the plan, before approval (the DAG digest is boun
 
 Refusals at `init`: `test_kinds_policy_required` (the plan or declaration opts in but the DAG has no `config.testKinds`),
 `plan_tags_missing` (`config.testKinds` without an opt-in), `test_kinds_runner_missing` (no `evidence` entry),
-`multi_entry_unsupported_v0` (more than one; `scripts/run-engine.mjs:370-377`).
+`multi_entry_unsupported_v0` (more than one; `scripts/run-engine.mjs:380-387`).
 
 At a gate: when no stored record fits the current evidence identity, the engine runs the runner, stores the record and
 returns `evidence_refreshed` **without deciding**; re-issue the identical call and it decides on that record

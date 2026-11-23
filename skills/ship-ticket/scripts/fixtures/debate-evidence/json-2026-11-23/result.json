@@ -1,0 +1,27 @@
+{
+  "schema": "delegate-relay.result.v1",
+  "lane": null,
+  "laneSource": null,
+  "workdir": "@REPO@",
+  "sandbox": "read-only",
+  "model": null,
+  "effort": "low",
+  "resumeLast": false,
+  "session": null,
+  "cleanEnv": false,
+  "keepEnv": [],
+  "codexVersion": "codex-cli 0.166.0",
+  "startedAt": "2026-11-22T22:14:03.363Z",
+  "finishedAt": "2026-11-22T22:14:19.629Z",
+  "briefPath": "@SCRATCH@/s4-json-real/out/brief.txt",
+  "eventsPath": "@SCRATCH@/s4-json-real/out/events.jsonl",
+  "finalPath": "@SCRATCH@/s4-json-real/out/final.txt",
+  "status": "completed",
+  "exitCode": 0,
+  "signal": null,
+  "threadId": "01a20552-d30b-7033-85d3-9bffa9b71d04",
+  "finalMessage": "{\"v\":1,\"request_id\":\"s4-json-2\",\"plan_version\":\"v1\",\"plan_digest\":\"sha256:61b30a7aba034465f06c0587c7dcb0537b8b5190426db51b826a827259e0a1e6\",\"verdict\":\"CHANGES_REQUESTED\",\"findings\":[{\"id\":\"P1\",\"status\":\"new\",\"severity\":\"major\",\"note\":\"Removing the login rate limiter without a replacement removes an authentication abuse control and increases exposure to password guessing, credential stuffing, and resource exhaustion. Preserve production protection and resolve the load-test constraint through an isolated test configuration or a replacement control with explicit abuse limits.\"},{\"id\":\"P2\",\"status\":\"new\",\"severity\":\"major\",\"note\":\"A passing load test establishes throughput, not authentication security or correctness. Add verification that repeated failed logins trigger the intended abuse control, normal logins remain functional, and any load-test bypass cannot be enabled in production.\"}]}",
+  "touchedFiles": [
+    "?? .design-s4-response-contract.md"
+  ]
+}

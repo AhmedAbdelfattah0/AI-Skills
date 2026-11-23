@@ -74,8 +74,8 @@ decision.
 7. **Preflight REVIEW now.** Confirm an independent primary-reviewer route exists
    with the deadline/cancellation capability required by [review.md](review.md).
    Select and preflight, using [cross-model.md](cross-model.md), the PLAN
-   counterpart when the work is security-sensitive (Claude host uses Codex,
-   Codex host uses Claude; Fable when Codex is unavailable). For every ticket,
+   counterpart for every implementation plan (Claude host uses Codex, Codex
+   host uses Claude; Fable as the declared degraded carrier when Codex is unavailable). For every ticket,
    also check the REVIEW second-opinion route (Codex within quota, else Fable)
    and whether it can run concurrently, and record the selected carrier. Missing
    primary capability, or both Codex and Fable unavailable, is `WAIT_FOR_USER`.

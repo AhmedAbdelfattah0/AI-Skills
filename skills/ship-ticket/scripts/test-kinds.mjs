@@ -31,6 +31,7 @@
  * `tests: {globs?, runner_modules?}` (evidence scope only, read from BASE like the rest; it never changes a requirement).
  */
 import { execFileSync } from 'node:child_process';
+import { devNull } from 'node:os';
 import { realpathSync, readFileSync } from 'node:fs';
 import { parseArgs, types } from 'node:util';
 import { parseRecordedLine, decodeStrict, compileGlob, CHANGED, CLASS_NAME } from './risk-floor.mjs';
@@ -392,7 +393,7 @@ export function checkTitles(req, titles) {
 // ---- the declaration at BASE ----
 // TEMPORARY third copy of the hardened-git helper (also in fast-checks.mjs and risk-floor.mjs): no inherited GIT_*, no replace
 // objects, literal pathspecs. TODO(S-02a0b): replace with lib/git-capability.mjs (git-exec) when it lands; do not extend this copy.
-const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
+const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull, GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
 const git = (cwd, args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 const gitText = (cwd, args) => git(cwd, args).toString('utf8').replace(/\n$/, '');
 /** `{declaration|null, baseSha}` from the BASE commit. */
