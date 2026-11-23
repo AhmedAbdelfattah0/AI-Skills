@@ -277,6 +277,10 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(x.includes('`CONVERGED` requires the counterpart\'s confirmation of the exact final plan digest'));
   assert.ok(x.includes('`LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.'));
   assert.ok(x.includes('`LIMIT_REACHED` is recorded only for a configured budget; a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified.'));
+  assert.ok(x.includes('The configured budget lives in this line, so the approved digest binds it.'));
+  assert.ok(x.includes('its consumption is derived from the retained evidence, never from the host\'s metrics'));
+  assert.ok(x.includes('`incomplete_review` is derived from the retained results'));
+  assert.ok(x.includes('A dispatch failure that left no `result.json` at all has no valid outcome except `SKIPPED` with the owner exception'));
   assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));
   assert.ok(x.includes('Evolution (owner-requested, 2026-11-22): evidence-driven stopping instead of the old call/minute cap, the checkpoint, the plan-resident attestation and digest cycle, the `debate-check` checker and the separate carrier field.'));
   assert.ok(x.includes('`node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root> --repo <repo>`'));

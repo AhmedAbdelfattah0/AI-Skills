@@ -272,12 +272,21 @@ Outcomes, independent of the carrier:
   debate-qualified for execution: START needs a concrete disposition of every
   outstanding finding.
 - `LIMIT_REACHED` is recorded only for a configured budget; a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified. The limit is
-  `limit: {kind: configured_budget, evidence}`, the evidence naming the configured
-  value it reached. A provider or resource failure (a quota, a permission error, a
+  `limit: {kind: configured_budget, evidence}`; the budget itself is the one bound in
+  the dispositions line, and its consumption is derived from the retained evidence,
+  never from the host's metrics: the attempted rounds the attestation records, and
+  the minutes spanned by the retained relay results' `startedAt` and `finishedAt`.
+  LIMIT_REACHED needs that derived consumption to reach the bound budget. A provider or resource failure (a quota, a permission error, a
   timeout) is recorded as `UNRESOLVED` with `incomplete_review: true`: the retained
   relay result of the last attempt must show the actual failure (status not
   `completed`, or exit code not 0), the findings may be empty, and it reaches START
-  only through the owner's disposition of id `LIMIT`. `LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.
+  only through the owner's disposition of id `LIMIT`. `incomplete_review` is derived
+  from the retained results (the last round has no retained relay result, or a
+  failed one); a host flag that disagrees is refused. A dispatch failure that left
+  no `result.json` at all has no valid outcome except `SKIPPED` with the owner
+  exception: as before, use the substitute carrier, `WAIT_FOR_USER`, or an owner
+  exception (fail closed, no new outcome). Every read `result.json` field is
+  type-checked and depth-checked (iteratively) before use. `LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.
 - `SKIPPED`: only with the owner exception frozen in the plan.
 
 `DEGRADED` is not an outcome: a substitute carrier is `carrier.degraded: true`.
@@ -290,8 +299,9 @@ human-readable ledger, never authoritative) and the ONE visible line
 `node scripts/brief.mjs debate-serialize --dispositions <json>`. That line is the
 owner-approved machine content: `{v: 1, debate_id, outcome, carrier_degraded,
 degradation_ack, exception: null | {kind: SKIPPED | WAIVED, reason, scope, ack},
+limit: null | {kind: configured_budget, max_rounds, max_minutes},
 dispositions: [{id, kind: accept_risk | decided | waived, resolution,
-design_change}]}`. It is digest-bound (outside the RUN-STATE body), exactly one
+design_change}]}`. The configured budget lives in this line, so the approved digest binds it. It is digest-bound (outside the RUN-STATE body), exactly one
 occurrence of its token is allowed in the narrative, and Markdown context (fences,
 indentation, tables) is never read for authority. It is written before the
 confirmation round, because the digest covers it. The terminal data lives outside the digest-hashed

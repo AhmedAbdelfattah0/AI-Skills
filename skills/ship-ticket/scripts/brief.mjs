@@ -272,7 +272,8 @@ function debatePolicy(narr) {
  */
 const DISPO_HEAD = 'debate-dispositions-v1: ';
 const DISPO_TOKEN = 'debate-dispositions-v1';
-const DISPO_KEYS = ['carrier_degraded', 'debate_id', 'degradation_ack', 'dispositions', 'exception', 'outcome', 'v'];
+const DISPO_KEYS = ['carrier_degraded', 'debate_id', 'degradation_ack', 'dispositions', 'exception', 'limit', 'outcome', 'v'];
+const BUDGET_KEYS = ['kind', 'max_minutes', 'max_rounds'];
 const EXCEPTION_KEYS = ['ack', 'kind', 'reason', 'scope'];
 const DISPOSITION_KEYS = ['design_change', 'id', 'kind', 'resolution'];
 const sameKeys = (o, keys) => isObject(o) && Object.keys(o).length === keys.length && keys.every((k) => Object.hasOwn(o, k));
@@ -302,6 +303,9 @@ function readDispositions(narr) {
     || !(d.degradation_ack === null || typeof d.degradation_ack === 'string')) return { error: `${DISPO_TOKEN}: v 1, debate_id, outcome, carrier_degraded and degradation_ack have the wrong type or value` };
   if (d.exception !== null && !(sameKeys(d.exception, EXCEPTION_KEYS) && ['SKIPPED', 'WAIVED'].includes(d.exception.kind)
     && EXCEPTION_KEYS.every((k) => typeof d.exception[k] === 'string'))) return { error: `${DISPO_TOKEN}: exception is null or {kind: SKIPPED|WAIVED, reason, scope, ack}` };
+  const posOrNull = (x) => x === null || (typeof x === 'number' && Number.isFinite(x) && x > 0);
+  if (d.limit !== null && !(sameKeys(d.limit, BUDGET_KEYS) && d.limit.kind === 'configured_budget' && posOrNull(d.limit.max_rounds) && posOrNull(d.limit.max_minutes)
+    && (d.limit.max_rounds !== null || d.limit.max_minutes !== null))) return { error: `${DISPO_TOKEN}: limit is null or {kind: configured_budget, max_rounds, max_minutes} with at least one positive value` };
   if (!Array.isArray(d.dispositions)) return { error: `${DISPO_TOKEN}: dispositions must be an array` };
   const ids = new Set();
   for (const row of d.dispositions) {
@@ -652,6 +656,10 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   const open = [...ledger].filter(([, d]) => d.open);
   base.outstanding = open.map(([id]) => id);
   const last = rounds.at(-1);
+  // incomplete_review is DERIVED: the last round has no retained relay result, or a failed one (status not completed, or exit not 0)
+  const lastRelay = isObject(last) ? perRound.get(last.n)?.relay : null;
+  const derivedIncomplete = isObject(last) && (!lastRelay || lastRelay.status !== 'completed' || lastRelay.exitCode !== 0);
+  if ((att.incomplete_review === true) !== derivedIncomplete) add('debate_attestation_invalid', `incomplete_review must be ${derivedIncomplete}, as derived from the retained result of the last round`);
   const final = att.final;
   // ---- outcomes (independent of the carrier)
   if (outcome === 'CONVERGED') {
@@ -681,8 +689,7 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
       if (final !== null && final !== undefined) add('debate_outcome_invalid', 'UNRESOLVED carries no final confirmation');
     } else if (outcome === 'LIMIT_REACHED') {
       if (att.final !== null) add('debate_outcome_invalid', 'LIMIT_REACHED is never converted to CONVERGED: final must be null');
-      checkLimit(att, add);
-      if (!ledger.size && att.incomplete_review !== true) add('debate_limit_invalid', 'a limit reached with no findings must say incomplete_review: true');
+      checkLimit(att, D, rounds, perRound, add);
     } else if (outcome === 'SKIPPED') {
       if (rounds.length || findings.length || (final !== null && final !== undefined)) add('debate_outcome_invalid', 'SKIPPED records no round, finding or confirmation');
       if (!exceptionOk(D, 'SKIPPED')) add('debate_exception_missing', `SKIPPED needs the owner exception in the ${DISPO_TOKEN} line: {kind: SKIPPED, a reason, scope: this ticket and the exact acknowledgement}`);
@@ -701,21 +708,26 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
 }
 
 /**
- * The limit record (D-A10, 2026-11-23): LIMIT_REACHED is recorded only for a configured budget, whose evidence names the
- * configured value it reached. A provider or resource failure is not classified from text at all: it is UNRESOLVED with
- * incomplete_review, the retained relay result showing the actual failure.
+ * The limit record (D-A10, 2026-11-23): LIMIT_REACHED is recorded only for a configured budget. The budget is bound in
+ * the digest (the dispositions line's `limit`), and its consumption is DERIVED from the retained evidence, never from the
+ * host's metrics: rounds are the attempted rounds the attestation records (each verified against its evidence), minutes
+ * the span of the retained relay results' startedAt and finishedAt. Budget values are positive (dispositions schema), so
+ * zero attempted rounds never reach one.
  */
-function checkLimit(att, add) {
+function checkLimit(att, D, rounds, perRound, add) {
   const L = att.limit;
   if (!isObject(L) || L.kind !== 'configured_budget' || !nonEmpty(L.evidence)) {
     add('debate_limit_invalid', 'LIMIT_REACHED is recorded only for a configured budget ({kind: configured_budget, evidence: the configured value}); a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified');
     return;
   }
-  const b = isObject(att.budget) ? att.budget : {};
-  const used = isObject(att.metrics) ? att.metrics : {};
-  const configured = [[b.max_rounds, used.rounds], [b.max_minutes, used.minutes]].filter(([v]) => typeof v === 'number');
-  if (!configured.length) add('debate_limit_invalid', 'configured_budget needs a configured max_rounds or max_minutes (an owner or repository override)');
-  else if (!configured.some(([v, u]) => typeof u === 'number' && u >= v && L.evidence.includes(String(v)))) add('debate_limit_invalid', 'the configured budget was not reached, or the evidence does not name the configured value');
+  const bound = D?.limit;
+  if (!isObject(bound)) { add('debate_limit_invalid', `the configured budget must be bound in the ${DISPO_TOKEN} line: limit {kind: configured_budget, max_rounds, max_minutes}`); return; }
+  const ab = isObject(att.budget) ? att.budget : {};
+  if (ab.max_rounds !== bound.max_rounds || ab.max_minutes !== bound.max_minutes) add('debate_attestation_invalid', 'the attestation budget disagrees with the budget bound in the dispositions line');
+  const times = rounds.filter(isObject).map((r) => perRound.get(r.n)?.relay).filter((x) => x && x.startedAt && x.finishedAt);
+  const minutes = times.length ? (Math.max(...times.map((x) => Date.parse(x.finishedAt))) - Math.min(...times.map((x) => Date.parse(x.startedAt)))) / 60000 : 0;
+  const reached = (bound.max_rounds !== null && rounds.length >= bound.max_rounds) || (bound.max_minutes !== null && minutes >= bound.max_minutes);
+  if (!reached) add('debate_limit_invalid', `the bound budget (max_rounds ${bound.max_rounds}, max_minutes ${bound.max_minutes}) is not reached by the retained rounds (${rounds.length} rounds, ${minutes.toFixed(1)} minutes)`);
 }
 
 /**
@@ -755,7 +767,9 @@ function verifyRound(r, att, bundleDir, add) {
   if (got.result) {
     let res;
     try { res = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(got.result)); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not UTF-8 JSON`); return out; }
-    out.relay = { status: res.status, exitCode: res.exitCode };
+    const shape = relayShapeProblem(res);
+    if (shape) { add('debate_evidence_mismatch', `round ${r.n}: ${shape}`); return out; }
+    out.relay = { status: res.status, exitCode: res.exitCode, startedAt: realInstantOrNull(res.startedAt), finishedAt: realInstantOrNull(res.finishedAt) };
     const status = /_unavailable$/.test(String(res.status)) ? 'unavailable' : res.status;
     if (status !== r.status) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
     if (res.exitCode !== r.exit_code) add('debate_evidence_mismatch', `round ${r.n} records exit ${r.exit_code}, the relay result says ${res.exitCode}`);
@@ -772,6 +786,7 @@ function verifyRound(r, att, bundleDir, add) {
     if (r.status === 'completed') parsed = parseResponse(typeof res.finalMessage === 'string' ? res.finalMessage : null, expect);
   } else if (got.message && r.status === 'completed') {
     parsed = parseResponseBytes(got.message, expect);
+    out.relay = { status: 'completed', exitCode: 0, startedAt: null, finishedAt: null };
   }
   if (got.brief) {
     const b = briefFields(got.brief.toString('utf8'));
@@ -784,6 +799,25 @@ function verifyRound(r, att, bundleDir, add) {
   if (parsed.obj.verdict !== r.verdict) add('debate_attestation_invalid', `round ${r.n} records verdict ${r.verdict}, the response object says ${parsed.obj.verdict}`);
   out.response = parsed.obj;
   return out;
+}
+
+/** An ISO-8601 instant string, or null. */
+const realInstantOrNull = (v) => (typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : null);
+/**
+ * Why a relay result.json cannot be read safely, or null: an object of bounded depth (checked iteratively) whose read
+ * fields have scalar types (status, workdir strings; exitCode a number or null; thread and session ids strings or null;
+ * readOnly a boolean; finalMessage, error, versions and timestamps strings when present). Checked before any coercion.
+ */
+function relayShapeProblem(res) {
+  if (!isObject(res)) return 'result.json is not a JSON object';
+  if (tooDeep(res)) return `result.json nests deeper than ${MAX_JSON_DEPTH} levels`;
+  const optStr = (v) => v === undefined || v === null || typeof v === 'string';
+  if (typeof res.status !== 'string') return 'result.json status is not a string';
+  if (!(res.exitCode === null || res.exitCode === undefined || (typeof res.exitCode === 'number' && Number.isFinite(res.exitCode)))) return 'result.json exitCode is not a number';
+  if (!optStr(res.workdir)) return 'result.json workdir is not a string';
+  for (const k of ['sandbox', 'threadId', 'sessionId', 'finalMessage', 'error', 'codexVersion', 'claudeVersion', 'startedAt', 'finishedAt']) if (!optStr(res[k])) return `result.json ${k} is not a string`;
+  if (!(res.readOnly === undefined || typeof res.readOnly === 'boolean')) return 'result.json readOnly is not a boolean';
+  return null;
 }
 
 /** PREAPPROVAL: `debate-check`, run at PLAN preflight on the frozen plan before ExitPlanMode. `repo` binds the relay workdir. */
@@ -941,7 +975,8 @@ export function classifyProbe(o) {
   const cli = o.cli_version ?? o.codex_version;
   const idOf = (res) => (claude ? res?.sessionId : res?.threadId);
   const readOnly = (res) => (claude ? res?.readOnly === true : res?.sandbox === 'read-only');
-  const d = o.dispatch ?? {};
+  const safe = (x) => (x?.result && relayShapeProblem(x.result) ? { ...x, result: null } : x);
+  const d = safe(o.dispatch) ?? {};
   let dispatch;
   if (!o.relay_present) dispatch = no('relay', 'the relay script is missing or unreadable');
   else if (cli?.error) dispatch = no(errorClass(cli.error), `${bin} --version could not run (${cli.error})`);
@@ -962,7 +997,7 @@ export function classifyProbe(o) {
   const fresh_result = !reached ? notReached()
     : nonEmpty(id) && readOnly(d.result) && parseResponse(typeof d.result.finalMessage === 'string' ? d.result.finalMessage : null, probeExpect(o.nonce)).obj?.verdict === 'AGREE' ? pass(`readable result.json, status completed, read-only, new ${claude ? 'sessionId' : 'threadId'} ${id}`)
       : no('relay', `result.json lacks a ${claude ? 'sessionId' : 'threadId'}, is not read-only, or does not answer this probe's nonce`);
-  const rs = o.resume ?? {};
+  const rs = safe(o.resume) ?? {};
   const resume = fresh_result.result !== 'pass' ? no(fresh_result.class, 'not reached: no fresh result to resume')
     : rs.spawn_error ? no(spawnClass(rs.spawn_error), `the resume could not be started (${rs.spawn_error})`)
       : !rs.result ? no('relay', 'the resume wrote no readable result.json')
@@ -970,7 +1005,7 @@ export function classifyProbe(o) {
           : !readOnly(rs.result) ? no('relay', 'the resumed session is not read-only')
             : idOf(rs.result) !== id ? no('relay', `the resume returned ${idOf(rs.result)}, not ${id}`)
             : pass(`--session ${id} returned the same session`);
-  const c = o.cancel ?? {};
+  const c = safe(o.cancel) ?? {};
   const cancellation = !reached ? notReached()
     : claude ? { result: 'not_applicable_for_carrier', detail: 'the Claude relay exposes only Read, Glob and Grep, so a shell busy brief cannot exercise its watchdog: cancellation is unverified for this carrier, never a pass' }
     : c.spawn_error ? no(spawnClass(c.spawn_error), `the busy dispatch could not be started (${c.spawn_error})`)
