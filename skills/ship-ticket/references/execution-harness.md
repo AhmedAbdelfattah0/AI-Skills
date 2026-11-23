@@ -825,6 +825,44 @@ the intended environment's. If none matches, start a new labelled container;
 never attach to the first ID returned. Images, volumes and networks are never removed, and there
 is no prune.
 
+## Stop hook (script only; not installed)
+
+`skills/ship-ticket/scripts/stop-hook.mjs` is a Claude Code Stop hook script. Nothing in this
+repository installs or activates it: putting it into a settings file needs the
+owner's explicit D-9 approval. At the end of a turn it finds the single engine
+run of the repository (the one `<git common dir>/ai-skills/ship-ticket/<ticket>.state.json`;
+none or several means ambiguous) and runs the read-only `engine-accepted.mjs next`
+for it with an argv array (no shell). It then answers "is there an allowed next step?":
+
+- `run` or `dispatch`: it prints `{"decision":"block","reason":...}` naming the phase and the
+  command, so Claude continues the run with exactly that step. It never runs the command.
+- `stop` with code `acceptance_unknown` and a non-null `facts.settle_with`: block with
+  "run <settle_with> then come back" (not a real stop).
+- any other stop (`gate_refused`, `no_progress`, `identity_unavailable`, `state_moved`, the owner
+  classes, `review_fail_no_repair`, `owner_publish`, an unknown code): it prints nothing, so
+  Claude may stop and report to the owner.
+
+It fails open: any error, malformed input, missing or unreadable state, timeout (20 s hard
+limit) or a repository that is not a git work tree allows stopping. It adds no state,
+scheduler, daemon or loop and writes no file. Loop bound: when the input has
+`stop_hook_active: true` (this stop already followed a forced continuation) it allows stopping,
+so there is at most one forced continuation per turn. A counter that allowed several would need
+persistent state, which the owner excluded; the trade-off is that a long chain of steps is
+continued once per turn, not repeatedly. The hook cannot pass `--last`, so `next` run from it
+reports INIT/BUILD/RED/PROVE as `acceptance_unknown`: in practice the hook asks for one `drive`
+and cannot see past it. Both the unit tests and this paragraph state that limit.
+
+Documentation only, NOT INSTALLED, needs the owner's explicit D-9 approval before it is added to
+`~/.claude/settings.json` (user) or `.claude/settings.json` (project):
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command",
+  "command": "node /ABSOLUTE/PATH/TO/skills/ship-ticket/scripts/stop-hook.mjs" } ] } ] } }
+```
+
+To remove it, delete that `Stop` entry from the settings file (or the file's whole `hooks.Stop`
+block); nothing else was changed, there is no state to clean up.
+
 ## Known limits
 
 - Admission is advisory: it measures, it does not reserve memory.
