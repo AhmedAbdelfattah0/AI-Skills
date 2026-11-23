@@ -235,6 +235,10 @@ const S4_SUPERSEDED = [
   /Design change cell/i, /Debate carrier and exceptions requested/i, /predeclared `Attestation:/i,
   // D-A10 (2026-11-23): provider and resource limits are no longer LIMIT_REACHED kinds; no relay text is classified
   /provider_limit/i, /resource_limit/i, /provider or resource limit is reported as/i, /one whole diagnostic\s+source/i,
+  // D-A11 (2026-11-23): LIMIT_REACHED is reserved; no budget or limit record exists
+  /configured_budget/i, /max_rounds/i, /max_minutes/i, /recorded only for a configured budget/i, /configured budget lives in this line/i,
+  /consumption is derived from the retained evidence/i, /configured budget is reported as/i, /reaching a configured budget/i,
+  /LIMIT_REACHED` is reported truthfully/i, /UNRESOLVED` or `LIMIT_REACHED` plan/i,
 ];
 test('S4: no superseded debate scope, cap or default-skip instruction survives in SKILL.md, AGENTS.md or any reference', () => {
   const files = S4_FILES();
@@ -275,10 +279,8 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(x.includes('Two consecutive non-productive rounds on the same canonical finding are a diagnostic trigger, never a stop'));
   assert.ok(x.includes('The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval.'));
   assert.ok(x.includes('`CONVERGED` requires the counterpart\'s confirmation of the exact final plan digest'));
-  assert.ok(x.includes('`LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.'));
-  assert.ok(x.includes('`LIMIT_REACHED` is recorded only for a configured budget; a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified.'));
-  assert.ok(x.includes('The configured budget lives in this line, so the approved digest binds it.'));
-  assert.ok(x.includes('its consumption is derived from the retained evidence, never from the host\'s metrics'));
+  assert.ok(x.includes('`LIMIT_REACHED` is reserved and unsupported until an authenticated telemetry source exists (follow-up F-105-1): `debate-check` refuses it as `debate_limit_unsupported`, and a debate that stopped for any reason is `UNRESOLVED`.'));
+  assert.ok(x.includes('passes one structural bounds gate before any processing'));
   assert.ok(x.includes('`incomplete_review` is derived from the retained results'));
   assert.ok(x.includes('A dispatch failure that left no `result.json` at all has no valid outcome except `SKIPPED` with the owner exception'));
   assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));

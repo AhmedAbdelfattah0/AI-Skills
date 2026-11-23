@@ -76,7 +76,7 @@ function dispoFrom({ attestationRef, carrier = {}, rows = [] }, outcome) {
   return {
     v: 1, debate_id: attestationRef ? attestationRef.replace(/^Attestation:\s*/, '') : DEBATE_ID, outcome, carrier_degraded: c.degraded === true || c.degraded === 'true',
     degradation_ack: c.degradationAck === 'none' ? null : c.degradationAck,
-    exception: c.exception === 'none' ? null : { kind: c.exception, reason: c.reason, scope: c.scope, ack: c.exceptionAck }, limit: null,
+    exception: c.exception === 'none' ? null : { kind: c.exception, reason: c.reason, scope: c.scope, ack: c.exceptionAck },
     dispositions: rows.map(([id, kind, resolution, design]) => ({ id, kind, resolution, design_change: design === 'yes' ? true : design === 'no' ? false : design })),
   };
 }
@@ -144,7 +144,6 @@ function attestation(over = {}) {
     workdir: WORKDIR, workdir_kind: 'repo',
     host: { agent: 'claude', identity: 'claude:opus-5-5' },
     carrier: { agent: 'codex', kind: 'codex_relay', identity: 'codex:gpt-5.5', degraded: false },
-    budget: { max_rounds: null, max_minutes: null },
     metrics: { rounds: 2, calls: 2, minutes: 12, started_at: '2026-11-22T10:00:00Z', ended_at: '2026-11-22T10:12:00Z', tokens: null },
     contract_recheck: 'not_applicable', findings: [FIND()], rounds: [], final: null, limit: null, incomplete_review: false,
     ...over,
@@ -271,7 +270,7 @@ test('CONVERGED refusals: a non-read-only or wrong-workdir result, a fabricated 
   assert.ok(codes(pre(x, planText(x.narr, [B.serializeAttestation(x.att)]))).includes('debate_outcome_invalid'), 'changed-contract compatibility not rechecked');
 });
 
-// ================================================================== UNRESOLVED, LIMIT_REACHED, SKIPPED, carriers
+// ================================================================== UNRESOLVED, incomplete reviews, SKIPPED, carriers
 function unresolved(t, { narr: n0 = narrative(), over = {}, findings, r1 = {}, r2 = {}, r3 = null } = {}) {
   const narr = withResult(n0, 'UNRESOLVED');
   const bundle = tmp(t, 'debate-bundle-');
@@ -365,7 +364,7 @@ test('plan-level refusals: no debate_policy, no attestation line, section 7 does
   assert.ok(codes(pre(z)).includes('debate_attestation_invalid'), 'an unsafe debate id');
 });
 
-test('property: UNRESOLVED and LIMIT_REACHED are never refused solely because the counterpart did not AGREE', (t) => {
+test('property: UNRESOLVED and incomplete reviews are never refused solely because the counterpart did not AGREE', (t) => {
   const variants = [];
   for (const sev of ['blocker', 'major', 'minor']) {
     variants.push(unresolved(t, { r1: { findings: [{ id: 'P3', status: 'new', severity: sev }] }, findings: [FIND({ id: 'P3', severity: sev, status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] }));
@@ -442,14 +441,6 @@ test('start-check: UNRESOLVED blocks START while a disposition is pending; concr
   assert.deepEqual(go([['P3', 'decided', 'Keep A: the importer depends on it.', 'no']]), []);
   assert.deepEqual(go([['P3', 'decided', 'Adopt B.', 'yes']]), ['debate_reconfirm_required']);
   assert.deepEqual(go([['P3', 'waived', 'Out of scope by exception.', 'no']]), ['debate_disposition_pending'], 'waived needs the frozen exception');
-});
-
-test('start-check: LIMIT_REACHED needs an owner disposition of the limit; SKIPPED with its exception may START', (t) => {
-  const lx = (rows) => { const x = budgetDebate(t, { n: 2, rows, dlimit: { kind: 'configured_budget', max_rounds: 2, max_minutes: null }, attBudget: { max_rounds: 2, max_minutes: null } }); return codes(sc(planText(x.narr, [x.line, startLine(x)]), retain(t, x))); };
-  assert.deepEqual(lx([['P1', 'accept_risk', 'The owner accepts P1.', 'no']]), ['debate_disposition_pending'], 'the limit itself needs a disposition');
-  assert.deepEqual(lx([['P1', 'accept_risk', 'The owner accepts P1.', 'no'], ['LIMIT', 'accept_risk', 'The owner accepts stopping at the configured two rounds.', 'no']]), []);
-  const s = skipped(t);
-  assert.deepEqual(codes(sc(planText(s.narr, [s.line, startLine(s)]), retain(t, s))), []);
 });
 
 test('recovery in a new session: the original scratch bundle is DELETED, verification uses only the retained bundle (CLI)', (t) => {
@@ -688,8 +679,23 @@ async function mutant(find, replace) {
   try { return await import(pathToFileURL(path).href); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 const MUTANTS = [
-  ['D-A10: LIMIT_REACHED only for a configured budget', "if (!isObject(L) || L.kind !== 'configured_budget' || !nonEmpty(L.evidence)) {", "if (L?.kind !== 'configured_budget') return; if (false) {",
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'usage limit reached (429)' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
+  ['D-A11: LIMIT_REACHED is unsupported', "if (outcome === 'LIMIT_REACHED') { add('debate_limit_unsupported'", "if (false) { add('debate_limit_unsupported'",
+    (t) => ({ x: limited(t, { over: { limit: { kind: 'configured_budget', evidence: 'max_rounds: 1' } } }), code: 'debate_limit_unsupported' })],
+  ['D-A11: no limit record on any outcome', "if (att.limit !== null && att.limit !== undefined) add('debate_limit_unsupported'", "if (false) add('debate_limit_unsupported'",
+    (t) => ({ x: converged(t, { over: { limit: { kind: 'configured_budget', evidence: 'x' } } }), code: 'debate_limit_unsupported' })],
+  ['D-A11: no budget record', "if (att.budget !== undefined) add('debate_limit_unsupported'", "if (false) add('debate_limit_unsupported'",
+    (t) => ({ x: converged(t, { over: { budget: { max_rounds: 3, max_minutes: null } } }), code: 'debate_limit_unsupported' })],
+  ['at most 64 attempted rounds', "if (rounds.length > 64) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
+    (t) => ({ x: manyRounds(t, 65), code: 'debate_attestation_invalid' })],
+
+  ['bounds gate: string length', 'if (v.length > JSON_BOUNDS.string) return', 'if (false) return',
+    (t) => { const x = converged(t); const att = JSON.parse(x.line.slice(27, -4)); return { x, text: planText(x.narr, [B.serializeAttestation({ ...att, note: 'x'.repeat(2_000_000) })]), code: 'debate_attestation_invalid' }; }],
+  ['bounds gate: node count', 'if (nodes > JSON_BOUNDS.nodes) return', 'if (false) return',
+    (t) => ({ x: converged(t, { r2: { resultOver: { touchedFiles: Array.from({ length: 200 }, () => Array.from({ length: 600 }, () => 'f')) } } }), code: 'debate_evidence_mismatch' })],
+  ['bounds gate: array length', 'if (v.length > JSON_BOUNDS.array) return', 'if (false) return',
+    (t) => ({ x: converged(t, { r2: { resultOver: { touchedFiles: Array.from({ length: 2000 }, () => 'f') } } }), code: 'debate_evidence_mismatch' })],
+  ['relay exit codes are non-negative integers', '(Number.isInteger(res.exitCode) && res.exitCode >= 0)', '(typeof res.exitCode === \'number\')',
+    (t) => ({ x: converged(t, { r1: { exit_code: -1, status: 'failed' } }), code: 'debate_evidence_mismatch' })],
   ['D-A10: an incomplete review needs a failed relay result', "else if (relay.status === 'completed' && relay.exitCode === 0) add('debate_outcome_invalid'", "else if (false) add('debate_outcome_invalid'",
     (t) => ({ x: incomplete(t, { roundOpts: { status: 'completed', verdict: 'AGREE', findings: [] } }), code: 'debate_outcome_invalid' })],
   ['D-A10: an incomplete review needs a retained relay result', "if (!relay) add('debate_outcome_invalid'", "if (!relay) void ('debate_outcome_invalid'",
@@ -730,8 +736,6 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { r2: { workdir: resolve(tmpdir(), 'elsewhere') } }), code: 'debate_carrier_invalid' })],
   ['open blocker in the derived ledger', "if (open.some(([, d]) => d.rank >= RANK.major)) add('debate_open_finding'", "if (false) add('debate_open_finding'",
     (t) => ({ x: converged(t, { r1: { findings: [{ id: 'P1', status: 'new', severity: 'major' }, { id: 'P9', status: 'new', severity: 'blocker' }] }, over: { findings: [FIND(), FIND({ id: 'P9', severity: 'blocker', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] } }), code: 'debate_open_finding' })],
-  ['limit never converged', "if (att.final !== null) add('debate_outcome_invalid', 'LIMIT_REACHED", "if (false) add('debate_outcome_invalid', 'LIMIT_REACHED",
-    (t) => ({ x: limited(t, { over: { final: { request_id: 'req-1', plan_version: 'v1', plan_digest: 'sha256:x', verdict: 'AGREE' } } }), code: 'debate_outcome_invalid' })],
   ['skip exception', "if (!exceptionOk(D, 'SKIPPED')) add('debate_exception_missing'", "if (false) add('debate_exception_missing'",
     (t) => ({ x: skipped(t, { carrier: {} }), code: 'debate_exception_missing' })],
   ['degradation acknowledgement', "if (att.carrier.degraded && !(D?.carrier_degraded === true && D.degradation_ack === DEGRADED_ACK)) add('debate_degradation_unacknowledged'", "if (false) add('debate_degradation_unacknowledged'",
@@ -742,19 +746,11 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { over: { carrier: { agent: 'claude', kind: 'claude_relay', identity: 'claude:opus-5-5', degraded: false } }, r1: { kind: 'claude_relay', session: 's' }, r2: { kind: 'claude_relay', session: 's' } }), code: 'debate_carrier_invalid' })],
   ['Claude subscription auth', "if (r.auth_method !== 'claude.ai') add('debate_carrier_invalid'", "if (false) add('debate_carrier_invalid'",
     (t) => ({ x: converged(t, { over: { host: { agent: 'codex', identity: 'codex:gpt-5.5' }, carrier: { agent: 'claude', kind: 'claude_relay', identity: 'claude:opus-5-5', degraded: false } }, r1: { kind: 'claude_relay', session: 's' }, r2: { kind: 'claude_relay', session: 's', auth_method: 'api_key' } }), code: 'debate_carrier_invalid' })],
-  ['configured budget reached by the retained rounds', "if (!reached) add('debate_limit_invalid'", "if (false) add('debate_limit_invalid'",
-    (t) => ({ x: budgetDebate(t, { n: 1, dlimit: { kind: 'configured_budget', max_rounds: 5, max_minutes: null }, attBudget: { max_rounds: 5, max_minutes: null } }), code: 'debate_limit_invalid' })],
-  ['the budget is bound in the dispositions line', "if (!isObject(bound)) { add('debate_limit_invalid'", "if (!isObject(bound)) { return; add('debate_limit_invalid'",
-    (t) => ({ x: budgetDebate(t, { n: 1, attBudget: { max_rounds: 1, max_minutes: null } }), code: 'debate_limit_invalid' })],
-  ['the attestation budget equals the bound budget', "if (ab.max_rounds !== bound.max_rounds || ab.max_minutes !== bound.max_minutes) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
-    (t) => ({ x: budgetDebate(t, { n: 2, dlimit: { kind: 'configured_budget', max_rounds: 2, max_minutes: null }, attBudget: { max_rounds: 1, max_minutes: null } }), code: 'debate_attestation_invalid' })],
-  ['minutes come from the retained relay timestamps', '(Math.max(...times.map((x) => Date.parse(x.finishedAt))) - Math.min(...times.map((x) => Date.parse(x.startedAt)))) / 60000', 'Number(att.metrics?.minutes ?? 0)',
-    (t) => ({ x: budgetDebate(t, { n: 1, timing: [['2026-11-22T10:00:00.000Z', '2026-11-22T10:00:01.000Z']], metrics: { rounds: 5, calls: 5, minutes: 45, started_at: null, ended_at: null, tokens: null }, dlimit: { kind: 'configured_budget', max_rounds: null, max_minutes: 45 }, attBudget: { max_rounds: null, max_minutes: 45 } }), code: 'debate_limit_invalid' })],
   ['incomplete_review is derived from the retained results', "if ((att.incomplete_review === true) !== derivedIncomplete) add('debate_attestation_invalid'", "if (false) add('debate_attestation_invalid'",
     (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'accept_risk', 'Accepted.', 'no']] }), r2: { status: 'failed' }, over: { incomplete_review: false } }), code: 'debate_attestation_invalid' })],
   ['result.json fields are shape-checked before use', 'const shape = relayShapeProblem(res);', 'const shape = null;',
     (t) => ({ x: converged(t, { r2: { resultOver: { error: { code: 'not a string' } } } }), code: 'debate_evidence_mismatch' })],
-  ['attestation depth guard', 'if (tooDeep(att)) return bad(', 'if (false) return bad(',
+  ['bounds gate at the attestation entry', "if (bounds) return bad('debate_attestation_invalid'", "if (false) return bad('debate_attestation_invalid'",
     (t) => ({ x: converged(t, { over: { findings: [FIND({ host_position: DEEP(100, 'x') })] } }), code: 'debate_attestation_invalid' })],
   ['UNRESOLVED needs an outstanding finding', "if (!open.length || open.some(([id]) => !nonEmpty(attById.get(id)?.host_position) || !nonEmpty(attById.get(id)?.counterpart_position))) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
     (t) => ({ x: unresolved(t, { r2: { verdict: 'AGREE', findings: [{ id: 'P3', status: 'confirmed' }] }, findings: [FIND({ id: 'P3', closed_round: 2 })] }), code: 'debate_outcome_invalid' })],
@@ -802,7 +798,11 @@ const PROBE_OK = { relay_present: true, codex_version: { status: 0, version: 'co
   dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', codexVersion: 'codex-cli 1.0.0', finalMessage: PROBE_MSG('n') } },
   resume: { result: { status: 'completed', threadId: 't', sandbox: 'read-only' } }, cancel: { child_seen: true, result: { status: 'timeout' }, survivors: [] }, coverage: { before: 'c', after: 'c', ignored_before: 'i', ignored_after: 'i' } };
 const OTHER_MUTANTS = [
-  ['D-A10: untrusted JSON depth is checked iteratively before serializing', 'if (d > MAX_JSON_DEPTH) return true;', 'if (false) return true;',
+  ['bounds gate: non-finite numbers (dispositions entry)', "if (typeof v === 'number') { if (!Number.isFinite(v)) return", "if (typeof v === 'number') { if (false) return",
+    (mod, t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
+      const x = converged(t, { narr: base.replace(line, line.replace('"v":1', '"v":1e400')) });
+      try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_attestation_invalid'); } catch { return false; } }],
+  ['bounds gate: depth', 'if (d > JSON_BOUNDS.depth) return', 'if (false) return',
     (mod, t) => { const base = withResult(narrative(), 'CONVERGED'); const line = base.split('\n').find((l) => l.startsWith('debate-dispositions-v1: '));
       const deep = `debate-dispositions-v1: ${JSON.stringify({ ...JSON.parse(line.slice(24)), dispositions: [{ id: 'P1', kind: 'accept_risk', resolution: DEEP(5000, 'x'), design_change: false }] })}`;
       const x = converged(t, { narr: base.replace(line, deep) });
@@ -880,7 +880,7 @@ for (const [name, find, replace, make] of MUTANTS) {
   });
 }
 const START_MUTANTS = [
-  ['D-A10: an incomplete review needs the LIMIT disposition', "const needsLimit = outcome === 'LIMIT_REACHED' || (outcome === 'UNRESOLVED' && att.incomplete_review === true);", "const needsLimit = outcome === 'LIMIT_REACHED';",
+  ['an incomplete review needs the LIMIT disposition', "const needsLimit = outcome === 'UNRESOLVED' && att.incomplete_review === true;", 'const needsLimit = false;',
     (t) => ({ x: incomplete(t), code: 'debate_disposition_pending' })],
   ['waived needs the frozen exception', "if (row.kind === 'waived' && !exceptionOk(D, 'WAIVED') && !exceptionOk(D, 'SKIPPED')) return ['debate_disposition_pending'", "if (false) return ['debate_disposition_pending'",
     (t) => ({ x: unresolved(t, { narr: narrative({ rows: [['P3', 'waived', 'Out of scope.', 'no']] }) }), code: 'debate_disposition_pending' })],
@@ -1510,7 +1510,7 @@ test('[r1a-probe] fresh_result needs an explicit AGREE: a schema-valid CHANGES_R
 });
 
 // ================================================================== D-A10 (2026-11-23): no textual limit classification
-// LIMIT_REACHED is accepted only for a configured budget. A provider or resource failure is UNRESOLVED with
+// LIMIT_REACHED is reserved and refused (D-A11). A provider or resource failure is UNRESOLVED with
 // incomplete_review: true, the retained relay result showing the actual failure (status not completed, or exit not 0).
 const DEEP = (n, leaf) => { let v = leaf; for (let k = 0; k < n; k += 1) v = { a: v }; return v; };
 const A10_ATTACKS = {
@@ -1529,15 +1529,15 @@ function incomplete(t, { roundOpts = {}, over = {} } = {}) {
   const line = B.serializeAttestation(att);
   return { bundle, att, line, narr, D: digestOf(narr), text: planText(narr, [line]) };
 }
-test('[a10] every Round 1/2 attack input is refused as a provider or resource LIMIT_REACHED (no text is classified)', (t) => {
+test('[a10] every Round 1/2 attack input is refused as LIMIT_REACHED, which is unsupported (no text is classified)', (t) => {
   for (const [name, a] of Object.entries(A10_ATTACKS)) {
     for (const kind of ['provider_limit', 'resource_limit']) {
       const x = limited(t, { roundOpts: { result_error: 'usage limit reached (429)', ...a }, over: { limit: { kind, evidence: 'usage limit reached (429)' } } });
-      assert.ok(codes(pre(x)).includes('debate_limit_invalid'), `${name} ${kind}`);
+      assert.ok(codes(pre(x)).includes('debate_limit_unsupported'), `${name} ${kind}`);
     }
   }
   const classed = limited(t, { roundOpts: { dispatch_error: { class: 'provider', text: 'spawn failed' } }, over: { limit: { kind: 'provider_limit', evidence: 'spawn failed' } } });
-  assert.ok(codes(pre(classed)).includes('debate_limit_invalid'), 'a structured class never promotes text into a limit');
+  assert.ok(codes(pre(classed)).includes('debate_limit_unsupported'), 'a structured class never promotes text into a limit');
 });
 test('[a10] a provider or resource failure is UNRESOLVED with incomplete_review, accepted only when the retained relay result shows the failure', (t) => {
   for (const [name, a] of Object.entries(A10_ATTACKS)) {
@@ -1561,11 +1561,6 @@ test('[a10] the real fixtures (completed runs carrying Codex hook warnings) are 
     const att = attestation({ outcome: 'UNRESOLVED', plan_digest: digestOf(narr), rounds: [r1], findings: [], final: null, incomplete_review: true, limit: null });
     assert.ok(codes(B.debateCheck(planText(narr, [B.serializeAttestation(att)]), { bundleDir: bundle, repo: REPO })).includes('debate_outcome_invalid'), set);
   }
-});
-test('[a10] configured_budget is the one LIMIT_REACHED kind: a bound budget reached by the retained rounds is accepted, otherwise refused', (t) => {
-  assert.deepEqual(pre(budgetDebate(t, { n: 1, dlimit: { kind: 'configured_budget', max_rounds: 1, max_minutes: null }, attBudget: { max_rounds: 1, max_minutes: null } })).errors, []);
-  assert.ok(codes(pre(budgetDebate(t, { n: 1, dlimit: { kind: 'configured_budget', max_rounds: 5, max_minutes: null }, attBudget: { max_rounds: 5, max_minutes: null } }))).includes('debate_limit_invalid'), 'not reached');
-  assert.ok(codes(pre(budgetDebate(t, { n: 1 }))).includes('debate_limit_invalid'), 'no bound budget');
 });
 test('[a10] untrusted JSON depth never overflows the stack: a 5,000-deep attestation, dispositions or response value is refused', (t) => {
   const x = converged(t);
@@ -1597,29 +1592,11 @@ test('[a10] start-check: an incomplete review reaches START only through the own
 // ================================================================== attempt B Round 1 repair: no host-stated limit evidence
 const DEEP_ARR = (n, leaf) => { let v = leaf; for (let k = 0; k < n; k += 1) v = [v]; return v; };
 const OPEN_P1 = () => FIND({ status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' });
-/** A LIMIT_REACHED debate of `n` completed rounds; the budget is bound in the dispositions line (`dlimit`). */
-function budgetDebate(t, { n = 1, dlimit = null, attBudget = { max_rounds: null, max_minutes: null }, metrics = null, rows = [], timing = null } = {}) {
-  const narr = withResult(narrative({ rows }), 'LIMIT_REACHED', { limit: dlimit });
-  const bundle = tmp(t, 'debate-bundle-');
-  const rounds = Array.from({ length: n }, (_, i) => round(bundle, i + 1, { plan_version: `v${i + 1}`, findings: [i === 0 ? { id: 'P1', status: 'new', severity: 'major' } : { id: 'P1', status: 'maintained' }],
-    ...(timing ? { startedAt: timing[i][0], finishedAt: timing[i][1] } : {}) }));
-  const att = attestation({ outcome: 'LIMIT_REACHED', plan_digest: digestOf(narr), rounds, findings: n ? [OPEN_P1()] : [], final: null, budget: attBudget, incomplete_review: false,
-    metrics: metrics ?? { rounds: n, calls: n, minutes: 1, started_at: null, ended_at: null, tokens: null }, limit: { kind: 'configured_budget', evidence: 'the configured budget' } });
-  const line = B.serializeAttestation(att);
-  return { bundle, att, line, narr, D: digestOf(narr), text: planText(narr, [line]) };
-}
-test('[b1-budget] the budget is bound in the digest and its consumption is derived from the retained rounds, never from host metrics', (t) => {
-  const lim = (x) => codes(pre(x)).includes('debate_limit_invalid');
-  assert.ok(lim(budgetDebate(t, { n: 0, dlimit: { kind: 'configured_budget', max_rounds: 3, max_minutes: null }, attBudget: { max_rounds: 3, max_minutes: null }, metrics: { rounds: 3, calls: 3, minutes: 1, started_at: null, ended_at: null, tokens: null } })), 'zero attempted rounds');
-  const oneSecond = [['2026-11-22T10:00:00.000Z', '2026-11-22T10:00:01.000Z']];
-  const claimed = { rounds: 5, calls: 5, minutes: 45, started_at: null, ended_at: null, tokens: null };
-  assert.ok(lim(budgetDebate(t, { n: 1, timing: oneSecond, metrics: claimed, dlimit: { kind: 'configured_budget', max_rounds: 5, max_minutes: null }, attBudget: { max_rounds: 5, max_minutes: null } })), 'one round claiming five');
-  assert.ok(lim(budgetDebate(t, { n: 1, timing: oneSecond, metrics: claimed, dlimit: { kind: 'configured_budget', max_rounds: null, max_minutes: 45 }, attBudget: { max_rounds: null, max_minutes: 45 } })), 'one second claiming 45 minutes');
-  assert.deepEqual(pre(budgetDebate(t, { n: 2, dlimit: { kind: 'configured_budget', max_rounds: 2, max_minutes: null }, attBudget: { max_rounds: 2, max_minutes: null } })).errors, [], 'two retained rounds reach max_rounds 2');
-  assert.deepEqual(pre(budgetDebate(t, { n: 1, timing: [['2026-11-22T10:00:00.000Z', '2026-11-22T10:46:00.000Z']], dlimit: { kind: 'configured_budget', max_rounds: null, max_minutes: 45 }, attBudget: { max_rounds: null, max_minutes: 45 } })).errors, [], '46 retained minutes reach max_minutes 45');
-  assert.ok(lim(budgetDebate(t, { n: 1, attBudget: { max_rounds: 1, max_minutes: null } })), 'a budget only in the attestation is not bound');
-  assert.ok(codes(pre(budgetDebate(t, { n: 2, dlimit: { kind: 'configured_budget', max_rounds: 2, max_minutes: null }, attBudget: { max_rounds: 1, max_minutes: null } }))).includes('debate_attestation_invalid'), 'the attestation budget disagrees with the bound one');
+test('start-check: SKIPPED with its exception may START', (t) => {
+  const s2 = skipped(t);
+  assert.deepEqual(codes(sc(planText(s2.narr, [s2.line, startLine(s2)]), retain(t, s2))), []);
 });
+
 test('[b1-incomplete] incomplete_review is derived from the retained results; a disagreeing host flag is refused', (t) => {
   const rows = [['P3', 'accept_risk', 'The owner accepts B is not adopted.', 'no']];
   const lying = unresolved(t, { narr: narrative({ rows }), r2: { status: 'failed' }, over: { incomplete_review: false } });
@@ -1642,4 +1619,54 @@ test('[b1-relay-json] deep or mistyped result.json fields are refused before any
 test('[b1-depth] an attestation value 100 levels deep in an allowed field is refused by the depth guard alone', (t) => {
   const x = converged(t, { over: { findings: [FIND({ host_position: DEEP(100, 'x') })] } });
   assert.ok(codes(pre(x)).includes('debate_attestation_invalid'), JSON.stringify(pre(x).errors).slice(0, 200));
+});
+
+// ================================================================== attempt C (D-A11, 2026-11-23): LIMIT_REACHED unsupported; one bounds gate
+test('[c-limit] LIMIT_REACHED is reserved: every limit/budget attack of attempts A and B is refused as debate_limit_unsupported', (t) => {
+  const unsupported = (x) => codes(pre(x)).includes('debate_limit_unsupported');
+  for (const kind of ['configured_budget', 'provider_limit', 'resource_limit']) assert.ok(unsupported(limited(t, { over: { limit: { kind, evidence: 'usage limit reached (429)' } } })), kind);
+  for (const a of Object.values(A10_ATTACKS)) assert.ok(unsupported(limited(t, { roundOpts: a })));
+  const bundle = tmp(t, 'debate-bundle-');
+  const one = round(bundle, 1, { status: 'failed' });
+  const replayed = Array.from({ length: 5 }, (_, i) => ({ ...one, n: i + 1, request_id: `req-${i + 1}` }));
+  const narr = withResult(narrative(), 'UNRESOLVED');
+  const att = attestation({ outcome: 'LIMIT_REACHED', plan_digest: digestOf(narr), rounds: replayed, findings: [], final: null, incomplete_review: true, limit: { kind: 'configured_budget', evidence: 'max_rounds: 5' } });
+  assert.ok(codes(B.debateCheck(planText(narr, [B.serializeAttestation(att)]), { bundleDir: bundle, repo: REPO })).includes('debate_limit_unsupported'), 'one failed result replayed as five rounds');
+  const neg = round(bundle, 6, { status: 'failed', startedAt: '2026-11-22T11:00:00Z', finishedAt: '2026-11-22T10:01:00Z' });
+  const att2 = attestation({ outcome: 'LIMIT_REACHED', plan_digest: digestOf(narr), rounds: [{ ...neg, n: 1 }], findings: [], final: null, incomplete_review: true, limit: { kind: 'configured_budget', evidence: 'max_minutes: 45' } });
+  assert.ok(codes(B.debateCheck(planText(narr, [B.serializeAttestation(att2)]), { bundleDir: bundle, repo: REPO })).includes('debate_limit_unsupported'), 'negative durations');
+  assert.ok(codes(pre(converged(t, { over: { limit: { kind: 'configured_budget', evidence: 'x' } } }))).includes('debate_limit_unsupported'), 'a limit record on any outcome');
+  assert.ok(codes(pre(converged(t, { over: { budget: { max_rounds: 3, max_minutes: null } } }))).includes('debate_limit_unsupported'), 'a budget record');
+});
+test('[c-bounds] one bounds gate at every untrusted JSON entry: depth, nodes, array length, string length, numbers; no stack overflow', (t) => {
+  const x = converged(t);
+  const att = JSON.parse(x.line.slice(27, -4));
+  const withAtt = (o) => pre(x, planText(x.narr, [`<!-- debate-attestation-v1 ${JSON.stringify(o)} -->`]));
+  let r;
+  const t0 = Date.now();
+  assert.doesNotThrow(() => { r = withAtt({ ...att, rounds: Array.from({ length: 140000 }, (_, i) => ({ ...att.rounds[1], n: i + 1 })) }); });
+  assert.ok(codes(r).includes('debate_attestation_invalid'), '140,000 rounds');
+  assert.ok(Date.now() - t0 < 5000, 'refused quickly');
+  assert.ok(codes(withAtt({ ...att, rounds: Array.from({ length: 65 }, (_, i) => ({ ...att.rounds[1], n: i + 1 })) })).includes('debate_attestation_invalid'), 'more than 64 attempted rounds');
+  assert.ok(codes(withAtt({ ...att, note: 'x'.repeat(2_000_000) })).includes('debate_attestation_invalid'), 'an oversized string');
+  assert.ok(codes(pre(x, planText(x.narr, [x.line.replace('"minutes":12', '"minutes":1e400')]))).includes('debate_attestation_invalid'), 'a non-finite number');
+  assert.ok(codes(withAtt({ ...att, findings: [{ ...att.findings[0], host_position: DEEP(100, 'x') }] })).includes('debate_attestation_invalid'), 'depth through the gate');
+  assert.equal(B.parseResponse(JSON.stringify({ v: 1, request_id: 'r', plan_version: 'v1', plan_digest: R_D, verdict: 'AGREE', findings: [], x: Array.from({ length: 5000 }, () => 1) })).code, 'debate_response_invalid');
+  assert.ok(codes(pre(converged(t, { r2: { resultOver: { touchedFiles: Array.from({ length: 200000 }, () => 'f') } } }))).includes('debate_evidence_mismatch'), 'result.json node count');
+  assert.ok(codes(pre(converged(t, { r2: { resultOver: { exitCode: -1 } } }))).includes('debate_evidence_mismatch'), 'a negative exit code');
+  assert.ok(codes(pre(converged(t, { r2: { resultOver: { exitCode: 0.5 } } }))).includes('debate_evidence_mismatch'), 'a non-integer exit code');
+});
+
+/** A valid UNRESOLVED debate of `n` distinct attempted rounds (P3 opened in round 1, maintained after). */
+function manyRounds(t, n) {
+  const narr = withResult(narrative(), 'UNRESOLVED');
+  const bundle = tmp(t, 'debate-bundle-');
+  const rounds = Array.from({ length: n }, (_, i) => round(bundle, i + 1, { plan_version: `v${i + 1}`, findings: [i === 0 ? { id: 'P3', status: 'new', severity: 'major' } : { id: 'P3', status: 'maintained' }] }));
+  const att = attestation({ outcome: 'UNRESOLVED', plan_digest: digestOf(narr), rounds, final: null, findings: [FIND({ id: 'P3', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] });
+  const line = B.serializeAttestation(att);
+  return { bundle, att, line, narr, D: digestOf(narr), text: planText(narr, [line]) };
+}
+test('[c-bounds] 64 attempted rounds verify; 65 are refused', (t) => {
+  assert.deepEqual(pre(manyRounds(t, 64)).errors, []);
+  assert.ok(codes(pre(manyRounds(t, 65))).includes('debate_attestation_invalid'));
 });

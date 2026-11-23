@@ -131,7 +131,7 @@ The YAML header above this body carries (plain text in this template; a debate_p
      host_agent: claude|codex|other|unknown
      counterpart_agent: codex|claude|fable|other|unavailable
      debate_policy: 2                    every new implementation plan (START refuses a new plan without it)
-     plan_debate: {outcome: CONVERGED|UNRESOLVED|LIMIT_REACHED|SKIPPED (SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}, rounds, calls, minutes, budget: {max_rounds: null, max_minutes: null}}   null = no cap
+     plan_debate: {outcome: CONVERGED|UNRESOLVED|SKIPPED (LIMIT_REACHED is reserved and refused; SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}, rounds, calls, minutes}   null = no cap
      codex_route: {dispatch, fresh_result, resume, cancellation, coverage}   PLAN carrier probe: each pass|fail with class permission_denied|auth|provider|relay
      worker_width: <available concurrent workers>
      parallelism_degradations: []
@@ -251,15 +251,15 @@ Not applicable: <check>: <one-line reason>, ...
 ## 7. Cross-model planning debate
 <Every implementation plan; the debate rules live in cross-model.md "PLAN debate". Freeze this section before the final confirmation request. The Markdown below is the human-readable ledger only and is never authoritative.>
 **Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
-**Result:** <CONVERGED / UNRESOLVED / LIMIT_REACHED / SKIPPED (only with the owner exception) and why, for the reader; the authoritative outcome is the one in the dispositions line below>
+**Result:** <CONVERGED / UNRESOLVED / SKIPPED (only with the owner exception) and why, for the reader; the authoritative outcome is the one in the dispositions line below>
 **Draft:** <final version; last version actually checked by counterpart>
-**Timing and cost:** <start/end UTC, rounds, calls attempted, responses received, minutes, tokens when reported; budget none unless overridden> (information only)
+**Timing and cost:** <start/end UTC, rounds, calls attempted, responses received, minutes, tokens when reported> (information only)
 
 | Finding ID / severity | Host response and evidence | Counterpart response (from its response objects) | Final disposition |
 |---|---|---|---|
 | <P1 / major> | <changed design or evidence-backed challenge> | <conceded / confirmed / maintained, with the note> | <resolved / unresolved> |
 
-<The owner-approved machine content is ONE line at column 1, printed by `brief.mjs debate-serialize --dispositions <json>`: debate_id; outcome (SKIPPED only with the owner exception); carrier_degraded and, when true, degradation_ack exactly "The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply."; exception null or {kind: SKIPPED with ack "The owner approves skipping the Planning Debate for this ticket only." | WAIVED with ack "The owner waives the listed debate findings for this ticket only.", reason, scope "this ticket"}; limit null or {kind configured_budget, max_rounds, max_minutes} (the debate's configured budget, digest-bound); dispositions [{id (a canonical finding id, or LIMIT), kind accept_risk | decided | waived, resolution (the accepted-risk text, the actual decision, or the waiver), design_change true | false}]. A pending finding has no row. This is inspectable frozen content: approving the exact plan digest in `ExitPlanMode` is the owner's approval of it, and the ExitPlanMode text quotes this line verbatim beside the attestation hash. Only single-line HTML comments may appear in the narrative.>
+<The owner-approved machine content is ONE line at column 1, printed by `brief.mjs debate-serialize --dispositions <json>`: debate_id; outcome (SKIPPED only with the owner exception); carrier_degraded and, when true, degradation_ack exactly "The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply."; exception null or {kind: SKIPPED with ack "The owner approves skipping the Planning Debate for this ticket only." | WAIVED with ack "The owner waives the listed debate findings for this ticket only.", reason, scope "this ticket"}; dispositions [{id (a canonical finding id, or LIMIT), kind accept_risk | decided | waived, resolution (the accepted-risk text, the actual decision, or the waiver), design_change true | false}]. A pending finding has no row. This is inspectable frozen content: approving the exact plan digest in `ExitPlanMode` is the owner's approval of it, and the ExitPlanMode text quotes this line verbatim beside the attestation hash. Only single-line HTML comments may appear in the narrative.>
 debate-dispositions-v1: <canonical JSON printed by debate-serialize --dispositions>
 
 **Outstanding decisions:** <remaining positions, recommendation and human choice

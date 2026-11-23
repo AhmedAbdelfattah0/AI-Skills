@@ -184,9 +184,8 @@ provider/consumer contract checks in [plan.md](plan.md) before dispatch.
 ### Stopping policy
 
 There is no default call or minute cap. The plan header records
-`budget: {max_rounds: null, max_minutes: null}` (null means none); an owner or
-repository override is honoured, and reaching a configured budget is a
-`LIMIT_REACHED` escalation. Per-call process safety stays: each relay call gets
+no budget field: a stop that is not convergence is `UNRESOLVED` (see the
+outcomes below; `LIMIT_REACHED` is reserved). Per-call process safety stays: each relay call gets
 its own `--timeout` (initial 10 minutes, delta 5 minutes, configurable), and one
 `--session` resume is allowed per timeout; a timeout alone is never a debate limit.
 
@@ -271,22 +270,23 @@ Outcomes, independent of the carrier:
   (the checker never deadlocks a legitimate escalation), but it is not
   debate-qualified for execution: START needs a concrete disposition of every
   outstanding finding.
-- `LIMIT_REACHED` is recorded only for a configured budget; a provider or resource failure is UNRESOLVED with incomplete_review and the retained relay diagnostics; no text is classified. The limit is
-  `limit: {kind: configured_budget, evidence}`; the budget itself is the one bound in
-  the dispositions line, and its consumption is derived from the retained evidence,
-  never from the host's metrics: the attempted rounds the attestation records, and
-  the minutes spanned by the retained relay results' `startedAt` and `finishedAt`.
-  LIMIT_REACHED needs that derived consumption to reach the bound budget. A provider or resource failure (a quota, a permission error, a
-  timeout) is recorded as `UNRESOLVED` with `incomplete_review: true`: the retained
-  relay result of the last attempt must show the actual failure (status not
-  `completed`, or exit code not 0), the findings may be empty, and it reaches START
-  only through the owner's disposition of id `LIMIT`. `incomplete_review` is derived
-  from the retained results (the last round has no retained relay result, or a
-  failed one); a host flag that disagrees is refused. A dispatch failure that left
-  no `result.json` at all has no valid outcome except `SKIPPED` with the owner
-  exception: as before, use the substitute carrier, `WAIT_FOR_USER`, or an owner
-  exception (fail closed, no new outcome). Every read `result.json` field is
-  type-checked and depth-checked (iteratively) before use. `LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.
+- `LIMIT_REACHED` is reserved and unsupported until an authenticated telemetry source exists (follow-up F-105-1): `debate-check` refuses it as `debate_limit_unsupported`, and a debate that stopped for any reason is `UNRESOLVED`. No budget or limit record is
+  accepted (D-A11, 2026-11-23): a mechanical stop derived from host-controlled
+  structures could not be made sound. A provider or resource failure (a quota, a
+  permission error, a timeout) is recorded as `UNRESOLVED` with
+  `incomplete_review: true`: the retained relay result of the last attempt must
+  show the actual failure (status not `completed`, or exit code not 0), the
+  findings may be empty, `debate_qualified` is false, and it reaches START only
+  through the owner's disposition of id `LIMIT`; no text is classified.
+  `incomplete_review` is derived from the retained results (the last round has no
+  retained relay result, or a failed one); a host flag that disagrees is refused.
+  A dispatch failure that left no `result.json` at all has no valid outcome except `SKIPPED` with the owner exception: as before, use the substitute carrier, `WAIT_FOR_USER`, or an owner
+  exception (fail closed, no new outcome). Every untrusted JSON value (the
+  attestation, each response object, the dispositions line and each retained
+  `result.json`) passes one structural bounds gate before any processing: at most
+  64 levels deep, 100,000 nodes, 1,024 array elements and 1,000,000 characters per
+  string, finite numbers only; at most 64 attempted rounds; a relay exit code is a
+  non-negative integer.
 - `SKIPPED`: only with the owner exception frozen in the plan.
 
 `DEGRADED` is not an outcome: a substitute carrier is `carrier.degraded: true`.
@@ -299,9 +299,8 @@ human-readable ledger, never authoritative) and the ONE visible line
 `node scripts/brief.mjs debate-serialize --dispositions <json>`. That line is the
 owner-approved machine content: `{v: 1, debate_id, outcome, carrier_degraded,
 degradation_ack, exception: null | {kind: SKIPPED | WAIVED, reason, scope, ack},
-limit: null | {kind: configured_budget, max_rounds, max_minutes},
 dispositions: [{id, kind: accept_risk | decided | waived, resolution,
-design_change}]}`. The configured budget lives in this line, so the approved digest binds it. It is digest-bound (outside the RUN-STATE body), exactly one
+design_change}]}`. It is digest-bound (outside the RUN-STATE body), exactly one
 occurrence of its token is allowed in the narrative, and Markdown context (fences,
 indentation, tables) is never read for authority. It is written before the
 confirmation round, because the digest covers it. The terminal data lives outside the digest-hashed
@@ -362,8 +361,8 @@ it the attestation hash and resolvable evidence are mandatory. A plan without
 `debate_policy` is legacy only when its START was approved before the S4 cutoff
 (`DEBATE_POLICY_CUTOFF` in `brief.mjs`, finalized at merge).
 
-An `UNRESOLVED` or `LIMIT_REACHED` plan may START only when every outstanding
-canonical finding (and, for `LIMIT_REACHED` or an incomplete review, the limit itself as id `LIMIT`) has a
+An `UNRESOLVED` plan may START only when every outstanding
+canonical finding (and, for an incomplete review, the stop itself as id `LIMIT`) has a
 concrete disposition in the frozen dispositions line of the approved digest:
 `accept_risk` with the accepted-risk text, `decided` with the actual decision, or
 `waived` with the frozen exception. A pending finding has no row and blocks START

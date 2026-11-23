@@ -444,8 +444,7 @@ object, and free text is never approval evidence: a non-conforming answer fails 
 round, and the host re-asks with a new `request_id`. The owner-approved dispositions
 are one `debate-dispositions-v1:` narrative line, never section 7 Markdown. Do not exit
 Plan Mode before the debate has been reconciled and
-`brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` or
-`LIMIT_REACHED` plan is presented for the owner's disposition; see
+`brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` plan is presented for the owner's disposition; see
 [references/cross-model.md](references/cross-model.md) "PLAN debate"); state the
 attestation line's sha256 in the text accompanying `ExitPlanMode`, and do not
 treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.
