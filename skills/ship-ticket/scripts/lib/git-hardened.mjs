@@ -125,8 +125,8 @@ const writeNew = (p, data) => writeFileSync(p, data, { flag: 'wx', mode: 0o600 }
 // The prefix is passed as a (strict-decoded) string: Node 18.20.8 mkdtempSync throws a TypeError on a Buffer prefix (MEASURED).
 const tempDir = (parent, prefix) => mkdtempSync(`${str(parent)}/${prefix}`, { encoding: 'buffer' });
 
-/** A counter that throws `code` once its total passes `cap`. */
-const meter = (cap, code, op) => { let n = 0; return (k) => { n = n + k; if (n > cap) throw fail(code, op); return n; }; };
+/** A counter that throws `code` once its total passes `cap` or the clock passes `deadline`: every charge checks both. */
+const meter = (cap, code, op, deadline = Infinity) => { let n = 0; return (k) => { n = n + k; if (n > cap || Date.now() > deadline) throw fail(code, op); return n; }; };
 
 /** Positive safe integers only; the caller may lower any default. */
 export const DEFAULTS = Object.freeze({
@@ -314,7 +314,8 @@ function lines(stdout, op) {
   if (!t.endsWith('\n')) throw fail('object_corrupt', op);
   return t.slice(0, t.length - 1).split('\n');
 }
-const oidChunks = (oids) => { const out = []; for (let i = 0; i < oids.length; i = i + 99) out.push({ kind: 'oid-lines', bytes: B(oids.slice(i, i + 99).map((o) => `${o}\n`).join('')) }); return out; };
+/** The data-only stdin form of git-exec (oid strings, at most 99 per call): the runner builds the bytes. */
+const oidChunks = (oids) => { const out = []; for (let i = 0; i < oids.length; i = i + 99) out.push(Object.freeze({ kind: 'oid-lines', oids: Object.freeze(oids.slice(i, i + 99)) })); return out; };
 
 /** A lib git dir under R: lib-written config, HEAD = oid, alternates = `objects` (an absolute realpath Buffer). */
 function libGitDir(st, prefix, config, oid, objects) {
@@ -370,7 +371,7 @@ function ingest(st, s, D, dst, dir, head, base, deadline) {
   const total = meter(st.maxTotalObjectBytes, 'object_too_large', 'store.sizes');
   for (const chunk of oidChunks(all)) {
     const sizes = lines(corruptOnFail(() => git(st, 'store.sizes', Vs, [], { stdin: chunk, deadline }).stdout, 'store.sizes'), 'store.sizes');
-    if (sizes.length * 41 !== chunk.bytes.length) throw fail('object_corrupt', 'store.sizes');
+    if (sizes.length !== chunk.oids.length) throw fail('object_corrupt', 'store.sizes');
     for (const l of sizes) {
       const m = /^(\d{1,15}) (\d{1,15})$/.exec(l);
       if (!m) throw fail('object_corrupt', 'store.sizes');
@@ -378,8 +379,8 @@ function ingest(st, s, D, dst, dir, head, base, deadline) {
       total(+m[1]);
     }
   }
-  const tips = head === base ? `${head}\n` : `${head}\n${base}\n`;
-  const out = lines(corruptOnFail(() => git(st, 'store.pack', Vs, [`${Vs}/tmp/p`], { stdin: { kind: 'oid-lines', bytes: B(tips) }, deadline }).stdout, 'store.pack'), 'store.pack');
+  const tips = Object.freeze({ kind: 'oid-lines', oids: Object.freeze(head === base ? [head] : [head, base]) });
+  const out = lines(corruptOnFail(() => git(st, 'store.pack', Vs, [`${Vs}/tmp/p`], { stdin: tips, deadline }).stdout, 'store.pack'), 'store.pack');
   if (out.length !== 1 || !isOid(out[0])) throw fail('object_corrupt', 'store.pack');
   const produced = join(V, B(`tmp/p-${out[0]}.pack`));
   for (const ext of ['idx', 'rev']) { const f = join(V, B(`tmp/p-${out[0]}.${ext}`)); if (lstatOrNull(f)) unlinkSync(f); }
@@ -496,11 +497,11 @@ function listTree(st, h, operands, deadline) {
   const root = lines(git(st, 'commit.tree', h.storePath, operands, { deadline }).stdout, id);
   if (root.length !== 1 || !isOid(root[0])) throw fail('object_corrupt', id);
   const trees = [root[0], ...all.filter((e) => e.type === 'tree').map((e) => e.oid)];
-  for (const chunk of oidChunks(trees)) rawTrees(git(st, 'tree.raw', h.storePath, [], { stdin: chunk, deadline }).stdout, chunk.bytes.length, id);
+  for (const chunk of oidChunks(trees)) rawTrees(git(st, 'tree.raw', h.storePath, [], { stdin: chunk, deadline }).stdout, chunk.oids.length, id);
   return Object.freeze(all.filter((e) => e.type !== 'tree'));
 }
 const NL = Buffer.from('\n');
-/** `cat-file --batch` output: exactly one `<oid> tree <size>` object per asked oid (41 bytes of stdin each), each tree's entries checked. */
+/** `cat-file --batch` output: exactly one `<oid> tree <size>` object per asked oid, each tree's entries checked. */
 function rawTrees(buf, asked, id) {
   let objects = 0;
   for (let at = 0; at < buf.length;) {
@@ -513,7 +514,7 @@ function rawTrees(buf, asked, id) {
     at = end + 1;
     objects = objects + 1;
   }
-  if (objects * 41 !== asked) throw fail('object_corrupt', id);
+  if (objects !== asked) throw fail('object_corrupt', id);
 }
 /** Raw tree entries `<mode> <name>\0<20-byte oid>`: a name holding a slash, or an unsafe component, refuses. */
 function rawTreeNames(t, id) {
@@ -648,8 +649,8 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
   else if (!canonicalDir(top)) throw invalid();
   const excluded = excludedBy(exclusionList(exclusions));
   const deadline = Date.now() + st.timeoutMs;
-  const spendFiles = meter(st.maxFiles, 'worktree_budget_exceeded', op);
-  const spendBytes = meter(st.maxBytes, 'worktree_budget_exceeded', op);
+  const spendFiles = meter(st.maxFiles, 'worktree_budget_exceeded', op, deadline);
+  const spendBytes = meter(st.maxBytes, 'worktree_budget_exceeded', op, deadline);
   const entries = op_(st, h, 'tree.list', [oid], deadline).filter((e) => !excluded(e.path));
   spendFiles(entries.length);
   const diffs = [];
@@ -785,6 +786,9 @@ function untrackedLists(st, h, top, s, oid, deadline) {
  * entry budget) and `deadline` bound the work; exhaustion or any failure throws (the caller quarantines).
  */
 function removeTree(root, dev, spend, deadline) {
+  try { removeTreeRaw(root, dev, spend, deadline); } catch (e) { if (e instanceof GitError) throw e; throw fail('lane_remove_failed', 'remove'); }
+}
+function removeTreeRaw(root, dev, spend, deadline) {
   const order = [];
   for (const queue = [root]; queue.length;) {
     const d = queue.shift();

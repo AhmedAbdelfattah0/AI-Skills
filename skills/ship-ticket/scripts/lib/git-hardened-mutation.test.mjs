@@ -20,10 +20,11 @@ const SKIP = process.platform === 'win32' ? 'POSIX only (win32 refuses)' : proce
 
 /** Protected-core mutants (git-exec.mjs R3 gate), killed by the tagged tests of lib/git-exec.test.mjs. */
 export const EXEC_MUTANTS = [
-  ['S1', 'no genuine-Buffer check (a Proxy over a real Buffer passes)', '  if (!genuineBuffer(b) || OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;', '  if (OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;'],
-  ['S2', 'own length/byteLength/valueOf/buffer properties allowed', '  if (!genuineBuffer(b) || OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;', '  if (!genuineBuffer(b)) return null;'],
-  ['S5', 'any stdin kind accepted (input on any call)', "Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;", 'Object.keys(s).length !== 2) return null;'],
-  ['S6', 'the 4 KiB bound dropped', '  if (copy.length === 0 || copy.length > STDIN_CAP) return null;', '  if (copy.length === 0) return null;'],
+  ['S2', 'send a second read of the caller array, not the validated reads', "  return Buffer.from(read.map((v) => `${v}\\n`).join(''));", "  return Buffer.from(Array.from({ length: n }, (_, i) => `${list[i]}\\n`).join(''));"],
+  ['S2', 're-read the length on every iteration', '  for (let i = 0; i < n; i++) {\n    const v = list[i];', '  for (let i = 0; i < list.length; i++) {\n    const v = list[i];'],
+  ['S3', 'the 99-oid (4 KiB) bound dropped', '  if (!Number.isSafeInteger(n) || n < 1 || n > STDIN_MAX_OIDS) return null;', '  if (!Number.isSafeInteger(n) || n < 1) return null;'],
+  ['S3', 'elements not required to be strings', "    if (typeof v !== 'string' || !STDIN_OID.test(v)) return null;", '    if (!STDIN_OID.test(v)) return null;'],
+  ['S4', 'any stdin kind accepted (input on any call)', "Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;", 'Object.keys(s).length !== 2) return null;'],
 ];
 /**
  * [tag, what the mutant removes, from, to, also?, platform?]: each `from` must occur exactly once in lib/git-hardened.mjs. A
@@ -71,9 +72,12 @@ export const MUTANTS = [
   ['M48', 'rollback without the creation-identity check', "  if (!sameNode(now, created) || !now.isDirectory() || now.uid !== uid()) throw fail('context_tampered', 'store.init');\n", ''],
   ['M50', 'raw fs error from an unreadable dir', "  try { d = opendirSync(p, { encoding: 'buffer' }); } catch { throw fail('worktree_entry_unsupported', 'listdir'); }\n  const names", "  d = opendirSync(p, { encoding: 'buffer' });\n  const names"],
   ['M51', 'verifyWorktree skips the store identity check', "function op_(st, h, id, operands, deadline) {\n  if (!sameNode(lstatOrNull(h.storeDir), h.stat)) throw fail('context_tampered', id);\n", 'function op_(st, h, id, operands, deadline) {\n'],
-  ['M52', 'batch-check line count not checked', "    if (sizes.length * 41 !== chunk.bytes.length) throw fail('object_corrupt', 'store.sizes');\n", ''],
+  ['M52', 'batch-check line count not checked', "    if (sizes.length !== chunk.oids.length) throw fail('object_corrupt', 'store.sizes');\n", ''],
+  ['M55', 'meters check the budget but not the deadline', 'if (n > cap || Date.now() > deadline) throw fail(code, op);', 'if (n > cap) throw fail(code, op);'],
+  ['M56', 'raw fs errors escape removal', "  try { removeTreeRaw(root, dev, spend, deadline); } catch (e) { if (e instanceof GitError) throw e; throw fail('lane_remove_failed', 'remove'); }", '  removeTreeRaw(root, dev, spend, deadline);'],
+  ['M47', 'a populated gitlink is enumerated completely without any charge', 'if (hasEntry(abs, spendFiles)) diff', 'if (listDir(abs, () => 0).length !== 0) diff'],
   ['M53', 'no object-count bound', "  if (all.length > st.maxObjects) throw fail('object_too_large', 'store.walk');\n", ''],
-  ['M11', 'stdin passed to a row that declares none (the row binding must refuse it)', "git(st, 'store.walk', Vs, [head, base], { deadline })", "git(st, 'store.walk', Vs, [head, base], { stdin: { kind: 'oid-lines', bytes: B(`${head}\\n`) }, deadline })"],
+  ['M11', 'stdin passed to a row that declares none (the row binding must refuse it)', "git(st, 'store.walk', Vs, [head, base], { deadline })", "git(st, 'store.walk', Vs, [head, base], { stdin: { kind: 'oid-lines', oids: [head] }, deadline })"],
   ['M26', 'descend into a symlinked tracked dir', '      if (cs.isSymbolicLink() || !cs.isDirectory()) {', '      if (!cs.isDirectory() && !cs.isSymbolicLink()) {'],
   ['M27', 'skip the nested .git refusal', "    for (const n of names) if (isDotGit(n) && (rel.length > 0 || !n.equals(B('.git')))) throw fail('worktree_entry_unsupported', op);\n", ''],
   ['M28', 'no FIFO/socket/device refusal at a tracked path', "  if (!lst) return diff(e.path, 'missing');\n  if (special(lst)) throw fail('worktree_entry_unsupported', op);\n", "  if (!lst) return diff(e.path, 'missing');\n"],
@@ -81,8 +85,8 @@ export const MUTANTS = [
   ['M30', 'an exclusion matches as a string prefix', '(p.length > e.length && p.subarray(0, e.length + 1).equals(Buffer.concat([e, SLASH])))', '(p.length > e.length && p.subarray(0, e.length).equals(e))'],
   ['M31', 'drop the info/exclude copy', '  const exBytes = lstatOrNull(ex) ? readBounded(ex, MIB, op) : EMPTY;', '  const exBytes = EMPTY;'],
   ['M32', 'ignore self-ignoring .gitignore files', "  const gitignoreUntracked = others.ignored.filter((p) => !excluded(p) && p.subarray(p.lastIndexOf(0x2f) + 1).equals(B('.gitignore')));", '  const gitignoreUntracked = [];'],
-  ['M34', 'drop the file budget', "  const spendFiles = meter(st.maxFiles, 'worktree_budget_exceeded', op);", "  const spendFiles = meter(Number.MAX_SAFE_INTEGER, 'worktree_budget_exceeded', op);"],
-  ['M35', 'drop the byte budget', "  const spendBytes = meter(st.maxBytes, 'worktree_budget_exceeded', op);", "  const spendBytes = meter(Number.MAX_SAFE_INTEGER, 'worktree_budget_exceeded', op);"],
+  ['M34', 'drop the file budget', "  const spendFiles = meter(st.maxFiles, 'worktree_budget_exceeded', op, deadline);", "  const spendFiles = meter(Number.MAX_SAFE_INTEGER, 'worktree_budget_exceeded', op, deadline);"],
+  ['M35', 'drop the byte budget', "  const spendBytes = meter(st.maxBytes, 'worktree_budget_exceeded', op, deadline);", "  const spendBytes = meter(Number.MAX_SAFE_INTEGER, 'worktree_budget_exceeded', op, deadline);"],
   ['M36', 'enumeration not charged per entry', '    for (let e = d.readSync(); e !== null; e = d.readSync()) { spend(1); names.push(e.name); }', '    for (let e = d.readSync(); e !== null; e = d.readSync()) names.push(e.name);'],
   ['M37', 'no mid-read change detection', "    if (!s.isFile() || !sameNode(s, lst) || s.size !== lst.size) throw fail('worktree_unstable', op);", "    if (!s.isFile() || !sameNode(s, lst)) throw fail('worktree_unstable', op);",
     [["      if (n > s.size) throw fail('worktree_unstable', op);\n", ''], ["    if (n !== s.size || after.size !== s.size || !sameNode(after, s)) throw fail('worktree_unstable', op);\n", '']]],

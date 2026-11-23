@@ -654,113 +654,72 @@ test('run() normalises the status map before spawn: an accessor entry is refused
 });
 
 // ------------------------------------------------------------------ R3 (S-02a0c): the one bounded stdin capability
-// `run({ stdin: { kind: 'oid-lines', bytes } })`: bytes is a Buffer of at most 4096 bytes made only of
-// `<40 lowercase hex>\n` lines. It is the child's stdin for that call only; every other call keeps stdin 'ignore'.
-// `input` stays an unknown run key. The child echoes what it read on stdin.
-const OIDL = (n, c = 'a') => Buffer.from(`${c.repeat(40)}\n`.repeat(n));
+// Attempt 2 (D-A12): DATA-ONLY stdin. `run({ stdin: { kind: 'oid-lines', oids } })`: `oids` is an array of 1..99 strings,
+// each exactly 40 lowercase hex. The runner reads the length ONCE and each element ONCE into local primitives, validates
+// those, and BUILDS the stdin bytes (`<oid>\n` per line, at most 99 x 41 = 4059 bytes) from them; no caller-owned object
+// is ever validated and then used. Every other call keeps stdin 'ignore'; `input` stays an unknown run key.
+// PROPOSED, PENDING OWNER APPROVAL: this replaces the approved R3 Buffer interface. The read-once property is asserted
+// (a counting Proxy and a value-changing getter), so a validate-then-reread gap cannot return unseen.
+const OID = (c = 'a') => c.repeat(40);
+const LINES = (oids) => Buffer.from(oids.map((o) => `${o}\n`).join(''));
 const ECHO_STDIN = "let b=[];process.stdin.on('data',(d)=>b.push(d));process.stdin.on('end',()=>process.stdout.write(Buffer.concat(b)))";
 const stdinRun = (t, stdin, o = {}) => { const { cwd, runner } = fakeRunner(t); return runner.run({ args: ['-e', ECHO_STDIN], cwd, env: env0(), op: 'test.stdin', stdin, ...o }); };
 
-test('R3: oid lines reach the child on stdin, byte for byte, up to the 4096-byte bound (99 lines)', { skip: NOFAKE }, (t) => {
-  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: OIDL(1) }).stdout, OIDL(1));
-  const max = OIDL(99);
-  assert.equal(max.length, 4059);
-  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: max }).stdout, max, 'the largest whole number of lines under the bound');
-  const mixed = Buffer.from(`${'0123456789abcdef'.repeat(2)}01234567\n${'f'.repeat(40)}\n`);
-  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: mixed }).stdout, mixed);
+test('[S1] R3: oid strings reach the child as runner-built `<oid>\\n` lines, up to 99 (4059 bytes)', { skip: NOFAKE }, (t) => {
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', oids: [OID()] }).stdout, LINES([OID()]));
+  const max = Array.from({ length: 99 }, (_, i) => (i % 16).toString(16).repeat(40));
+  assert.equal(LINES(max).length, 4059);
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', oids: max }).stdout, LINES(max));
+  const mixed = `${'0123456789abcdef'.repeat(2)}01234567`;
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', oids: [mixed, OID('f')] }).stdout, LINES([mixed, OID('f')]));
 });
-test('R3: without stdin the child reads an empty stdin (ignored), never the parent stdin', { skip: NOFAKE }, (t) => {
-  const r = stdinRun(t, undefined);
-  assert.equal(r.stdout.length, 0);
+test('[S2] R3: the length and every element are read exactly once; the child gets what was read and validated, never a second read', { skip: NOFAKE }, (t) => {
+  const reads = new Map();
+  const base = [OID('a'), OID('b'), OID('c')];
+  const counted = new Proxy(base, { get: (o, k) => { reads.set(k, (reads.get(k) ?? 0) + 1); return Reflect.get(o, k); } });
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', oids: counted }).stdout, LINES(base));
+  assert.deepEqual([reads.get('length'), reads.get('0'), reads.get('1'), reads.get('2')], [1, 1, 1, 1], 'one read of length and of each element');
+  // A getter that answers a valid oid first and an option line afterwards: only the first (validated) answer is ever sent.
+  let n = 0;
+  const flipping = [OID('d')];
+  Object.defineProperty(flipping, 0, { get: () => (n++ === 0 ? OID('e') : '--all'), enumerable: true });
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', oids: flipping }).stdout, LINES([OID('e')]));
+  assert.equal(n, 1, 'the element getter ran once');
+  let len = 0;
+  const growing = new Proxy([OID('f')], { get: (o, k) => (k === 'length' ? (len++ === 0 ? 1 : 500) : Reflect.get(o, k)) });
+  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', oids: growing }).stdout, LINES([OID('f')]), 'a length that grows after the first read changes nothing');
 });
-test('[S6] R3: over the bound, a non-Buffer, a wrong kind, extra keys or non-oid-line bytes are refused before any spawn', (t) => {
+test('[S3] R3: non-strings, wrong lengths, upper case, option or rev syntax, holes, empty and more than 99 are refused before any spawn', (t) => {
   const g = gitRunner();
   const cwd = tmp(t);
   const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
-  assert.match(decodeStrict(g.run({ ...ok, stdin: { kind: 'oid-lines', bytes: OIDL(2) } }).stdout), /^git version /, 'control: a valid stdin runs');
-  const getter = { kind: 'oid-lines' };
-  Object.defineProperty(getter, 'bytes', { enumerable: true, get: () => OIDL(1) });
+  assert.match(decodeStrict(g.run({ ...ok, stdin: { kind: 'oid-lines', oids: [OID(), OID('b')] } }).stdout), /^git version /, 'control: a valid stdin runs');
   const bad = [
-    ['4100 bytes (100 lines)', { kind: 'oid-lines', bytes: OIDL(100) }],
-    ['4097 bytes', { kind: 'oid-lines', bytes: Buffer.concat([OIDL(99), Buffer.from('a'.repeat(38))]) }],
-    ['a string', { kind: 'oid-lines', bytes: OIDL(1).toString('latin1') }],
-    ['a String object', { kind: 'oid-lines', bytes: new String(OIDL(1).toString('latin1')) }],
-    ['a Uint8Array', { kind: 'oid-lines', bytes: new Uint8Array(OIDL(1)) }],
-    ['an array', { kind: 'oid-lines', bytes: [...OIDL(1)] }],
-    ['empty', { kind: 'oid-lines', bytes: Buffer.alloc(0) }],
-    ['a raw Buffer (no declaration)', OIDL(1)],
-    ['a string stdin', 'x'],
-    ['kind missing', { bytes: OIDL(1) }],
-    ['another kind', { kind: 'bytes', bytes: OIDL(1) }],
-    ['an extra key', { kind: 'oid-lines', bytes: OIDL(1), encoding: 'utf8' }],
-    ['an accessor bytes', getter],
-    ['upper-case hex', { kind: 'oid-lines', bytes: OIDL(1, 'A') }],
-    ['39 hex', { kind: 'oid-lines', bytes: Buffer.from(`${'a'.repeat(39)}\n`) }],
-    ['41 hex', { kind: 'oid-lines', bytes: Buffer.from(`${'a'.repeat(41)}\n`) }],
-    ['no final newline', { kind: 'oid-lines', bytes: Buffer.from('a'.repeat(40)) }],
-    ['CRLF', { kind: 'oid-lines', bytes: Buffer.from(`${'a'.repeat(40)}\r\n`) }],
-    ['an option line', { kind: 'oid-lines', bytes: Buffer.from('--all\n') }],
-    ['null', null],
+    ['100 oids', Array.from({ length: 100 }, () => OID())], ['empty', []], ['a String object', [new String(OID())]], ['a number', [1]],
+    ['a Buffer', [Buffer.from(OID())]], ['39 hex', [OID().slice(1)]], ['41 hex', [`${OID()}0`]], ['upper case', [OID('A')]],
+    ['an option', ['--all']], ['a rev', [`${OID()}^{tree}`]], ['a newline inside', [`${OID().slice(1)}\n`]], ['a hole', [OID(), , OID()]],
+    ['undefined', [undefined]], ['an object with toString', [{ toString: () => OID() }]],
   ];
-  for (const [what, stdin] of bad) assert.throws(() => g.run({ ...ok, stdin }), code('git_op_invalid'), what);
-  assert.throws(() => g.run({ ...ok, input: OIDL(1) }), code('git_op_invalid'), '`input` stays an unknown run key');
+  for (const [what, oids] of bad) assert.throws(() => g.run({ ...ok, stdin: { kind: 'oid-lines', oids } }), code('git_op_invalid'), what);
+  for (const [what, stdin] of [['not an array', { kind: 'oid-lines', oids: OID() }], ['the old bytes form', { kind: 'oid-lines', bytes: LINES([OID()]) }],
+    ['an extra key', { kind: 'oid-lines', oids: [OID()], encoding: 'utf8' }], ['an accessor oids', Object.defineProperty({ kind: 'oid-lines' }, 'oids', { enumerable: true, get: () => [OID()] })],
+    ['null', null], ['a string', 'x']]) assert.throws(() => g.run({ ...ok, stdin }), code('git_op_invalid'), what);
 });
-// Round 1 repair (R3 gate): only a GENUINE Buffer is accepted, it is copied first, the copy is validated, and only the
-// copy reaches the child. Each attack below passed the old checks while other bytes reached git (Opus + Codex, reproduced).
-const BAD_LINE = Buffer.from(`--not-an-oid-line\n${'x'.repeat(1 << 20)}`);
-test('[S1] R3: a Proxy posing as a Buffer (Buffer prototype, its own valueOf/length) is refused before any spawn', { skip: NOFAKE }, (t) => {
-  const real = OIDL(1);
-  const fake = new Proxy(Object.create(Buffer.prototype), {
-    get: (o, k) => (k === 'length' ? real.length : k === 'valueOf' ? () => BAD_LINE.toString('latin1') : typeof k === 'string' && /^\d+$/.test(k) ? real[+k] : Reflect.get(Buffer.prototype, k)),
-    has: (o, k) => k in real, ownKeys: () => [], getOwnPropertyDescriptor: () => undefined,
-  });
-  assert.equal(Buffer.isBuffer(fake), true, 'the fake passes Buffer.isBuffer');
-  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: fake }), code('git_op_invalid'));
-  const wrapped = new Proxy(Buffer.from(real), {});
-  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: wrapped }), code('git_op_invalid'), 'a transparent Proxy over a real Buffer');
-});
-test('[S2] R3: a genuine Buffer carrying its own length, byteLength, valueOf or buffer property is refused', { skip: NOFAKE }, (t) => {
-  for (const [what, prop, desc] of [
-    ['length getter', 'length', { get: () => 41 }], ['byteLength getter', 'byteLength', { get: () => 41 }],
-    ['valueOf', 'valueOf', { value: () => BAD_LINE.toString('latin1') }], ['buffer', 'buffer', { value: BAD_LINE.buffer }], ['byteOffset', 'byteOffset', { value: 0 }],
-  ]) {
-    const b = Buffer.concat([OIDL(1), Buffer.from(`--all\n${'0'.repeat(5000)}`)]);
-    Object.defineProperty(b, prop, desc);
-    assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: b }), code('git_op_invalid'), what);
-  }
-});
-test('[S3] R3: the child receives exactly the validated copy: a subarray of a larger buffer sends only its view', { skip: NOFAKE }, (t) => {
-  const big = Buffer.concat([Buffer.from('--all\n'), OIDL(2, 'b'), Buffer.from('--not\n')]);
-  const view = big.subarray(6, 6 + 82);
-  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: view }).stdout, OIDL(2, 'b'));
-  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: big.subarray(0, 88) }), code('git_op_invalid'), 'a view that includes the option line');
-});
-test('[S4] R3: a detached ArrayBuffer view is refused; a resizable-buffer view sends its bytes at copy time only', { skip: NOFAKE }, (t) => {
-  const ab = new ArrayBuffer(41);
-  const view = Buffer.from(ab);
-  OIDL(1).copy(view);
-  structuredClone(ab, { transfer: [ab] });
-  assert.equal(view.length, 0, 'detached');
-  assert.throws(() => stdinRun(t, { kind: 'oid-lines', bytes: view }), code('git_op_invalid'));
-  if (!new ArrayBuffer(1, { maxByteLength: 2 }).resizable) return t.diagnostic('no resizable ArrayBuffer on this Node');
-  const rab = new ArrayBuffer(82, { maxByteLength: 8192 });
-  const tracking = Buffer.from(rab);
-  OIDL(2, 'c').copy(tracking);
-  assert.deepEqual(stdinRun(t, { kind: 'oid-lines', bytes: tracking }).stdout, OIDL(2, 'c'));
-  return undefined;
-});
-test('[S5] R3: stdin on an undeclared call (no {kind: oid-lines} declaration, or `input`) is refused', (t) => {
+test('[S4] R3: stdin on an undeclared call (no {kind: oid-lines} declaration, another kind, or `input`) is refused', (t) => {
   const g = gitRunner();
   const cwd = tmp(t);
   const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
-  for (const [what, extra] of [['raw Buffer', { stdin: OIDL(1) }], ['input key', { input: OIDL(1) }], ['other kind', { stdin: { kind: 'raw', bytes: OIDL(1) } }],
-    ['input beside a declaration', { stdin: { kind: 'oid-lines', bytes: OIDL(1) }, input: BAD_LINE }]]) {
+  for (const [what, extra] of [['a raw array', { stdin: [OID()] }], ['input key', { input: LINES([OID()]) }], ['kind missing', { stdin: { oids: [OID()] } }],
+    ['another kind', { stdin: { kind: 'bytes', oids: [OID()] } }], ['input beside a declaration', { stdin: { kind: 'oid-lines', oids: [OID()] }, input: Buffer.from('--all\n') }]]) {
     assert.throws(() => g.run({ ...ok, ...extra }), code('git_op_invalid'), what);
   }
 });
+test('R3: without stdin the child reads an empty stdin (ignored), never the parent stdin', { skip: NOFAKE }, (t) => {
+  assert.equal(stdinRun(t, undefined).stdout.length, 0);
+});
 test('R3: a stdin call keeps the timeout and overflow outcomes (no partial stdout)', { skip: NOFAKE }, (t) => {
   const { cwd, runner } = fakeRunner(t);
-  const stdin = { kind: 'oid-lines', bytes: OIDL(3) };
+  const stdin = { kind: 'oid-lines', oids: [OID(), OID('b'), OID('c')] };
   assert.throws(() => runner.run({ args: ['-e', 'setInterval(()=>{},1e6)'], cwd, env: env0(), op: 'test.stdin', stdin, timeoutMs: 300 }), code('git_timeout'));
   assert.throws(() => runner.run({ args: ['-e', 'process.stdout.write("x".repeat(1<<20))'], cwd, env: env0(), op: 'test.stdin', stdin, maxBuffer: 1024 }), code('git_output_truncated'));
 });
@@ -1366,7 +1325,7 @@ const GRAMMAR_OPS = new Map([
 const GRAMMAR_GLOBALS = new Map([
   ['Object', { members: new Map([['keys', 'call'], ['entries', 'call'], ['fromEntries', 'call'], ['hasOwn', 'call'], ['freeze', 'any'],
     ['getOwnPropertyDescriptor', 'ownValue'], ['defineProperty', 'defineThis']]) }],
-  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call'], ['concat', 'call'], ['alloc', 'call'], ['compare', 'call']]) }],
+  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call'], ['concat', 'call'], ['alloc', 'call']]) }],
   ['Array', { members: new Map([['isArray', 'call']]) }],
   ['Number', { members: new Map([['isSafeInteger', 'call']]) }],
   ['Symbol', { members: new Map([['for', 'methodKey']]) }],

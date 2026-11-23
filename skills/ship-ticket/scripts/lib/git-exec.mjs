@@ -255,28 +255,28 @@ const statusMap = (m) => {
 };
 
 /**
- * The one stdin form (S-02a0c, v3.1 R3): own data `{ kind: 'oid-lines', bytes }` and nothing else. bytes must be a GENUINE
- * Buffer (Buffer.compare's native Uint8Array check refuses a Proxy) carrying none of its own length, byteLength,
- * byteOffset, buffer or valueOf. It is COPIED FIRST; the copy is validated (1..4096 bytes of `<40 lowercase hex>\n`
- * lines) and only the copy is returned, so nothing the caller's object does after the check can change what git reads.
- * Out of scope: same-realm tampering with Buffer.prototype or the TypedArray intrinsics themselves.
+ * The one stdin form (S-02a0c, v3.1 R3; attempt 2, D-A12: DATA-ONLY). Own data `{ kind: 'oid-lines', oids }` and nothing
+ * else, where `oids` is an array of 1..99 strings, each 40 lowercase hex. Its length is read ONCE and each element ONCE
+ * into local primitives; those are validated and the stdin bytes are BUILT here from them (`<oid>\n` lines, at most
+ * 99 x 41 = 4059 bytes, under the 4 KiB bound). No caller-owned object is validated and then used.
+ * PROPOSED, PENDING OWNER APPROVAL: this replaces the approved R3 Buffer interface (validating a caller-owned Buffer
+ * could not be made sound: three review rounds found bypasses).
  */
-const STDIN_CAP = 4096;
-const OWN_STUFFING = ['length', 'byteLength', 'byteOffset', 'buffer', 'valueOf'];
-const genuineBuffer = (b) => { try { return Buffer.isBuffer(b) && Buffer.compare(b, b) === 0; } catch { return false; } };
+const STDIN_MAX_OIDS = 99;
+const STDIN_OID = /^[0-9a-f]{40}$/;
 const oidLines = (s) => {
   if (!s || typeof s !== 'object' || Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;
-  const b = ownValue(s, 'bytes');
-  if (!genuineBuffer(b) || OWN_STUFFING.some((k) => Object.hasOwn(b, k))) return null;
-  const copy = Buffer.from(b);
-  if (copy.length === 0 || copy.length > STDIN_CAP) return null;
-  let col = 0;
-  for (let i = 0; i < copy.length; i++) {
-    const c = copy[i];
-    if (col === 40 ? c !== 10 : !((c >= 48 && c <= 57) || (c >= 97 && c <= 102))) return null;
-    col = col === 40 ? 0 : col + 1;
+  const list = ownValue(s, 'oids');
+  if (!Array.isArray(list)) return null;
+  const n = list.length;
+  if (!Number.isSafeInteger(n) || n < 1 || n > STDIN_MAX_OIDS) return null;
+  const read = [];
+  for (let i = 0; i < n; i++) {
+    const v = list[i];
+    if (typeof v !== 'string' || !STDIN_OID.test(v)) return null;
+    read.push(v);
   }
-  return col === 0 ? copy : null;
+  return Buffer.from(read.map((v) => `${v}\n`).join(''));
 };
 
 /** Conservative Windows environment-block bound in UTF-16 units (the real limit is UNVERIFIED, design R-A5). */
@@ -293,7 +293,8 @@ const envUnits = (env) => Object.entries(env).reduce((n, [k, v]) => n + k.length
  * (spawn would report ENOENT, indistinguishable from a missing binary). `run` executes `args` once with an env from composeEnv: `status` maps accepted exit
  * codes to outcome names, `stderr` is 'forbid' (default) or 'allow', `decode` is a decode code or absent
  * (stdout stays a Buffer). Option-free argv building is S-02a0c's (closed OPS). `stdin` is absent (the child's stdin
- * is ignored) or the one oid-lines form above, which becomes the child's stdin for that call only; `input` is no key.
+ * is ignored) or the one oid-lines form above, whose runner-built bytes become the child's stdin for that call only;
+ * `input` is no key.
  */
 export function gitRunner({ platform = process.platform, envLimit, ...probeOptions } = {}) {
   if (envLimit !== undefined && !Number.isSafeInteger(envLimit)) throw invalid();

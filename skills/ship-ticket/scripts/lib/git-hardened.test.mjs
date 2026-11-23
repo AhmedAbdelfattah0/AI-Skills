@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { Dir, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -868,8 +868,12 @@ test('[M47] R4: a populated gitlink is detected from its first entry, charged to
   const ctx = ctxOf(t, { maxFiles: 100 });
   const { store, source } = storeOf(t, ctx, top, [withLink, head]);
   let v;
-  assert.doesNotThrow(() => { v = H.verifyWorktree(ctx, { source, store, oid: withLink }); }, 'within a 100-entry budget');
+  let reads = 0;
+  const readSync = Dir.prototype.readSync;
+  Dir.prototype.readSync = function counted(...a) { reads++; return readSync.apply(this, a); };
+  try { assert.doesNotThrow(() => { v = H.verifyWorktree(ctx, { source, store, oid: withLink }); }, 'within a 100-entry budget'); } finally { Dir.prototype.readSync = readSync; }
   assert.deepEqual(diffsOf(v), [['vendor/sub', 'gitlink_populated']], 'refused by class');
+  assert.ok(reads < 200, `the 3000-entry gitlink dir was not enumerated (${reads} directory reads in the whole verify)`);
 });
 test('[M48] rollback: a store dir replaced between create and rollback is never renamed or removed (context_tampered)', { skip: POSIX }, (t) => {
   const { top, head } = makeRepo(t, { a: 'a' });
@@ -924,6 +928,39 @@ test('[M53] R2 cost bound: more reachable objects than maxObjects is object_too_
   const source = H.openSource(ctx, { toplevel: top });
   assert.throws(() => H.initStore(ctx, { dir: join(tmp(t), 'store'), source, oids: [head] }), code('object_too_large'));
   assert.doesNotThrow(() => storeOf(t, ctxOf(t, { maxObjects: 50 }), top, [head]), 'control: 42 objects under 50');
+});
+
+// ------------------------------------------------------------------ attempt 2 (D-A12), test-first
+
+/** Run fn with a fake clock: every Date.now() call advances `step` ms (the lib reads time only through Date.now). */
+function fakeClock(step, fn) {
+  const real = Date.now;
+  let now = real();
+  Date.now = () => { now += step; return now; };
+  try { return fn(); } finally { Date.now = real; }
+}
+test('[M55] the deadline is checked on every enumerated entry, not only between directories (a wide ignored dir, fake clock)', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { 'a.txt': 'a', '.gitignore': 'wide/\n' });
+  mkdirSync(join(top, 'wide'));
+  for (let i = 0; i < 400; i++) writeFileSync(join(top, 'wide', `f${i}`), '');
+  const ctx = ctxOf(t, { timeoutMs: 1500 });
+  const { store, source } = storeOf(t, ctx, top, [head]);
+  assert.equal(H.verifyWorktree(ctx, { source, store, oid: head }).equal, true, 'control on the real clock: clean');
+  fakeClock(10, () => assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: head }), code('worktree_budget_exceeded'), '400 entries x 10 ms > 1500 ms'));
+});
+test('[M56] removal failures are typed: dispose of an R holding an immutable file is lane_remove_failed, never a raw EPERM', { skip: POSIX || (process.platform !== 'darwin' && 'chflags uchg is darwin-only (Linux needs root for chattr)') }, (t) => {
+  const flagged = [];
+  t.after(() => { for (const f of flagged) spawnSync('chflags', ['nouchg', f]); }); // registered first: runs before tmp() removal
+  const tmpRoot = tmp(t, 'gh-uchg-');
+  withEnv({ TMPDIR: tmpRoot }, () => {
+    const c = H.createContext();
+    const [R] = readdirSync(tmpRoot).map((n) => join(tmpRoot, n));
+    const f = join(R, 'home', 'pinned');
+    writeFileSync(f, 'x');
+    assert.equal(spawnSync('chflags', ['uchg', f]).status, 0);
+    flagged.push(f);
+    assert.throws(() => c.dispose(), code('lane_remove_failed'));
+  });
 });
 
 // ------------------------------------------------------------------ the canary matrix (C1): hostile builder config never runs
