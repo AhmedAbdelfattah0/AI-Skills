@@ -32,6 +32,16 @@ test('heavy slots: --running 2 heavy holds (held_heavy), exit 1', async () => {
   const r = await go(['--class', 'heavy', '--running', '2'], { snapshot: mk().snapshot });
   assert.equal(r.code, 1); assert.equal(r.line.admit, false); assert.ok(r.line.reasons.includes('held_heavy'));
 });
+test('heavy --running 1 admits after the second window (headline never held_hysteresis)', async () => {
+  const m = mk();
+  const r = await go(['--class', 'heavy', '--running', '1'], { snapshot: m.snapshot });
+  assert.equal(r.code, 0); assert.equal(r.line.reason, 'admitted'); assert.equal(m.calls(), 2);
+});
+test('heavy --running 2 holds with held_heavy as the headline after both windows', async () => {
+  const m = mk();
+  const r = await go(['--class', 'heavy', '--running', '2'], { snapshot: m.snapshot });
+  assert.equal(r.code, 1); assert.equal(r.line.reason, 'held_heavy'); assert.equal(m.calls(), 2);
+});
 test('pressure holds without a second window', async () => {
   const m = mk({ latest: { pressure_level: 2 } });
   const r = await go(['--class', 'heavy'], { snapshot: m.snapshot });

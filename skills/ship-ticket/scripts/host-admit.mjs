@@ -37,7 +37,7 @@ export async function run(argv, deps = {}) {
   for (let round = 1; round <= 2; round++) {
     r = admitHost(await sample({ platform }), cls, running, history);
     history = r.history;
-    if (r.admit || r.reasons.some(x => x !== 'held_hysteresis')) break;
+    if (r.admit || r.reasons.some(x => x !== 'held_hysteresis' && x !== 'held_heavy')) break;
   }
   return { line: { admit: r.admit, reason: r.reason, reasons: r.reasons, ...base, signals: r.signals }, code: r.admit ? 0 : 1 };
 }

@@ -117,10 +117,10 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   compared with the exact 2 MB tolerance, and load is compared as `5*load >= 3*cores`.
 - `scripts/host-admit.mjs --class heavy|light [--running N]` is the CLI over `admitHost`/`hostSnapshot`
   for the orchestrator, run before HEAVY work. One invocation takes up to two `hostSnapshot` windows
-  (about 20 s per sample, so up to about 40 s), carries the history in memory and persists nothing.
+  (about 20 s per window, so up to about 40 s), carries the history in memory and persists nothing.
   `--running N` is the number of tasks already running (for `heavy` it is the heavy-slot count passed to
   `admitHost`; default 0). It prints ONE JSON line `{admit, reason, reasons, class, running, signals}`
-  and exits 0 admit, 1 hold, 2 usage error or unsupported platform. Non-macOS prints
+  and exits 0 admit, 1 hold, 2 usage error, unsupported platform or an internal failure (`reason:"error"`). Non-macOS prints
   `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
   parallelism or wait, then ask again; never terminate running work.

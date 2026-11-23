@@ -431,7 +431,7 @@ is unclear, ASK the owner before planning, never guess. At the START of the
 ticket or wave, ask ONCE whether auto-merge is allowed after the reviews and CI
 are green: yes means merge after every gate has passed; no means prepare the PR
 and wait for the owner's "merge". Deploy is a separate decision and is never
-implied. Push, PR and merge stay manual unless the owner opted in.
+implied. Merge stays manual unless the owner opted in.
 
 In an interactive session the orchestrator owns the Plan Mode lifecycle; follow
 the host-specific procedure in the plan reference. On Claude, `EnterPlanMode` and
@@ -605,9 +605,10 @@ concurrently in a fresh session when resources allow. Keep the planning debate
 out of the bounded code review.
 
 The orchestrator runs the independent reviewers itself: it opens a shell, calls
-the Codex CLI and a separate subagent with the standard brief, triages findings
+the Codex CLI (else Fable) and a separate subagent with the standard brief, triages findings
 by evidence, fixes, then runs the targeted confirmation. If the confirmation
-fails: STOP, write the root-cause assessment and re-plan; there is no third
+fails: STOP, write the root-cause assessment and re-plan; resuming needs the
+owner's approval (review.md "Two-cycle limit"); there is no third
 cycle (see
 [references/review.md](references/review.md) "Two-cycle limit").
 
@@ -782,7 +783,8 @@ whether the cause is the work, the run data or the gate. Fix the work or the run
 data inside the approved plan and retry, at most 2 re-issues of the same refusal
 for the same candidate. Never bypass or waive a gate. STOP and return to the
 owner for an owner-reserved class (security, approval, ownership, spent budget,
-RETRY authority) or when the same problem repeats.
+RETRY authority), for any category listed above, when the cause is the gate
+itself, or when the same problem repeats.
 
 Everything else inside the approved scope takes the recommended default and is
 recorded: for example, a fixable input refusal is corrected and rerun, a Codex
@@ -898,5 +900,6 @@ ship threshold opened; if an in-scope residue is found after merge, ship the fix
 then report it.
 
 The user merges the PR and runs any requested context compaction; this skill
-does neither, unless the owner opted in to auto-merge at the start (see PLAN):
-then merge only after every review and CI gate is green. Deploy is never implied.
+does neither. The one exception is merging, when the owner opted in to
+auto-merge at the start (see PLAN): then merge only after every review and CI
+gate is green. Deploy is never implied.
