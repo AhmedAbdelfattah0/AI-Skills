@@ -115,6 +115,7 @@ jobs:
           skills/ship-ticket/scripts/ship-ready-check.test.mjs
           skills/ship-ticket/scripts/base-drift.test.mjs
           skills/ship-ticket/scripts/review-wording.test.mjs
+          skills/ship-ticket/scripts/fr4-wording.test.mjs
           skills/ship-ticket/scripts/run-engine-record.test.mjs
           skills/ship-ticket/scripts/run-engine-policy.test.mjs
           skills/ship-ticket/scripts/engine-fixture-warmup.test.mjs
@@ -137,6 +138,8 @@ jobs:
           skills/ship-ticket/scripts/run-engine-base.test.mjs
           skills/ship-ticket/scripts/engine-adopt.test.mjs
           skills/ship-ticket/scripts/run-engine-adopt.test.mjs
+          skills/ship-ticket/scripts/engine-identity.test.mjs
+          skills/ship-ticket/scripts/run-engine-identity.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
   # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
@@ -188,6 +191,12 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           skills/ship-ticket/scripts/engine-adopt-mutation.test.mjs
+      - name: Repository identity guard mutation check (S-28a)
+        env:
+          ENGINE_IDENTITY_MUTATION: '1'
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/engine-identity-mutation.test.mjs
       - name: Measurement event mutation check
         env:
           EVENTS_MUTATION: '1'

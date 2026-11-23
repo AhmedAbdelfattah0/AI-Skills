@@ -392,12 +392,86 @@ Limits:
   `remote set-url` can redirect it.
 - `ls-remote` uses the user's git config and credential helpers. Inherited `GIT_SSH_COMMAND` and
   `GIT_ASKPASS` are not honored for these reads. The hermetic git runner (S-02a0c) is not used yet.
-- The base is checked at `gate reassess` only (and reported by `status`). A pinned run without
-  `config.securityPolicy 2` gets the accessor but no base check.
-- A remote URL re-pointed at another repository mid-run is not detected (`identity_changed` is
-  S-28a). A second URL added mid-run is refused at the next reassess.
+- Without `config.repoIdentity`, the base is checked at `gate reassess` only (and reported by
+  `status`), so a pinned run without `config.securityPolicy 2` gets the accessor but no base check.
+- Without `config.repoIdentity`, a remote URL re-pointed at another repository mid-run is not
+  detected. With it, the URL is `identity_changed` at every gate (below). A second URL added mid-run
+  is refused at the next reassess.
 - `state.json` is same-user writable: a tampered but well-formed `S.base` is trusted.
 - `base-drift.mjs` is unchanged. It is the standalone, advisory local-ref check that the briefs use.
+
+**Repository identity (S-28a, opt-in).** `config.repoIdentity: true` (exactly `true`, never
+defaulted, bound by the DAG digest) requires `config.pinnedBase`. It binds the run to ONE GitHub
+repository, trust on first use at `init`. The identity of record is `S.base.{ remote, identity }`,
+and no other key holds it. Every remote URL value of the run (fetch and push) goes through ONE strict
+parser, `strictGithub` in `github-identity.mjs`. It accepts `https://github.com/<o>/<r>`,
+`ssh://[user@]github.com/<o>/<r>` and `[user@]github.com:<o>/<r>` (optional `.git` and `/`). It refuses
+any other host, any port, plaintext `http://` and `git://`, an https user part (`https://evil.invalid#@github.com/...`
+reaches another host), a user, owner or repo starting with `-`, `.` and `..`, and anything after the repo.
+`repositoryOf`, which runs without the flag use, is unchanged. `init` refuses `identity_unbound`,
+writing nothing, when the remote names no repository on github.com. It refuses `remote_ambiguous` for
+several fetch or push values, or a push value naming another repository. Otherwise it records an `IDENTITY_BOUND` event
+and policy version 9 to 12, which is the pinned version 5 to 8 plus `repoIdentity`. An engine without
+S-28a refuses 9 to 12 with `policy_version_unsupported`, and never reads such a run as a plain pinned
+run.
+
+Each check takes ONE snapshot: the remote's `url` and `pushurl` values from ONE `git config -z
+--get-regexp` process, read-only and hardened. The values are NUL-separated, so a value holding a
+newline cannot forge a key. The remote name is regex-escaped. Every scope counts (system, global,
+local, worktree, `includeIf`), and any git failure is refused. The identity is compared from that
+snapshot, and the base is then read by the snapshot's URL: no consumer re-reads the configured URL.
+Init, reassess, review and confirmation take one snapshot each; ship-ready takes two, one before its
+proof and one after it. The snapshot covers those values only. `ls-remote` is a separate git process
+that reads config itself (`url.*.insteadOf`, `http.*`, `core.sshCommand`). At reassess, S-12's own
+base check (`pinnedBaseRefusal`) runs by the snapshot, so both modes share one base check.
+
+| Gate | Check, in order | On a pass |
+|---|---|---|
+| `gate reassess` | the identity, first (so nothing is sent to a re-pointed URL), then S-12's base check | as before |
+| `gate review` (original) | the identity, then the remote base against `S.base` (the pin), the merge base, and the local base branch | `S.freeze.base` = the remote head now; `BASE_FROZEN` event |
+| `gate review` (confirmation) | the identity, then the remote base against `S.freeze.base` | nothing new |
+| `gate ship-ready` | the identity, then the remote base against `S.freeze.base`, before the proof runs and again after it (a proof command can re-point the remote or move the local base; the proof is then dropped) | `S.ship_ready.base` = the freeze base |
+
+The freeze base is exactly `{ remote, identity, ref, sha, merge_base }`. A repair re-freeze keeps
+it. SHIP_READY binds it and does not adopt a head that advanced after the freeze. A RETRY re-freeze
+of the same candidate moves it.
+
+New codes: `identity_changed` (the remote names another repository, another host or a port, or none), `identity_unbound`
+(`init` only) and `identity_state_missing`. The base checks reuse `remote_ambiguous`,
+`base_unverified`, `base_remote_unavailable`, `base_moved_remote` (a rewind below the freeze sha)
+and `base_moved_local`. Every refusal is a judgment point and none latches. The gate records only
+its `GATE` line: no freeze, SHIP_READY, review record, proof or security record. To recover,
+restore the URL and retry. A `base_moved_remote` after the freeze needs an owner RETRY (the new
+original review freezes the head as it is then). A moved merge base needs a new run.
+
+The load invariant `identity_state_missing` is one-way. The policy flag and `config.repoIdentity`
+must agree, and under the flag `S.base.identity` must be non-null and every non-null freeze and
+SHIP_READY must carry an exact base record. The converse does not hold: a version 5 to 8 run on a
+GitHub origin records an identity too.
+
+With the flag off, the engine behaves as before, byte for byte: no `freeze.base`, no
+`ship_ready.base`, and no identity event. Rollback is the flag.
+
+S-28a limits:
+- The identity is the CONFIGURED URL. The endpoint behind it is not proven: `url.*.insteadOf`
+  applies when `ls-remote` (or a fetch) runs, credential helpers are not checked, and the
+  `ls-remote` answer is not attested.
+- `pushInsteadOf`, `branch.*.pushRemote` and `remote.pushDefault` are not bound. The engine never
+  pushes; binding a push target is S-28b's publication binding.
+- The "one snapshot, nothing is sent to a re-pointed URL" guarantee holds for the GATES (init,
+  reassess, review, confirmation, ship-ready). `status` is an advisory read (OD-10): its `base` block
+  still reads the configured URL. On a run whose origin was re-pointed, it can therefore contact the
+  re-pointed URL and report that remote's head as an advisory. It decides and writes nothing, and
+  the next gate refuses `identity_changed`. Binding `status` to the snapshot is left to S-14, which
+  derives the status advisory.
+- A proof command that adds `url.<other bare>.insteadOf <the run's URL>` still reaches SHIP_READY.
+  `ls-remote` is given the run's URL but is served by the other repository. `ship_ready.base` stays
+  the freeze sha, so the other repository's head is not adopted.
+- A same-user rewrite of `state.json` together with the URL is not caught.
+- Nothing is re-read between two gates, so a change made between gates is caught at the next one.
+  Ship-ready, which no gate follows, reads both again after its proof.
+- Not in S-28a: enrollment, review freshness, the publication/PR half, and a `status` advisory.
+  These belong to S-28b and S-14.
 
 **Lock and persistence.** Every mutating command takes one lock file created
 with `O_EXCL` holding `{pid, process_start_time, host, run_id, nonce}`, and
