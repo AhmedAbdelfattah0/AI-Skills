@@ -141,7 +141,7 @@ a reviewer brief.
 Host Plan Mode restrictions also apply to the carrier. Temporary files do not
 make a forbidden shell write permissible. The one supported PLAN debate route is
 the read-only relay (`codex_relay` on a Claude host, `claude_relay` on a Codex host;
-Fable only as the declared substitute, through the same relay with `--model`). The
+Fable only as the declared substitute, through the same relay with `--model`, kind `claude_relay`). The
 relay's own out-dir under the host session scratchpad is the single write besides
 the plan file, and the orchestrator writes nothing else (no host-side scratch file).
 Dispatch goes through the host's normal permission flow: a permission prompt is the
@@ -202,8 +202,7 @@ for display only; an alias never opens or closes a finding. A round is productiv
 uncertainty with evidence, or adds a concrete discriminating check or result
 relevant to an open canonical finding; a quoted line that changes none of these is
 not evidence. Two consecutive non-productive rounds on the same canonical finding are a diagnostic trigger, never a stop. Climb this ladder: (1) an evidence task
-(the host or a read-only agent runs a concrete repository check or scratch
-prototype and attaches the result); (2) a fresh counterpart session carrying the
+(the host or a read-only agent runs a concrete repository check and attaches the result; a scratch prototype is read-only or runs after approval, never as a host-side scratch file during PLAN); (2) a fresh counterpart session carrying the
 delta and the ledger, recording which strategies already failed; (3) if rounds are
 still non-productive, escalate as `UNRESOLVED` with both positions. A legitimately
 maintained finding may take more than two exchanges while rounds stay productive.

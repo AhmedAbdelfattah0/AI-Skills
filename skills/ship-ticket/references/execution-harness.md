@@ -294,7 +294,7 @@ are refused, never dropped.
   Nx: Nx prints banner lines before the JSON, so `gate red` refuses it
   `unsupported_output`. "Direct Vitest" applies only when a vitest config exists for the project. An Angular project whose `test` target is
   `@angular/build:unit-test` has no vitest config; its RED runner is an `sh -c` wrapper with `format: vitest-json`:
-  `sh -c 'f=$(mktemp -t red) || exit 97; npx nx test <project> --skip-nx-cache --include=<workspace-relative spec> --reporters=json --outputFile="$f" >/dev/null 2>&1; rc=$?; cat "$f"; exit $rc'`
+  `sh -c 'f=$(mktemp "${TMPDIR:-/tmp}/red.XXXXXX") || exit 97; npx nx test <project> --skip-nx-cache --include=<workspace-relative spec> --reporters=json --outputFile="$f" >/dev/null 2>&1; rc=$?; cat "$f"; rm -f "$f"; exit $rc'`
   (it prints only the report file, which is jest-shaped JSON that `parseRunnerOutput('vitest-json')` accepts). Nx stays fine as a PROVE/proof command (measured on a dry run:
   direct Vitest RED accepted, Nx RED refused, Nx PROVE accepted). Choose it before
   approval, because `DAG_BOUND` fixes the runner.), `base`, `riskLabels`

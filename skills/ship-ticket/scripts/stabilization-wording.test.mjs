@@ -9,7 +9,7 @@ const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)),
 const flat = (s) => s.replace(/\s+/g, ' ');
 const doc = (name) => flat(read(`../references/${name}`));
 const skill = flat(read('../SKILL.md'));
-const RED_RULE = 'On an engine run the RED record is the `gate red` evidence and no hand-written RUN-STATE RED line is required; on the manual flow the orchestrator appends the RED line.';
+const RED_RULE = 'On an engine run the RED record is the `gate red` evidence and no hand-written RUN-STATE RED line is required; on the manual flow the orchestrator appends the RED line. Unsupported runner output (a refused `gate red`) falls back to the manual event, marked degraded.';
 
 test('F-1: direct Vitest applies only with a vitest config; the Angular unit-test builder gets an sh -c wrapper recipe', () => {
   const t = doc('execution-harness.md');
@@ -17,7 +17,14 @@ test('F-1: direct Vitest applies only with a vitest config; the Angular unit-tes
   assert.ok(t.includes('`@angular/build:unit-test`'));
   assert.ok(t.includes('its RED runner is an `sh -c` wrapper with `format: vitest-json`'));
   assert.ok(t.includes('--skip-nx-cache --include=<workspace-relative spec> --reporters=json --outputFile="$f"'));
-  assert.ok(t.includes('cat "$f"; exit $rc'));
+  assert.ok(t.includes('cat "$f"; rm -f "$f"; exit $rc'));
+});
+
+test('F-2/F-13 positive: the Fable PLAN route is claude_relay and native_session is unsupported for PLAN', () => {
+  const t = doc('cross-model.md');
+  assert.ok(t.includes('through the same relay with `--model`, kind `claude_relay`)'));
+  assert.ok(t.includes('(through the same read-only relay, kind `claude_relay`)'));
+  assert.ok(t.includes('The `native_session` carrier kind is unsupported for PLAN'));
 });
 
 test('F-2/F-13: one supported PLAN debate route (the read-only relay); native_session is unsupported for PLAN', () => {
@@ -71,6 +78,10 @@ test('admission anti-loop: re-sample only while the reasons change; stop after 2
 
 test('F-4 resume: understand.md routes on the START event, not on the approval_status header', () => {
   const t = doc('understand.md');
-  assert.ok(t.includes("read the START event in the plan's RUN-STATE (present and digest-valid = approved; absent = pending approval) and route through the spine's resume table."));
+  assert.ok(t.includes("read the START event in the plan's RUN-STATE (present and digest-valid = approved; absent = pending approval)"));
   assert.ok(!t.includes('`approval_status` literally'));
+});
+
+test('F-4 resume: a START with a digest mismatch routes to changed-plan re-approval via brief.mjs start-check', () => {
+  assert.ok(doc('understand.md').includes('a START whose digest does not match the plan is a changed plan: route to the changed-plan re-approval bullet; the check is `brief.mjs start-check`'));
 });
