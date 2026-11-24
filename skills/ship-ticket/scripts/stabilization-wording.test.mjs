@@ -68,3 +68,9 @@ test('admission anti-loop: re-sample only while the reasons change; stop after 2
   const t = doc('execution-harness.md');
   assert.ok(t.includes('Anti-loop rule: re-sample only while the set of hold reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most once every 5 minutes or ask the owner.'));
 });
+
+test('F-4 resume: understand.md routes on the START event, not on the approval_status header', () => {
+  const t = doc('understand.md');
+  assert.ok(t.includes("read the START event in the plan's RUN-STATE (present and digest-valid = approved; absent = pending approval) and route through the spine's resume table."));
+  assert.ok(!t.includes('`approval_status` literally'));
+});

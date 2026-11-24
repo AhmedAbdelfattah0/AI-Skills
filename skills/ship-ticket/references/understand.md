@@ -56,7 +56,7 @@ decision.
    branch or open PR naming this ticket. Surface it rather than opening a second
    parallel implementation.
 4. **Resume, don't restart.** `.specs/plans/<TICKET>.md` present → read
-   `approval_status` literally and route through the spine's resume table.
+   the START event in the plan's RUN-STATE (present and digest-valid = approved; absent = pending approval) and route through the spine's resume table.
 5. **Classify it** for the plan's *Shape* line — frontend, backend or full-stack,
    and security-sensitive or not. Select `ELEVATED` review for auth,
    authorization, tenancy, billing, payments, secrets, migrations, schemas,
