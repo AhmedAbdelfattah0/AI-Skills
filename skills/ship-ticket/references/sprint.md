@@ -28,18 +28,19 @@ For each ticket record the areas it touches: shared files, services and tables, 
 
 ## Wave split rules
 
-- 3-4 tickets per wave; 2 for a large ticket.
+- 3-4 tickets per wave is a target; 2 for a large ticket. A single-ticket wave is allowed when a dependency forces it.
 - At most 2 ELEVATED tickets per wave, and only when they share no file, function, table or migration object, verified from the code and not guessed.
+- A ticket that might add a migration reserves an identifier too, released if unused. If the ticket it must follow is parked, it may run alone; the later ticket rebases on whatever merges first and the reserved identifiers are re-assigned.
 - A ticket that adds a migration may share a wave with another migration ticket only when the objects differ, the migration timestamps are pre-assigned in merge order after the latest on the base, and the wave plan says so.
-- Tickets that share a file, service, function or table go in different waves in dependency order, and the later one rebases on the earlier one's merged body. The only exception is a hot shared file with additive-only edits (route mount, bindings, vars, docs): list it in the wave plan as rebase work; it does not count as a shared object. Additive edits alone are not evidence of safety: the exception requires verified semantic independence of the tickets sharing the file, and the wave plan states why the changes are semantically independent (different routes, bindings, vars or queue types; no ordering or behavioural coupling). That check is part of the code reality and dependency analysis.
+- Tickets that share a file, service, function or table go in different waves in dependency order, and the later one rebases on the earlier one's merged body. The only exception is a hot shared file with additive-only edits (route mount, bindings, vars, docs): list it in the wave plan as rebase work; it does not count as a shared object. It may apply to an ELEVATED pair only when that semantic independence is verified in the plans. Additive edits alone are not evidence of safety: the exception requires verified semantic independence of the tickets sharing the file, and the wave plan states why the changes are semantically independent (different routes, bindings, vars or queue types; no ordering or behavioural coupling). That check is part of the code reality and dependency analysis.
 - Indirect coupling counts as sharing: a ticket that rewrites a shared helper or function consumed by another ticket's objects shares with that ticket.
 - Multiple independent migrations in one wave need reserved migration identifiers and an explicit merge ordering, and the wave plan states the REQUIRED MERGE ORDER. If the order changes or an earlier ticket is parked or dropped, revalidate: re-timestamp and re-run the affected gates (migration tickets are owner-merge).
-- A ticket with an unanswered product question is `parked` with reason Qn and is not placed in any wave plan until it is answered; it then becomes `pending`. An open question (`parked`) takes precedence over `waiting`.
+- A ticket with an unanswered product question is `parked` with reason Qn; its wave label is the proposed placement only and no plan is written for it until it is answered; it then becomes `pending`. An open question (`parked`) takes precedence over `waiting`.
 - Every wave-plan ticket names its blocking questions or `none`. A ticket with an external prerequisite pending (sandbox, certificate, accreditation) is `waiting` and is not started in an extended run.
 
 ## One consolidated question list
 
-Before any plan approval, send the owner ONE list: every product question, every GUESS (numbered Qg1, Qg2 and so on, so each answer is recorded in the header), every umbrella-versus-slice doubt, the merge-mode question, the cap, and the second-reviewer check. Record the answers in the queue header. Do not start planning a ticket whose question is open.
+Before any plan approval, send the owner ONE list: every product question, every GUESS (numbered Qg1, Qg2 and so on, so each answer is recorded in the header), every umbrella-versus-slice doubt, the merge-mode question, the cap, and the second-reviewer check. Record the answers in the queue header. Do not start planning a ticket whose question is open. After the owner answers, re-run the wave split rules: an answer can change a ticket's tier or dependencies (an ELEVATED upgrade may force a re-split).
 
 ## Queue file
 
@@ -49,7 +50,7 @@ Header: sprint or run id and name, source ids, mode (`attended|extended`), merge
 
 States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `waiting`, `excluded`, `parked`. `waiting` means a dependency, merge or external prerequisite is pending, with the reason. `excluded` means not part of the run, with a kind: `done_in_code`, `owner_parked`, `open_pr`, `needs_rescope` or `merged_elsewhere`. `parked` is only for a blocked ticket, an unavailable reviewer, material drift or an open question. A spine WAIT_FOR_USER, or a `waiting_owner` or `failed` state from `scripts/wave.mjs`, maps to `parked` (an owner action is needed); a dependency, merge or external prerequisite maps to `waiting`.
 
-**Cap.** Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs). The second-reviewer check is recorded as pass, fail or not run (not run before the preflight), the route (Codex or the Fable exception) and an integer expected-run count. Permissions are the commands the phases run (git, gh, the package runner, tests and DB scripts, tracker comment or transition writes if used), recorded as yes or no plus that list.
+**Cap.** Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs): one independent second opinion per ticket plus one targeted confirmation per ticket that needs a repair; repairs beyond that are counted when they happen. The second-reviewer check is recorded as pass, fail or not run (not run before the preflight), the route (Codex or the Fable exception) and an integer expected-run count. Permissions are the commands the phases run (git, gh, the package runner, tests and DB scripts, tracker comment or transition writes if used), recorded as yes or no plus that list.
 
 **Verification evidence.** A `merged` or `ship_ready` entry records the PR number, the merge commit and the date it was verified.
 
@@ -58,7 +59,7 @@ States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `wa
 |------|---------------------|------------|------|--------------------------------|------------------------|
 | W1   | SCRUM-55            | merged     | #201 | merge 4fd2a1c verified 11-24   | SCRUM-55 sha256:9c1e.. |
 | W2   | SCRUM-124, SCRUM-341| running    |      |                                | SCRUM-124 sha256:41ab..|
-| W3   | SCRUM-422           | parked     |      | open product question Q3       |                        |
+| W3?  | SCRUM-422           | parked     |      | proposed W3; open question Q3  |                        |
 | W4   | SCRUM-350           | waiting    |      | needs W2 merged; no plan yet   |                        |
 | -    | SCRUM-71            | excluded   |      | needs_rescope (umbrella)       |                        |
 | -    | SCRUM-90            | excluded   | #188 | done_in_code                   |                        |

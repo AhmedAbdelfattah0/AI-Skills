@@ -47,10 +47,10 @@ test('analysis: every inference is a GUESS shown for approval', () => {
 });
 
 test('wave split rules', () => {
-  has(sprint, '3-4 tickets per wave; 2 for a large ticket.');
+  has(sprint, '3-4 tickets per wave is a target; 2 for a large ticket. A single-ticket wave is allowed when a dependency forces it.');
   has(sprint, 'At most 2 ELEVATED tickets per wave, and only when they share no file, function, table or migration object, verified from the code and not guessed.');
   has(sprint, 'only when the objects differ, the migration timestamps are pre-assigned in merge order after the latest on the base, and the wave plan says so.');
-  has(sprint, 'A ticket with an unanswered product question is `parked` with reason Qn and is not placed in any wave plan until it is answered; it then becomes `pending`. An open question (`parked`) takes precedence over `waiting`.');
+  has(sprint, 'A ticket with an unanswered product question is `parked` with reason Qn; its wave label is the proposed placement only and no plan is written for it until it is answered; it then becomes `pending`. An open question (`parked`) takes precedence over `waiting`.');
   has(sprint, 'Tickets that share a file, service, function or table go in different waves in dependency order, and the later one rebases on the earlier one\'s merged body. The only exception is a hot shared file with additive-only edits (route mount, bindings, vars, docs): list it in the wave plan as rebase work; it does not count as a shared object.');
   has(sprint, 'Indirect coupling counts as sharing: a ticket that rewrites a shared helper or function consumed by another ticket\'s objects shares with that ticket.');
   has(sprint, 'Additive edits alone are not evidence of safety: the exception requires verified semantic independence of the tickets sharing the file, and the wave plan states why the changes are semantically independent (different routes, bindings, vars or queue types; no ordering or behavioural coupling). That check is part of the code reality and dependency analysis.');
@@ -101,6 +101,15 @@ test('negative pins: no primary-review-alone path, no Factory merge of migration
   has(sprint, 'Migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge.');
 });
 
+test('final micro-commit rules', () => {
+  has(sprint, 'It may apply to an ELEVATED pair only when that semantic independence is verified in the plans.');
+  has(sprint, 'After the owner answers, re-run the wave split rules: an answer can change a ticket\'s tier or dependencies (an ELEVATED upgrade may force a re-split).');
+  has(sprint, 'A ticket that might add a migration reserves an identifier too, released if unused. If the ticket it must follow is parked, it may run alone; the later ticket rebases on whatever merges first and the reserved identifiers are re-assigned.');
+  has(sprint, 'one independent second opinion per ticket plus one targeted confirmation per ticket that needs a repair; repairs beyond that are counted when they happen.');
+  const row = read('../references/sprint.md').split('\n').find((l) => l.includes('| parked '));
+  assert.ok(row && /proposed/.test(row), 'the parked example row shows a proposed wave label');
+});
+
 test('more than one open sprint: ask which one', () => {
   has(sprint, 'If more than one sprint is open, list them and ask the owner which one; never read all of them.');
 });
@@ -109,8 +118,8 @@ test('queue states, header reconciliation, cap units, verification evidence', ()
   has(sprint, 'States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `waiting`, `excluded`, `parked`.');
   has(sprint, '`excluded` means not part of the run, with a kind: `done_in_code`, `owner_parked`, `open_pr`, `needs_rescope` or `merged_elsewhere`.');
   has(sprint, '`parked` is only for a blocked ticket, an unavailable reviewer, material drift or an open question.');
-  has(sprint, 'the second-reviewer check, the permissions state (yes or no, plus the list), owner answers.');
-  has(sprint, 'Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs).');
+  has(sprint, 'Header: sprint or run id and name, source ids, mode (`attended|extended`), merge mode and scope, ticket counts (read, in the queue, excluded by kind) that reconcile, the queue file path, the cap, the second-reviewer check, the permissions state (yes or no, plus the list), owner answers.');
+  has(sprint, 'Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs)');
     has(sprint, 'A `merged` or `ship_ready` entry records the PR number, the merge commit and the date it was verified.');
 });
 
