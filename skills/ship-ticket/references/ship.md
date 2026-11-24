@@ -28,7 +28,7 @@ Every event carries run_id, event and timestamp. Use only these event names:
 
 | Event | Required evidence |
 |---|---|
-| **START** | `approved_plan_digest` (`sha256:<64 hex>`), `approved_by` (REQUIRED for new runs; descriptive metadata only, presence-checked and not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding), target base and approval time (`approved_at`, ISO-8601, not in the future; `timestamp` is read when absent), which sets security-policy grandfathering. Compute the digest with `node scripts/brief.mjs plan-digest --plan <plan>`, never with `shasum`; write START only after the narrative is final; run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>` before dispatching (`--run-id` is required; a START without a safe `run_id` is refused, as the engine ignores it; a `timestamp`-only START passes with a `start_timestamp_legacy` warning because the engine reads it, but new runs write `approved_at`; `ok` is necessary, not sufficient, because start-check cannot see the engine's trusted-START quiescence rule); never edit the narrative after START |
+| **START** | `approved_plan_digest` (`sha256:<64 hex>`), `approved_by` (REQUIRED for new runs; descriptive metadata only, presence-checked and not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding), optionally `approval_surface` (`terminal|desktop|plannotator`; OPTIONAL audit field, never evidence of approval), target base and approval time (`approved_at`, ISO-8601, not in the future; `timestamp` is read when absent), which sets security-policy grandfathering. Compute the digest with `node scripts/brief.mjs plan-digest --plan <plan>`, never with `shasum`; write START only after the narrative is final; run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>` before dispatching (`--run-id` is required; a START without a safe `run_id` is refused, as the engine ignores it; a `timestamp`-only START passes with a `start_timestamp_legacy` warning because the engine reads it, but new runs write `approved_at`; `ok` is necessary, not sufficient, because start-check cannot see the engine's trusted-START quiescence rule); never edit the narrative after START |
 | **RED** | test paths, exact command, failing test names with their assertion messages, any stub paths written first; appended before the first non-test Design Contract write |
 | **PROVE** | command outcomes, rule/test/docs/parity/VAPT evidence and degradations |
 | **REVIEW** | profile, candidate ID, primary identity, optional identity/degradation, coverage, findings, dispositions and outcome |
@@ -89,10 +89,8 @@ concurrently, then join once:
   change is a plan change, re-approved through `ExitPlanMode`, never an edit at
   SHIP. Rerun `contract --verify-quote` against the saved quote block (only the four-backtick quote, extracted from the request) and
   the SHIP record; a FAIL blocks SHIP. Verification does not prove what the
-  owner saw or authorize execution: native ExitPlanMode approval from a trusted
-  terminal remains mandatory, and without it SHIP reports `scope approval NOT
-  verified: the approval surface does not meet the trusted-terminal requirement;
-  do not build`.
+  owner saw or authorize execution: native ExitPlanMode approval given on a qualified
+  approval surface remains mandatory, and without it SHIP reports `scope approval NOT verified: the approval was not a native ExitPlanMode approval on a qualified approval surface; do not build`.
   At SHIP, exit 1 is **WAIT_FOR_USER** (a Design Contract expansion needs
   re-approval); exit 2 or 3 means fix the input and rerun, and never commit
   meanwhile. A refusal leaves any earlier record in place by design; it is never

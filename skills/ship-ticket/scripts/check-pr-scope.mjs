@@ -34,12 +34,12 @@
  * Under these rules CommonMark/GFM render exactly one fenced code block, at top level, with info `scope-contract` and
  * the body as its literal content (structural, design v3 §3). NOT proven: DOM/CSS effects of raw HTML in a viewer that
  * renders it, and renderer extensions. Raw HTML is deliberately no longer refused by S6 (option B): such viewers are
- * excluded by the owner's signed terminal-only approval policy, not by code. `contract --verify-quote` byte-compares
+ * excluded by the owner's signed qualified-surface approval policy, not by code. `contract --verify-quote` byte-compares
  * the body of the saved quote block (the orchestrator extracts only the four-backtick quote from the ExitPlanMode
  * request it sent; any other non-blank line fails: a precise input definition) with the plan block and the record. That is byte
  * verification only: it does not prove what the owner saw and does not authorize execution; native ExitPlanMode
- * approval, given from a complete, untruncated, literal request in a trusted terminal, remains mandatory, and when the
- * approval surface cannot meet that requirement the orchestrator fails closed with the NOT_VERIFIED_REPORT wording.
+ * approval, given on a qualified approval surface (one that shows the complete plan and does not let raw HTML hide or run
+ * content), remains mandatory, and when the approval surface cannot meet that requirement the orchestrator fails closed with the NOT_VERIFIED_REPORT wording.
  * The canonical JSON body: keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); body
  * <= 8 KiB (64 KiB in engine mode), planned <= 64 entries of <= 256 chars (engine mode 256 of <= 512), supporting <= 16. Field rules
  * (`scope_contract_invalid`):
@@ -244,13 +244,13 @@ const BLANK = /^[ \t]*$/;
 /** A container prefix (blockquote markers, list markers, spaces and tabs), stripped before the fence and HTML tests. */
 const CONTAINER = /^(?:[ \t]*(?:>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)))*[ \t]*/;
 const DIGEST_LINE = /^contract body: (sha256:[0-9a-f]{64})$/;
-/** Printed in every record and by --verify-quote: the owner's terminal-only approval condition (design v3 option B). */
+/** Printed in every record and by --verify-quote: the owner's qualified-surface approval condition (interface-neutral, 2026-11-24). */
 export const APPROVAL_CAVEAT = 'Byte verification only: this does not prove what the owner saw and does not authorize execution. '
-  + 'Native ExitPlanMode approval remains mandatory, and it is valid only when the complete, untruncated, literal request '
-  + 'was presented in a trusted terminal without active rendering or control-sequence ambiguity. Browser, GitHub and editor '
-  + 'previews are never valid approval surfaces.';
-/** The exact report when the approval surface cannot meet the trusted-terminal requirement (fail closed). */
-export const NOT_VERIFIED_REPORT = 'scope approval NOT verified: the approval surface does not meet the trusted-terminal requirement; do not build';
+  + 'Native ExitPlanMode approval remains mandatory, and it is valid only when given on a qualified approval surface: one that shows '
+  + 'the complete, untruncated plan and does not let raw HTML hide or run content (Claude Code terminal, Claude Desktop, Plannotator\'s Approve action). '
+  + 'Browser, GitHub and editor previews are never valid approval surfaces.';
+/** The exact report when the approval was not a native ExitPlanMode approval on a qualified surface (fail closed). */
+export const NOT_VERIFIED_REPORT = 'scope approval NOT verified: the approval was not a native ExitPlanMode approval on a qualified approval surface; do not build';
 
 /**
  * CommonMark 0.31.2 §4.6 HTML block start conditions 1-5 (the ones whose end is not a blank line), as a conservative

@@ -461,7 +461,7 @@ Plan Mode before the debate has been reconciled and
 `brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` plan is presented for the owner's disposition; see
 [references/cross-model.md](references/cross-model.md) "PLAN debate"); state the
 attestation line's sha256 in the text accompanying `ExitPlanMode`, and do not
-treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.
+treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text. The `debate-dispositions-v1:` line must also be in the plan text itself, so a surface that shows only the plan shows it.
 Before `ExitPlanMode` on a policy-2 plan with an execution DAG, run
 `scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`.
 It checks the plan and DAG as `init` will, with no START and no write. Fix any
@@ -485,7 +485,7 @@ After approval:
 - create or reuse the ticket branch from an up-to-date base;
 - save the approved plan under .specs/plans/<TICKET>.md;
 - copy the debate bundle to the retained locator with `brief.mjs debate-retain --plan <plan> --bundle <bundle root> --repo <repo>` before START (a failed copy is **WAIT_FOR_USER**, never a START without the retained evidence);
-- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`;
+- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`; `approval_surface` (terminal, desktop or plannotator) is an OPTIONAL audit field, never evidence of approval.
 - invoke the routed quality skill and write one Design Contract derived from the
   approved execution DAG;
 - for full-stack work, materialize or generate the approved Integration Contract,

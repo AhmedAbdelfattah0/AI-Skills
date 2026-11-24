@@ -343,3 +343,67 @@ test('differential: start-check ok implies the engine accepts; they differ only 
   }
   assert.ok(stricter >= 2, 'start-check is expected to be stricter on approver and future time');
 });
+
+// ---- approval_surface (Change B, 2026-11-24): descriptive metadata, recorded only, NEVER evidence of approval ----
+import * as BRIEF from './brief.mjs';
+const SURFACES = ['terminal', 'desktop', 'plannotator'], APPROVAL_SURFACES = BRIEF.APPROVAL_SURFACES ?? [];
+const NEW_AT = '2999-01-01T00:00:00Z'; // after the cutoff, but not in the future relative to `now` below
+const NOW = Date.parse('2999-01-01T00:01:00Z');
+const chkAt = (text) => startCheck(text, { runId: 'r1', now: NOW });
+const surfCodes = (r) => codes(r).filter((c) => c.startsWith('start_approval_surface')); // a START approved late also meets the unrelated S4 debate rule
+test('approval_surface: the allowed values are exactly terminal, desktop, plannotator', () => {
+  assert.deepEqual([...APPROVAL_SURFACES], ['terminal', 'desktop', 'plannotator']);
+  assert.equal(BRIEF.APPROVAL_SURFACE_CUTOFF, undefined, 'no cutoff: the field is optional');
+});
+test('approval_surface: each allowed value passes, on a legacy and on a post-cutoff START', () => {
+  for (const s of SURFACES) {
+    assert.equal(chk(withStart({ approval_surface: s })).ok, true, s);
+    assert.deepEqual(surfCodes(chkAt(withStart({ approval_surface: s, approved_at: NEW_AT }))), [], `${s} new`);
+  }
+});
+test('approval_surface: a present but unknown or non-string value is refused, (no silent pass)', () => {
+  for (const v of ['browser', ['trusted', 'terminal'].join('-'), 'Terminal', 'vscode', '', ' terminal', 'terminal ', null, 7, ['terminal'], {}, true]) {
+    assert.deepEqual(codes(chk(withStart({ approval_surface: v }))), ['start_approval_surface_invalid'], JSON.stringify(v));
+    assert.deepEqual(surfCodes(chkAt(withStart({ approval_surface: v, approved_at: NEW_AT }))), ['start_approval_surface_invalid'], `${JSON.stringify(v)} new`);
+  }
+});
+test('approval_surface: OPTIONAL: absent is accepted at any approved_at, with no surface code and no warning', () => {
+  for (const at of ['2026-11-01T10:00:00Z', '2026-12-15T10:00:00Z', NEW_AT]) {
+    const r = chkAt(withStart({ approved_at: at }));
+    assert.deepEqual(surfCodes(r), [], at);
+  }
+  assert.equal(chk(withStart()).ok, true);
+  assert.deepEqual(chk(withStart()).warnings, []);
+  // the existing codes keep their one exact code
+  assert.deepEqual(codes(chk(withStart({ approved_at: 'garbage' }))), ['start_approved_at_invalid']);
+});
+test('approval_surface: self-reported surface is never evidence: it cannot rescue a stale digest or a missing approver', () => {
+  for (const s of SURFACES) {
+    assert.deepEqual(codes(chk(withStart({ approval_surface: s, approved_plan_digest: `sha256:${hex('other')}` }))), ['start_digest_stale'], s);
+    assert.deepEqual(codes(chk(withStart({ approval_surface: s, approved_by: undefined }))), ['start_approver_missing'], s);
+    assert.deepEqual(codes(chk(withStart({ approval_surface: s, approved_plan_digest: undefined }))), ['start_digest_missing'], s);
+    // no surface value changes ok-ness or the digest
+    assert.equal(chk(withStart({ approval_surface: s })).digest, chk(withStart()).digest, s);
+  }
+});
+test('approval_surface: a plan edited after approval is a stale digest on every surface (approval_mismatch path), and a START for an older revision is refused', () => {
+  for (const s of SURFACES) {
+    const approved = plan([{ ...good(plan()), approval_surface: s }]);
+    assert.equal(chk(approved).ok, true, s);
+    const edited = approved.replace('Do the thing.', 'Do another thing.');
+    assert.deepEqual(codes(chk(edited)), ['start_digest_stale'], s);
+    const rev2 = plan([{ ...good(plan()), approval_surface: s }], '# Plan\n\nDo the thing, revision 2.\n\n');
+    assert.deepEqual(codes(chk(rev2)), ['start_digest_stale'], `${s} older revision`);
+  }
+});
+test('approval_surface: the start-check CLI refuses an unknown surface with exit 1 and typed JSON', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'asurf-'));
+  try {
+    const f = join(dir, 'plan.md'); writeFileSync(f, withStart({ approval_surface: 'browser' }));
+    const r = spawnSync(process.execPath, [CLI, 'start-check', '--plan', f, '--run-id', 'r1'], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).errors.map((e) => e.code), ['start_approval_surface_invalid']);
+    writeFileSync(f, withStart({ approval_surface: 'plannotator' }));
+    assert.equal(spawnSync(process.execPath, [CLI, 'start-check', '--plan', f, '--run-id', 'r1'], { encoding: 'utf8' }).status, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
