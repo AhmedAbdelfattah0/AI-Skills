@@ -18,6 +18,14 @@
 #   ./scripts/install.sh --target codex           # all skills → OpenAI Codex
 #   ./scripts/install.sh --target all security    # one skill → every tool
 #   ./scripts/install.sh --dest /path/to/skills   # custom destination directory
+#   ./scripts/install.sh --replace-foreign        # back up entries that are not ours, then install
+#
+# An existing entry is replaced only when it is this clone's own link. Anything
+# else (a real directory, a copy, a link elsewhere, a dangling link) is left
+# alone, named, and the script exits 1 after installing the rest. This script
+# writes no manifest, so that includes a copy it made itself on an earlier run.
+# With --replace-foreign the entry is moved to a timestamped backup under
+# ${XDG_STATE_HOME:-~/.local/state}/ai-skills/replaced/ instead; nothing is deleted.
 #
 # Symlink mode is best on your primary machine: one `git pull` / edit and every
 # linked tool sees the change with no re-install. Copy mode is for machines
@@ -36,11 +44,13 @@ set -euo pipefail
 MODE="link"
 TARGET_SPEC=""
 DEST_OVERRIDE=""
+REPLACE_FOREIGN=0
 NAMES=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --copy) MODE="copy" ;;
     --link) MODE="link" ;;
+    --replace-foreign) REPLACE_FOREIGN=1 ;;
     --target|-t) TARGET_SPEC="${2:-}"; shift ;;
     --target=*) TARGET_SPEC="${1#--target=}" ;;
     --dest) DEST_OVERRIDE="${2:-}"; shift ;;
@@ -51,7 +61,9 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-REPO_SKILLS="$(cd "$(dirname "$0")/../skills" && pwd)"
+REPO_SKILLS="$(cd "$(dirname "$0")/../skills" && pwd -P)"
+BACKUP_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ai-skills/replaced/$(date +%Y%m%dT%H%M%S)-$$"
+SKIPPED=0
 
 # Map a target name to its destination directory (bash-3.2 safe: no assoc arrays).
 target_dir() {
@@ -122,7 +134,21 @@ for DEST in "${DEST_DIRS[@]}"; do
   count=0
   for name in "${TARGETS[@]}"; do
     dir="$REPO_SKILLS/$name"
-    rm -rf "$DEST/$name"
+    dst="$DEST/$name"
+    if [ -L "$dst" ] || [ -e "$dst" ]; then
+      if [ -L "$dst" ] && [ "$(cd "$dst" 2>/dev/null && pwd -P)" = "$dir" ]; then
+        rm "$dst"                                   # our own link into this clone
+      elif [ "$REPLACE_FOREIGN" = 1 ]; then
+        mkdir -p "$BACKUP_ROOT/$LABEL"
+        mv "$dst" "$BACKUP_ROOT/$LABEL/$name"
+        echo "↪ $name  moved to $BACKUP_ROOT/$LABEL/$name"
+      else
+        echo "! $name  not this clone's link, left alone: $dst" >&2
+        echo "  move it yourself, or re-run with --replace-foreign to back it up and install" >&2
+        SKIPPED=$((SKIPPED + 1))
+        continue
+      fi
+    fi
     if [ "$MODE" = "link" ]; then
       ln -s "$dir" "$DEST/$name"
       echo "🔗 linked  $name  → $LABEL"
@@ -137,3 +163,7 @@ for DEST in "${DEST_DIRS[@]}"; do
   echo ""
 done
 [ "$MODE" = "link" ] && echo "   edits in $REPO_SKILLS are live everywhere they're linked."
+if [ "$SKIPPED" -gt 0 ]; then
+  echo "⚠️  $SKIPPED skill(s) left alone because something else is already there (see above)." >&2
+  exit 1
+fi

@@ -11,6 +11,7 @@
 //   install [names...]         install all skills, or only the named ones
 //     --copy / -c              copy real files instead of symlinking
 //     --link / -l              force symlink even from an ephemeral source
+//     --replace-foreign        back up an existing entry that is not ours, then install
 //   update [names...]          bring already-installed skills up to date
 //     --check / -n             report what would change; write nothing
 //     --force / -f             overwrite copies that were edited after install
@@ -509,8 +510,8 @@ const RETIRED_SKILLS = {
 };
 const SUCCESSORS = new Set(Object.values(RETIRED_SKILLS));
 
-// Why an existing successor directory must not be replaced, or null when it is
-// absent or ours and untouched. Never overwrites what somebody else made or edited.
+// Why an existing entry must not be replaced, or null when it is absent or ours
+// and untouched. Never overwrites what somebody else made or edited.
 function successorCollision(dst, src, record) {
   let st = null;
   try { st = lstatSync(dst); } catch { return null; }
@@ -523,11 +524,28 @@ function successorCollision(dst, src, record) {
   return record.hash === hashSkill(dst) ? null : 'edited after install';
 }
 
+// --replace-foreign: move an entry that is not ours into the state directory,
+// never delete it. Returns the backup path. A rename that crosses filesystems
+// falls back to copy-then-remove, and the copy keeps links as links.
+function backUpForeign(dst, label, name, stamp) {
+  const backup = join(stateDir(), 'replaced', stamp, label, name);
+  mkdirSync(dirname(backup), { recursive: true });
+  try { renameSync(dst, backup); } catch (err) {
+    if (err.code !== 'EXDEV') throw err;
+    cpSync(dst, backup, { recursive: true, verbatimSymlinks: true });
+    removeExisting(dst);
+  }
+  return backup;
+}
+
 function cmdInstall(args) {
   const wantCopy = args.includes('--copy') || args.includes('-c');
   const wantLink = args.includes('--link') || args.includes('-l');
   // --force lets install replace a successor (code-quality) that is edited or not ours.
   const force = args.includes('--force') || args.includes('-f');
+  // An entry that is not ours is left alone unless this asks to back it up first.
+  const replaceForeign = args.includes('--replace-foreign');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
   // Parse --target <t1,t2|all> and --dest <path>; remaining bare words = skill names.
   const { names, targetSpec, destOverride } = parseFlags(args);
@@ -601,13 +619,17 @@ function cmdInstall(args) {
     for (const [name, alias] of [...targets.map((n) => [n, null]), ...successorOf]) {
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
-      // A successor holds the rules its aliases point at. Whether it was named,
-      // part of a bare install or pulled in by an alias, never replace one that
-      // somebody edited or installed independently, unless --force says so.
-      const why = SUCCESSORS.has(name) && !force && successorCollision(dst, src, manifest.skills[name]);
-      if (why) {
+      // Never replace an entry somebody edited or installed independently: the
+      // same ownership test `update` applies. Only a successor (which holds the
+      // rules its aliases point at) may still be replaced with --force.
+      const why = !(force && SUCCESSORS.has(name)) && successorCollision(dst, src, manifest.skills[name]);
+      if (why && replaceForeign) {
+        console.log(`   ↪ ${name}  moved to ${backUpForeign(dst, label, name, stamp)}`);
+      } else if (why) {
         const need = alias ? `needed by the ${alias} alias, which holds no rules — ` : '';
-        console.log(`   ! ${name}  ${need}${why}, left alone; resolve this collision or re-run with --force`);
+        const options = SUCCESSORS.has(name) ? '--force or --replace-foreign' : '--replace-foreign';
+        console.log(`   ! ${name}  ${need}${why}, left alone; resolve this collision or re-run with ${options}`);
+        console.log(`     ${dst} is untouched; --replace-foreign moves it to a backup under ${join(stateDir(), 'replaced')} and installs`);
         process.exitCode = 1;
         collided++;
         continue;
@@ -1656,6 +1678,8 @@ Install flags:
                           antigravity  ~/.gemini/config/skills       (Google Antigravity)
                           all          claude + agents + gemini + antigravity
   --dest <path>         install into a custom directory instead
+  --replace-foreign     back up (never delete) an existing entry that is not ours, then install;
+                        without it such an entry is left alone and the command exits 1
 
 Update flags (--target / --dest work here too):
   --check, -n           report what would change; write nothing

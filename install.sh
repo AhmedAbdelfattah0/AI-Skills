@@ -15,6 +15,9 @@
 #   AI_SKILLS_TARGET=<t,..>     which tools to install for   (default: claude)
 #                               claude | codex | gemini | agents | antigravity | all
 #   AI_SKILLS_NO_AUTOUPDATE=1   install, but do not schedule anything
+#   AI_SKILLS_REPLACE_FOREIGN=1 back up (never delete) same-named entries that are not
+#                               ours, then install; without it they are left alone
+#                               and the installer stops with exit 1
 #
 # This script is deliberately thin: it bootstraps, then hands off to
 # scripts/cli.mjs, which is the single implementation of install and update.
@@ -133,7 +136,9 @@ else
 fi
 
 echo
-node "$HOME_DIR/scripts/cli.mjs" install --link --target "$TARGET"
+REPLACE=()
+[ "${AI_SKILLS_REPLACE_FOREIGN:-}" = "1" ] && REPLACE=(--replace-foreign)
+node "$HOME_DIR/scripts/cli.mjs" install --link --target "$TARGET" ${REPLACE[@]+"${REPLACE[@]}"}
 
 if [ "${AI_SKILLS_NO_AUTOUPDATE:-}" = "1" ]; then
   echo "   (AI_SKILLS_NO_AUTOUPDATE=1 — nothing scheduled; run \"update\" yourself.)"
