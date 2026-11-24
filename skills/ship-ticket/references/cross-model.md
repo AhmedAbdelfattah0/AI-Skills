@@ -431,7 +431,7 @@ Route, in order:
    `provider:model`; a builder recorded as `claude:provider-default` would make
    it `reviewer_is_builder`, so map builder tiers to explicit models.
 3. If neither Codex nor Fable produces a usable result, `WAIT_FOR_USER`. Never
-   continue on primary coverage alone.
+   continue on primary coverage alone. Before an extended run, check this availability for the whole run; if neither route can run, do not start ([sprint.md](sprint.md)).
 
 **Dispatching Fable.** On a Claude host, start a new subagent with `model: fable`
 and no PLAN, BUILD or primary-review context: the same frozen scope packet,

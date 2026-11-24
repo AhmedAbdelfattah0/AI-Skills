@@ -10,6 +10,8 @@ conditions; this carries how to satisfy them.
 | `KEY-123`, `…/browse/KEY-123`, an `*.atlassian.net` URL | **Jira** | Atlassian connection (get issue) | the workflow transition to "Done" | PR URL in a ticket comment, or the dev-panel link if that integration exists |
 | a bare number `1234`, `#1234`, `AB#1234`, a `dev.azure.com` / `visualstudio.com` work-item URL | **Azure DevOps** | `wit_get_work_item`, expanding relations | `wit_update_work_item` → the type's **completed-category state** | `wit_link_work_item_to_pull_request`, or `AB#<id>` in the PR description on GitHub |
 
+A sprint, board or iteration link, or an explicit ticket list for an extended run, is read through [sprint.md](sprint.md) (intake), not as one ticket.
+
 Everything else in this skill is tracker-neutral. Two ADO rules that are not
 optional:
 

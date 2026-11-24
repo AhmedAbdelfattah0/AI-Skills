@@ -114,6 +114,8 @@ Load a phase reference only when entering that phase:
 | BUILD, PROVE or REVIEW when any DAG node has `unit` | [references/units.md](references/units.md) |
 | On demand, when the operator card names it | [references/harness-internals.md](references/harness-internals.md) |
 
+For a sprint or board link, or an explicit ticket list for an extended run, also load [references/sprint.md](references/sprint.md).
+
 ## Execution harness (outside PLAN)
 
 Bundled Node helpers turn the orchestration rules below into checks at the
@@ -305,7 +307,7 @@ If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
 begins. Missing Codex falls back to a fresh Fable session; if neither can run, use
 **WAIT_FOR_USER** — the second opinion is mandatory. Missing concurrency only
-serializes the two reviews.
+serializes the two reviews. Before the first wave of an extended run, verify that a second reviewer can run (Codex, else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted; otherwise do not start.
 
 ## Security sensitivity
 
@@ -433,7 +435,7 @@ is unclear, ASK the owner before planning, never guess. At the START of the
 ticket or wave, ask ONCE whether auto-merge is allowed after the reviews and CI
 are green: yes means merge after every gate has passed; no means prepare the PR
 and wait for the owner's "merge". Deploy is a separate decision and is never
-implied. Merge stays manual unless the owner opted in.
+implied. Merge stays manual unless the owner opted in. For a sprint or an extended run, ask once per wave or sprint, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision ([references/sprint.md](references/sprint.md)).
 
 In an interactive session the orchestrator owns the Plan Mode lifecycle; follow
 the host-specific procedure in the plan reference. On Claude, `EnterPlanMode` and
@@ -817,6 +819,7 @@ message look like completion.
 
 ## Resume
 
+- Sprint or extended run: read the queue file under `<git-common-dir>/ai-skills/ship-ticket/sprints/` and the existing artifacts, then name the next permitted action ([references/sprint.md](references/sprint.md)).
 - Approved plan, no review result: recheck ticket ownership and resume the phase
   that stopped. Do not repeat the planning debate. When an engine state file
   exists, run `run-engine.mjs resume`: it reconciles attempts, staleness and
