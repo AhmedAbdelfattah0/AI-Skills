@@ -853,15 +853,29 @@ reports INIT/BUILD/RED/PROVE as `acceptance_unknown`: in practice the hook asks 
 and cannot see past it. Both the unit tests and this paragraph state that limit.
 
 Documentation only, NOT INSTALLED, needs the owner's explicit D-9 approval before it is added to
-`~/.claude/settings.json` (user) or `.claude/settings.json` (project):
+`~/.claude/settings.json` (user) or `.claude/settings.json` (project). Use an absolute path (no `~`
+or environment variable: neither is documented for a command hook). `Stop` takes no matcher.
+`timeout` is in seconds; the command-hook default is 600, so set it explicitly:
 
 ```json
-{ "hooks": { "Stop": [ { "hooks": [ { "type": "command",
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "timeout": 30,
   "command": "node /ABSOLUTE/PATH/TO/skills/ship-ticket/scripts/stop-hook.mjs" } ] } ] } }
 ```
 
-To remove it, delete that `Stop` entry from the settings file (or the file's whole `hooks.Stop`
-block); nothing else was changed, there is no state to clean up.
+Notes. Hooks in `~/.claude/settings.json` wait for the workspace trust dialog. Claude Code itself also
+caps consecutive stop-hook continuations (8; the count resets when Claude calls a tool;
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`). This hook is stricter: it allows at most ONE forced continuation per
+turn (`stop_hook_active: true` means allow), because a persistent counter would need new state.
+
+**Prominent limit.** `next` without `--last` reports INIT, BUILD, RED and PROVE as `acceptance_unknown`,
+and the hook cannot pass `--last` without new state. From a real hook it can therefore only say "run
+drive then come back", once per turn; the run/dispatch branch is tested through the pure `decide`
+function but not reachable from the hook's own invocation today. If the engine's accepted-view
+(`--last`) evolves so that these phases are readable from durable state, the hook starts naming the
+real next step with no change to the script.
+
+To remove it, delete that `Stop` entry from the settings file (or the whole `hooks.Stop` block);
+nothing else was changed and there is no state to clean up.
 
 ## Known limits
 

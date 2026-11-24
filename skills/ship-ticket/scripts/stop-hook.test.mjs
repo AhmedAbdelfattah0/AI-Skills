@@ -138,6 +138,7 @@ test('H7 decide: stops of every other class allow; a settle-less acceptance_unkn
   const stop = (code, extra = {}) => ({ action: 'stop', phase: 'REVIEW', code, command: null, facts: {}, ...extra });
   for (const c of ['gate_refused', 'no_progress', 'identity_unavailable', 'state_moved', 'owner_publish', 'review_fail_no_repair', 'budget_spent', 'approval_mismatch', 'something_new'])
     assert.equal(decide(stop(c), 'T-1', 'r').block, false, c);
+  assert.equal(decide(stop('gate_refused', { stop_class: 'refused', phase: 'REVIEW', reason: 'review refused' }), 'T-1', 'r').block, false, 'a refused gate is the orchestrator\'s to decide');
   assert.equal(decide(stop('acceptance_unknown', { facts: { settle_with: null } }), 'T-1', 'r').block, false);
   assert.equal(decide(stop('acceptance_unknown', { facts: { settle_with: { script: 'run-engine.mjs', cmd: 'drive' } } }), 'T-1', 'r').block, true);
   for (const bad of [null, undefined, 'x', [], {}, { action: 'run' }, { action: 'run', command: { script: 1 } }]) assert.equal(decide(bad, 'T-1', 'r').block, false);
