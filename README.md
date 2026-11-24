@@ -91,6 +91,18 @@ Same behaviour as Option C, no Node required:
 ./scripts/install.sh --dest <path>       # any other tool's skills dir
 ```
 
+### If something already has a skill's name
+
+`install` replaces an existing entry only when it is ours: a link to this library's own skill, or a
+copy it recorded installing that nobody has edited since (the same test `update` uses). Anything else
+is left untouched: your own folder, a link into another library or anywhere else, a dangling link, an
+edited copy. The installer names each one, installs the rest, and exits with code 1. To replace them,
+re-run with `--replace-foreign` (`AI_SKILLS_REPLACE_FOREIGN=1` for the one-line installer): each entry
+is moved to a timestamped backup under `~/.local/state/ai-skills/` (`$XDG_STATE_HOME/ai-skills/` if set, `%LOCALAPPDATA%\ai-skills\` on
+Windows) and the
+path is printed. Nothing is deleted. `./scripts/install.sh` writes no manifest, so it recognises only
+its own links: a second `--copy` run also skips its earlier copies unless you pass `--replace-foreign`.
+
 ### Verify
 
 After installing, run `/skills` (or restart) in Claude Code and confirm the skills appear.
