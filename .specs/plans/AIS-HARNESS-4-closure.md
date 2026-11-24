@@ -101,7 +101,7 @@ Per PR: failing-first evidence for each fix; `cd skills/ship-ticket/scripts && n
 ## State for resuming (after a compaction)
 - PR #46 branch `fix/AIS-HARNESS-4-wave-b-followup` at 40c8051 (worktree `<scratchpad>/wt-followup`); PR #47 branch `feat/AIS-HARNESS-4-wave-c2-effectiveness` at eab75a9 (main checkout). Both CI green. CodeRabbit on #47: CHANGES_REQUESTED (the Step 0 points).
 - Issue #45 holds the pre-registration hashes (3 posts). Stale branch `feat/AIS-HARNESS-4-wave-b-security-plan` still exists locally and on the remote.
-- Scratchpad `/private/tmp/claude-501/-Users-ahmedabdelfatah-Documents-personal-projects-AI-Skills/76f21e3d-be67-4ffb-852b-74bbf1778a75/scratchpad`: `run/` (local-only writer and judge inputs and outputs), `markers/` (review results), `merge.mjs`, `input-hashes.txt`.
+- Scratchpad `<SCRATCH>/76f21e3d-be67-4ffb-852b-74bbf1778a75/scratchpad`: `run/` (local-only writer and judge inputs and outputs), `markers/` (review results), `merge.mjs`, `input-hashes.txt`.
 - Plans on their branches: `.specs/plans/AIS-HARNESS-4-wave-c2.md`, `.specs/plans/AIS-HARNESS-4-wave-b-followup.md`. Run ids: wf-1794300183 (C2), wf-1794300805 (follow-up).
 - `.claude/` is untracked local settings: never commit or delete it.
 
