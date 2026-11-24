@@ -20,12 +20,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  realpathSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
 const MANIFEST = '.ai-skills-manifest.json';
@@ -88,8 +88,9 @@ const worldMethods = {
   },
   file(...parts) { return join(this.skillsDir, ...parts); },
   claudeDir(...parts) { return join(this.home, '.claude', 'skills', ...parts); },
-  run(args) {
+  run(args, extraEnv = {}) {
     const env = childEnv({
+      ...extraEnv,
       HOME: this.home,
       USERPROFILE: this.home,
       XDG_STATE_HOME: join(this.root, 'state'),
@@ -151,6 +152,7 @@ test('copy install writes a real directory and records its hash and mode', (t) =
 // to a backup under the state directory first and never deletes it.
 
 const twoSkills = (t) => world(t, { alpha: ['Alpha body.'], beta: ['Beta body.'] });
+const unixOnly = { skip: process.platform === 'win32' && 'a Unix-only path (bash installer, POSIX links and modes)' };
 function linkDir(t, target, path) {
   mkdirSync(dirname(path), { recursive: true });
   try { symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir'); return true; }
@@ -249,6 +251,61 @@ test('install --replace-foreign moves the entry to a backup under the state dir,
   assert.equal(realpathSync(w.claudeDir('beta')), realpathSync(w.file('beta')));
 });
 
+// A backup that has to cross filesystems: a preload makes every rename into the backup area fail
+// with EXDEV, so backUpForeign takes its copy-then-remove path.
+function crossDevice(w) {
+  const preload = join(w.root, 'exdev.mjs');
+  put(preload, [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    'const rename = fs.renameSync;',
+    `const mark = ${JSON.stringify(join(w.root, 'exdev-thrown'))};`,
+    "fs.renameSync = (a, b) => { if (/[\\\\/]replaced[\\\\/]/.test(String(b))) { fs.appendFileSync(mark, String(a) + '\\n'); const e = new Error('EXDEV: cross-device link not permitted'); e.code = 'EXDEV'; throw e; } return rename(a, b); };",
+    'syncBuiltinESMExports();',
+    '',
+  ].join('\n'));
+  return { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` };
+}
+
+test('install --replace-foreign across filesystems keeps a dangling link a link and a nested link a link', unixOnly, (t) => {
+  const w = world(t, { alpha: ['Alpha body.'], beta: ['Beta body.'] });
+  linkDir(t, join(w.root, 'gone', 'alpha'), w.claudeDir('alpha'));
+  put(w.claudeDir('beta', 'notes', 'unique.txt'), 'only copy of this\n');
+  symlinkSync('notes/unique.txt', w.claudeDir('beta', 'inner-link'));
+  const r = w.run(['install', '--link', '--replace-foreign'], crossDevice(w));
+  assert.equal(r.status, 0, r.out);
+  assert.equal(read(join(w.root, 'exdev-thrown')).trim().split('\n').length, 2, 'both moves took the cross-device path');
+  const alphaBackup = movedTo('alpha', r.out);
+  assert.ok(lstatSync(alphaBackup).isSymbolicLink(), 'the dangling link was backed up as a link');
+  assert.equal(readlinkSync(alphaBackup), join(w.root, 'gone', 'alpha'));
+  const betaBackup = movedTo('beta', r.out);
+  assert.ok(existsSync(join(betaBackup, 'notes', 'unique.txt')), `the backup holds the moved entry: ${betaBackup}`);
+  assert.equal(read(join(betaBackup, 'notes', 'unique.txt')), 'only copy of this\n');
+  assert.equal(readlinkSync(join(betaBackup, 'inner-link')), 'notes/unique.txt', 'a nested link is kept verbatim');
+  assert.equal(realpathSync(w.claudeDir('beta')), realpathSync(w.file('beta')));
+  assert.equal(realpathSync(w.claudeDir('alpha')), realpathSync(w.file('alpha')));
+});
+
+test('a backup that fails leaves the original untouched, installs the rest, records them and exits 1', unixOnly, (t) => {
+  if (process.getuid?.() === 0) { t.skip('root reads unreadable files'); return; }
+  const w = world(t, { alpha: ['Alpha body.'], beta: ['Beta body.'] });
+  put(w.claudeDir('beta', 'SKILL.md'), 'my own beta\n');
+  put(w.claudeDir('beta', 'secret.txt'), 'unreadable\n');
+  chmodSync(w.claudeDir('beta', 'secret.txt'), 0o000);
+  t.after(() => { try { chmodSync(w.claudeDir('beta', 'secret.txt'), 0o644); } catch { /* gone */ } });
+  const r = w.run(['install', '--link', '--replace-foreign'], crossDevice(w));
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /! beta {2}present but not installed by us, left alone: could not copy it to a backup .*the original is untouched/);
+  assert.doesNotMatch(r.out, /\n\s+at /, 'no raw stack trace');
+  assert.equal(read(w.claudeDir('beta', 'SKILL.md')), 'my own beta\n');
+  chmodSync(w.claudeDir('beta', 'secret.txt'), 0o644);
+  assert.equal(read(w.claudeDir('beta', 'secret.txt')), 'unreadable\n');
+  assert.equal(realpathSync(w.claudeDir('alpha')), realpathSync(w.file('alpha')));
+  const m = readManifest(w.claudeDir());
+  assert.ok(m.skills.alpha, 'what was applied is recorded');
+  assert.equal(m.skills.beta, undefined);
+});
+
 test('update still leaves a foreign link alone', (t) => {
   const w = twoSkills(t);
   assert.equal(w.run(['install', '--link', 'alpha']).status, 0);
@@ -268,7 +325,6 @@ function bashInstall(w, args) {
   const r = spawnSync('bash', [join(w.lib, 'scripts', 'install.sh'), ...args], { cwd: w.root, env, encoding: 'utf8' });
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
-const unixOnly = { skip: process.platform === 'win32' && 'the bash installer is not run on Windows' };
 
 test('scripts/install.sh leaves a real directory and foreign links alone, and exits 1', unixOnly, (t) => {
   const w = world(t, { alpha: ['Alpha body.'], beta: ['Beta body.'], gamma: ['Gamma body.'], delta: ['Delta body.'] });
@@ -501,6 +557,42 @@ test('install --replace-foreign backs up a foreign code-quality an alias needs, 
   assert.equal(read(join(backup, 'SKILL.md')), 'somebody else owns this\n');
   assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
   assert.ok(readManifest(w.claudeDir()).skills['code-quality'].hash, 'the installed successor is recorded');
+});
+
+// --force replaces the successor, but never without a backup of what was there.
+for (const extra of [[], ['--replace-foreign']]) {
+  test(`install ${['--force', ...extra].join(' ')} backs up a foreign code-quality before replacing it`, (t) => {
+    const w = aliasWorld(t);
+    put(w.claudeDir('code-quality', 'SKILL.md'), 'somebody else owns this\n');
+    put(w.claudeDir('code-quality', 'notes', 'unique.txt'), 'only copy of this\n');
+    const r = w.run(['install', '--copy', '--force', ...extra, 'code-quality']);
+    assert.equal(r.status, 0, r.out);
+    const backup = movedTo('code-quality', r.out);
+    assert.ok(existsSync(join(backup, 'notes', 'unique.txt')), `the backup holds the moved entry: ${backup}`);
+    assert.equal(read(join(backup, 'SKILL.md')), 'somebody else owns this\n');
+    assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
+  });
+}
+
+test('install --copy --force over an edited code-quality keeps the edit in a backup', (t) => {
+  const w = aliasWorld(t);
+  assert.equal(w.run(['install', '--copy', 'code-quality']).status, 0);
+  writeFileSync(w.claudeDir('code-quality', 'SKILL.md'), 'my own edit\n');
+  const r = w.run(['install', '--copy', '--force', 'code-quality']);
+  assert.equal(r.status, 0, r.out);
+  const backup = movedTo('code-quality', r.out);
+  assert.ok(existsSync(join(backup, 'SKILL.md')), `the backup holds the moved entry: ${backup}`);
+  assert.equal(read(join(backup, 'SKILL.md')), 'my own edit\n');
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
+});
+
+test('install --force does not replace a non-successor entry that is not ours', (t) => {
+  const w = twoSkills(t);
+  put(w.claudeDir('beta', 'SKILL.md'), 'my own beta\n');
+  const r = w.run(['install', '--link', '--force']);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, leftAlone('beta', 'present but not installed by us'));
+  assert.equal(read(w.claudeDir('beta', 'SKILL.md')), 'my own beta\n');
 });
 
 // The legacy bash installer writes no manifest, so update cannot repair an
@@ -1147,3 +1239,25 @@ for (const [value, expected] of [['1', true], [undefined, false], ['yes', false]
     assert.equal(install.includes('--replace-foreign'), expected, install);
   });
 }
+
+test('install.sh says automatic updates were not scheduled when the install stops, and names the env var', unixOnly, (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ais-stop-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const argLog = join(root, 'node-args');
+  put(join(bin, 'node'), `#!/bin/sh\ncase "$1" in -v) echo v${NODE_FLOOR}.0.0;; -p) echo ${NODE_FLOOR};; *) echo "$@" >> '${argLog}'; case "$*" in *' install '*) exit 1;; esac;; esac\n`);
+  put(join(bin, 'git'), '#!/bin/sh\n[ "$1" = clone ] && for a; do last="$a"; done && mkdir -p "$last"\nexit 0\n');
+  for (const b of ['node', 'git']) spawnSync('chmod', ['755', join(bin, b)]);
+  const home = join(root, 'home');
+  mkdirSync(home);
+  const env = Object.fromEntries(Object.entries(childEnv({
+    PATH: `${bin}:${process.env.PATH}`, HOME: home, AI_SKILLS_HOME: join(root, 'clone'),
+    AI_SKILLS_NO_AUTOUPDATE: undefined, AI_SKILLS_REPLACE_FOREIGN: undefined,
+  })).filter(([, v]) => v !== undefined));
+  const r = spawnSync('bash', [join(REPO, 'install.sh')], { encoding: 'utf8', timeout: 20000, env });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /automatic updates were NOT scheduled/);
+  assert.match(r.stderr, /AI_SKILLS_REPLACE_FOREIGN=1/);
+  assert.ok(read(argLog).includes(' install --link'), 'the install ran');
+  assert.ok(!read(argLog).includes('autoupdate'), 'nothing was scheduled');
+});

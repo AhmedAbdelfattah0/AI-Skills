@@ -138,7 +138,12 @@ fi
 echo
 REPLACE=()
 [ "${AI_SKILLS_REPLACE_FOREIGN:-}" = "1" ] && REPLACE=(--replace-foreign)
-node "$HOME_DIR/scripts/cli.mjs" install --link --target "$TARGET" ${REPLACE[@]+"${REPLACE[@]}"}
+if ! node "$HOME_DIR/scripts/cli.mjs" install --link --target "$TARGET" ${REPLACE[@]+"${REPLACE[@]}"}; then
+  echo "❌ the install did not finish cleanly (see above); automatic updates were NOT scheduled." >&2
+  echo "   If a skill was left alone because something else has its name, move that entry yourself," >&2
+  echo "   or re-run with AI_SKILLS_REPLACE_FOREIGN=1 to back it up (never delete it) and install." >&2
+  exit 1
+fi
 
 if [ "${AI_SKILLS_NO_AUTOUPDATE:-}" = "1" ]; then
   echo "   (AI_SKILLS_NO_AUTOUPDATE=1 — nothing scheduled; run \"update\" yourself.)"
