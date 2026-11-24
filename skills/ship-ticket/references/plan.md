@@ -94,7 +94,7 @@ security risks and its gates. The one approval covers the whole plan, then
 independent tickets run in parallel; each ticket keeps its own tests,
 independent review and gates. The single approval never waives a security
 check or a per-ticket review. No wave driver exists: `scripts/wave.mjs verify|status --wave <manifest>` and `scripts/host-admit.mjs`
-are optional helpers only.
+are optional helpers only. For a sprint or an extended run, present one plan per wave and obtain all approvals in one sitting before the run ([sprint.md](sprint.md)).
 
 Remain in Plan Mode while drafting and throughout the host/counterpart debate.
 Reconcile its result there. For a policy-2 plan with an execution DAG, run
