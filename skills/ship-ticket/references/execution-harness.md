@@ -97,7 +97,11 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   `running` occupancy. It is fail-safe: any invalid snapshot, history or argument holds
   (`snapshot_unavailable` / `invalid_args`), including every non-darwin host without an injected valid
   snapshot; there is no fallback admit and it never terminates running work. HEAVY cap is 1, or 2 only
-  when healthy. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
+  when healthy. Memory pressure: level 1 is normal, level 2 (`warn`) is a NON-BLOCKING warning reported as
+  the boolean signal `pressure_warn` (not a hold reason), and only a sample at level 4 (`critical`) anywhere
+  in the window holds with `held_pressure`; level 1 and 2 samples both count as clean for hysteresis. Level 4 is a
+  pragmatic threshold, subject to real-world validation, not a proven safety boundary; swap growth, load and
+  provider errors keep their own holds. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
   `held_hysteresis`, `held_resample`. Caller contract: a host that is recovering (`held_hysteresis`)
   needs two clean samples, each at least 15 s after the previous counted one, and the next sample must
   arrive within 30 s or the recovery streak restarts. An already-open host also needs counted samples at
@@ -125,7 +129,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
   parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
   reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most
-  once every 5 minutes or ask the owner.
+  once every 5 minutes or ask the owner. An unsafe hold means a hold for memory pressure level 4, swap growth, high load, provider errors or an unusable snapshot; pressure level 2 alone is never a hold.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers
