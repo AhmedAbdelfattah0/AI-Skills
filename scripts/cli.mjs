@@ -2,7 +2,7 @@
 // Cross-platform skill manager for this repo (Windows / macOS / Linux).
 // Dependency-free — uses only Node built-ins. Runnable three ways:
 //
-//   npx github:AhmedAbdelfattah0/AI-Skills <cmd>   # no clone needed (installs by copy)
+//   npx github:AhmedAbdelfattah0/agentic-software-factory <cmd>   # no clone needed (installs by copy)
 //   node scripts/cli.mjs <cmd>                     # from a clone
 //   ai-skills <cmd>                                # after `npm i -g` or `npm link`
 //
@@ -1724,14 +1724,14 @@ Autoupdate flags:
   stdout, which a SessionStart hook would inject into your session.
 
 Examples:
-  npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
-  npx github:AhmedAbdelfattah0/AI-Skills install --target codex
+  npx github:AhmedAbdelfattah0/agentic-software-factory install ship-ticket generate-ticket
+  npx github:AhmedAbdelfattah0/agentic-software-factory install --target codex
   node scripts/cli.mjs install --target all
   node scripts/cli.mjs install vapt --target claude,codex
   node scripts/cli.mjs list
   node scripts/cli.mjs update --check
   node scripts/cli.mjs update --prune
-  npx github:AhmedAbdelfattah0/AI-Skills update
+  npx github:AhmedAbdelfattah0/agentic-software-factory update
   node scripts/cli.mjs autoupdate --install`);
 }
 

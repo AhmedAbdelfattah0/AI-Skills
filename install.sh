@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-line installer for this skill library:
 #
-#   curl -fsSL https://raw.githubusercontent.com/AhmedAbdelfattah0/AI-Skills/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/AhmedAbdelfattah0/agentic-software-factory/main/install.sh | bash
 #
 # It clones (or fast-forwards) the repo into a managed location, symlinks every
 # skill into your agents' skills directories, and turns on automatic updates.
@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-REPO="https://github.com/AhmedAbdelfattah0/AI-Skills.git"
+REPO="https://github.com/AhmedAbdelfattah0/agentic-software-factory.git"
 HOME_DIR="${AI_SKILLS_HOME:-$HOME/.ai-skills}"
 REF="${AI_SKILLS_REF:-main}"
 TARGET="${AI_SKILLS_TARGET:-claude}"
