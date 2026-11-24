@@ -159,8 +159,9 @@ node scripts/cli.mjs install
 > **Do not run bare `npx` package names.** `ai-skills` and `ai-agent-skills` on the npm registry are
 > published by other people and are not this project. Always use one of the three forms above.
 
-Other tools take `--target codex|gemini|antigravity|all`. The installer never deletes something it
-does not own. Full options, collision handling and automatic updates:
+Other tools take `--target codex|gemini|antigravity|all`. The installer (`install`) never deletes something it
+does not own; `update --adopt` and `update --force` are explicit opt-ins that replace contents without a
+backup. Full options, collision handling and automatic updates:
 [docs/installation.md](docs/installation.md).
 
 ## Verified and not yet exercised

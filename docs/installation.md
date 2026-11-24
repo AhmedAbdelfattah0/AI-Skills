@@ -62,7 +62,7 @@ that automatic updates were not scheduled.
 `./scripts/install.sh` writes no manifest, so it recognises only its own links: a second `--copy` run
 skips its earlier copies, each `--copy --replace-foreign` run moves the previous copies into a new
 backup (backups accumulate until you remove them), and a copy made that way reads as unknown
-provenance: the first `update` leaves it alone and says `--adopt` takes it over. Use the Node CLI if that matters. Source: `scripts/cli.mjs` and the installer
+provenance: `update` leaves it alone; once the library changes that skill, `update` says `--adopt` takes it over. Use the Node CLI if that matters. Source: `scripts/cli.mjs` and the installer
 tests in `scripts/cli.test.mjs`.
 
 ## Updating
@@ -79,7 +79,7 @@ node scripts/cli.mjs update --prune   # also remove skills deleted upstream
 | Symlink elsewhere | Reports it, never touches it. |
 | Copy that matches the record | Refreshes it. |
 | Copy you edited | Leaves it; `--force` overwrites it (your edits are lost; there is no backup). |
-| Directory nobody recorded | Leaves it; `--adopt` takes it over. |
+| Directory nobody recorded | Leaves it; `--adopt` takes it over (its contents are replaced; there is no backup). |
 
 The source refresh is `git pull --ff-only` from a clean tree with an upstream; it never stashes,
 rebases or discards. Copies are staged and swapped by rename, so an interrupted run leaves the working
