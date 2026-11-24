@@ -109,7 +109,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { planNarrativeDigest, validateEngineDag, init, status, drive, resume, mark, acquireLock,
-  writeStateAtomic } from './run-engine.mjs';
+  writeStateAtomic, preflight } from './run-engine.mjs';
 import { gateReview, gateShipReady } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
@@ -185,6 +185,22 @@ test('AC1 validateEngineDag rejects unknown fields in run config and in a node',
   assert.throws(() => validateEngineDag({ ...dag, nodes: [{ ...dag.nodes[0], sneaky: 1 }] }), { code: 'dag_invalid' });
   assert.throws(() => validateEngineDag({ ...dag, extra: {} }), { code: 'dag_invalid' });
   assert.throws(() => validateEngineDag({ ...dag, schema: 'ship-ticket-engine-dag-v0' }), { code: 'dag_invalid' });
+});
+
+// STAB-410 F-9: the read/write dependency check is plan-time only (preflight); init and validateEngineDag never run it,
+// so an in-flight or legacy run whose DAG has that shape is untouched.
+test('[F-9] preflight refuses a node that reads what a dependent writes (dag_read_write_dependency); validateEngineDag and init on the same legacy DAG still succeed', async (t) => {
+  const shape = [{ id: 'tests', reads: ['src/fix.txt'], writes: ['src/fix.spec.txt'] }, { id: 'fix', deps: ['tests'], writes: ['src/fix.txt'] }];
+  const fx = fixture(t, { nodes: shape });
+  await assert.rejects(() => preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile }),
+    (e) => e.code === 'dag_read_write_dependency' && /\btests\b/.test(e.message) && /\bfix\b/.test(e.message) && e.message.includes('src/fix.txt'));
+  assert.equal(existsSync(fx.stateFile()), false, 'preflight wrote no state');
+  assert.equal(validateEngineDag(JSON.parse(readFileSync(fx.dagFile, 'utf8'))).nodes.length, 2, 'validateEngineDag does not run the check');
+  const r = await init(fx.ctx());
+  assert.equal(r.binding, 'plan', 'init on the legacy DAG binds as before');
+  // the read-after-write-by-predecessor shape passes the check: preflight reaches its next check (the security policy)
+  const ok = fixture(t, { nodes: STAGED });
+  await assert.rejects(() => preflight({ repoRoot: ok.repo, ticket: 'T-1', dagFile: ok.dagFile }), (e) => e.code === 'security_policy_required');
 });
 
 test('AC1 init binds the approved narrative and a DAG digest listed in the plan', async (t) => {

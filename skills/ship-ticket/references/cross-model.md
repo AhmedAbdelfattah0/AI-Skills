@@ -211,7 +211,9 @@ A blocker/major is closed only when a verified counterpart response object lists
 The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval. Escalate only for a
 genuine unresolved decision, stagnation after a strategy change, or an actual
 resource or provider limit. Cost (calls, minutes, tokens when the carrier reports
-them) is shown in section 7 as information.
+them) and timing are recorded only in the plan-resident attestation (`metrics`), outside the digest; section 7 holds the
+attestation reference and the findings ledger of the substantive rounds, so recording cost never needs another
+confirmation round.
 
 ### Initial challenge
 
@@ -244,7 +246,7 @@ occur during debate.
 
 ### Responses, outcomes and the attestation
 
-The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
+The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object; otherwise record the round `rejected` with its evidence kept (see the rounds below) and re-ask with a new `request_id`. A schema-valid answer bound to the wrong `request_id`, `plan_version` or `plan_digest` can be recorded neither `rejected` nor `completed`: re-asking then means leaving that round out of the attestation, and the verifier fails closed on any record of it. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
 
 The brief starts with the three lines `request_id: <id>`, `plan_version: <v>` and
 `plan_digest: <digest>`, each exactly once, and states the schema:
@@ -281,11 +283,11 @@ Outcomes, independent of the carrier:
   structures could not be made sound. A provider or resource failure (a quota, a
   permission error, a timeout) is recorded as `UNRESOLVED` with
   `incomplete_review: true`: the retained relay result of the last attempt must
-  show the actual failure (status not `completed`, or exit code not 0), the
+  show the actual failure (status not `completed`, or exit code not 0), or the last round is `rejected` (its relay completed but the answer failed the schema), the
   findings may be empty, `debate_qualified` is false, and it reaches START only
   through the owner's disposition of id `LIMIT`; no text is classified.
   `incomplete_review` is derived from the retained results (the last round has no
-  retained relay result, or a failed one); a host flag that disagrees is refused.
+  retained relay result, a failed one, or is `rejected`); a host flag that disagrees is refused.
   A dispatch failure that left no `result.json` at all has no valid outcome except `SKIPPED` with the owner exception: as before, use the substitute carrier, `WAIT_FOR_USER`, or an owner
   exception (fail closed, no new outcome). Every untrusted JSON value (the
   attestation, each response object, the dispositions line and each retained
@@ -304,7 +306,11 @@ Outcomes, independent of the carrier:
 "Same-provider" is stated only where the identities really share a provider,
 computed from `provider:model`, not from the host name.
 
-Freeze the narrative before the final confirmation request: section 7 (the
+Section 7 holds only the attestation reference (the `debate_id` named in the dispositions line, fixed before the final confirmation request) and the findings ledger of the substantive rounds (besides
+the dispositions line below), frozen before the final confirmation request; rejected rounds, retries, timing and any other
+attestation bookkeeping live only in the plan-resident attestation, outside the digest, so recording them never needs
+another confirmation round. Any edit of the narrative is a plan change and needs the counterpart's confirmation of the
+new digest. Freeze the narrative before the final confirmation request: section 7 (the
 human-readable ledger, never authoritative) and the ONE visible line
 `debate-dispositions-v1: <canonical JSON>` at column 1, printed by
 `node scripts/brief.mjs debate-serialize --dispositions <json>`. That line is the
@@ -320,7 +326,7 @@ inside the RUN-STATE body, printed by `node scripts/brief.mjs debate-serialize -
 (deterministic and comment-safe; never a line starting with `{`). The attestation
 is normalized across carriers: `carrier: {agent, kind: codex_relay | claude_relay | native_session, identity, degraded}`,
 and per round `n`, `plan_version`, `request_id`, `status` (the actual
-`completed|failed|timeout|aborted|unavailable`), `session_id`, `read_only`, the
+`completed|rejected|failed|timeout|aborted|unavailable`; `rejected` means the relay completed with exit code 0 but the answer is not a valid counterpart-response-v1 object: it carries no `verdict`, its `brief`, `result` and `events` stay hash-bound with the same exit-code and session binding as a completed round, it is never in the ledger and never the final AGREE, and a rejected last round makes `incomplete_review` true; the checker re-parses the retained answer against the schema alone and refuses a `rejected` round whose answer is valid, `debate_rejected_valid`), `session_id`, `read_only`, the
 relay out-dir as provenance only, bundle-relative `files` with their `sha256`
 (`brief.txt`, `result.json`, `events.jsonl` for a relay; the returned message for a
 native session), or `dispatch_error: {class, text}` when no result exists. Keep the

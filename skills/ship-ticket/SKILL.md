@@ -456,8 +456,8 @@ format on Codex. A wave uses one `ExitPlanMode`. Hold `WAIT_FOR_USER` until
 answered. Chat text, an `AskUserQuestion` answer and a typed "approve" are not
 plan approval; `AskUserQuestion` may only resolve planning questions before
 `ExitPlanMode`. Every counterpart answer is exactly one counterpart-response-v1 JSON
-object, and free text is never approval evidence: a non-conforming answer fails the
-round, and the host re-asks with a new `request_id`. The owner-approved dispositions
+object, and free text is never approval evidence: a non-conforming answer is recorded
+as a `rejected` round with its evidence kept, and the host re-asks with a new `request_id`. The owner-approved dispositions
 are one `debate-dispositions-v1:` narrative line, never section 7 Markdown. Do not exit
 Plan Mode before the debate has been reconciled and
 `brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` plan is presented for the owner's disposition; see
@@ -466,7 +466,9 @@ attestation line's sha256 in the text accompanying `ExitPlanMode`, and do not
 treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text. The `debate-dispositions-v1:` line must also be in the plan text itself, so a surface that shows only the plan shows it.
 Before `ExitPlanMode` on a policy-2 plan with an execution DAG, run
 `scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`.
-It checks the plan and DAG as `init` will, with no START and no write. Fix any
+It checks the plan and DAG as `init` will, with no START and no write, and also
+refuses a node that reads what a transitive dependent writes (`dag_read_write_dependency`,
+[references/plan.md](references/plan.md)). Fix any
 refusal it prints before presenting the plan
 ([references/security-risk.md](references/security-risk.md) section 6).
 

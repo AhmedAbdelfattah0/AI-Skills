@@ -112,21 +112,23 @@ function round(bundle, n, o = {}) {
   mkdirSync(dir, { recursive: true });
   const rec = { n, plan_version, request_id, status, session_id: session, read_only: o.read_only ?? true, out_dir: `/tmp/relay-out/r${n}`, started_at: o.started_at ?? '2026-11-22T10:00:00Z', ended_at: o.ended_at ?? '2026-11-22T10:05:00Z', files: {}, sha256: {}, verdict };
   rec.plan_digest = plan_digest;
-  if (o.exit_code !== undefined) rec.exit_code = o.exit_code; else rec.exit_code = status === 'completed' ? 0 : 1;
+  if (o.exit_code !== undefined) rec.exit_code = o.exit_code; else rec.exit_code = status === 'completed' || status === 'rejected' ? 0 : 1;
   if (o.dispatch_error) { rec.dispatch_error = o.dispatch_error; rec.files = {}; rec.sha256 = {}; delete rec.session_id; return rec; }
   const briefText = o.brief ?? [`request_id: ${request_id}`, `plan_version: ${plan_version}`, `plan_digest: ${plan_digest}`, '', 'Challenge the plan.'].join('\n');
   const findings = o.findings ?? (verdict === 'AGREE' ? (o.concede ?? ['P1']).map((id) => ({ id, status: 'confirmed' })) : [{ id: 'P1', status: 'new', severity: 'major' }]);
-  const message = o.message ?? (status === 'completed' ? respond({ verdict, request_id: o.echo_request_id ?? request_id, plan_version, plan_digest: o.echo_digest ?? plan_digest, findings }) : '');
+  // F-7: a `rejected` round's relay completed with exit 0 but its answer fails the schema (default: the SCRUM-410 slip, a note over 2000 characters).
+  const message = o.message ?? (status === 'completed' ? respond({ verdict, request_id: o.echo_request_id ?? request_id, plan_version, plan_digest: o.echo_digest ?? plan_digest, findings })
+    : status === 'rejected' ? respond({ verdict: 'CHANGES_REQUESTED', request_id, plan_version, plan_digest, findings: [{ id: 'P1', status: 'maintained', note: 'n'.repeat(2001) }] }) : '');
   const put = (name, file, text) => { writeFileSync(join(dir, file), text); rec.files[name] = `r${n}/${file}`; rec.sha256[name] = sha(Buffer.from(text)); };
   if (kind === 'native_session') {
     put('message', 'message.txt', message);
     return rec;
   }
   put('brief', 'brief.txt', briefText);
-  const resultStatus = o.result_status ?? (status === 'unavailable' ? 'codex_unavailable' : status);
+  const resultStatus = o.result_status ?? (status === 'unavailable' ? 'codex_unavailable' : status === 'rejected' ? 'completed' : status);
   const result = kind === 'claude_relay'
     ? { schema: 1, tool: 'claude', workdir: o.workdir ?? WORKDIR, readOnly: o.readOnly ?? true, sessionId: o.result_session ?? session, status: resultStatus, exitCode: o.result_exit ?? rec.exit_code, finalMessage: message }
-    : { schema: 1, workdir: o.workdir ?? WORKDIR, sandbox: o.sandbox ?? 'read-only', threadId: o.result_session ?? session, status: resultStatus, exitCode: o.result_exit ?? rec.exit_code, finalMessage: message, ...(status !== 'completed' || o.result_error ? { error: o.result_error ?? 'usage limit reached (429)' } : {}) };
+    : { schema: 1, workdir: o.workdir ?? WORKDIR, sandbox: o.sandbox ?? 'read-only', threadId: o.result_session ?? session, status: resultStatus, exitCode: o.result_exit ?? rec.exit_code, finalMessage: message, ...((status !== 'completed' && status !== 'rejected') || o.result_error ? { error: o.result_error ?? 'usage limit reached (429)' } : {}) };
   if (kind === 'claude_relay') rec.auth_method = o.auth_method ?? 'claude.ai';
   if (o.omitIds) { delete result.exitCode; delete result.threadId; delete result.sessionId; delete rec.exit_code; delete rec.session_id; }
   if (o.startedAt) Object.assign(result, { startedAt: o.startedAt, finishedAt: o.finishedAt });
@@ -812,6 +814,35 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { over: { findings: [FIND({ closed_round: 1 })] } }), code: 'debate_attestation_invalid' })],
   ['no finding only the attestation names', "for (const id of attById.keys()) if (!ledger.has(id)) add('debate_attestation_invalid'", "for (const id of attById.keys()) if (false) add('debate_attestation_invalid'",
     (t) => ({ x: converged(t, { over: { findings: [FIND(), FIND({ id: 'P7', severity: 'minor', status: 'open', closed_by: undefined, closed_round: undefined, evidence: undefined, host_position: 'h', counterpart_position: 'c' })] } }), code: 'debate_attestation_invalid' })],
+  // STAB-410 F-7: each new refusal of a `rejected` round; the mutant must accept the defect cleanly
+  ['F-7: a rejected record whose answer is valid is refused', "if (valid) add('debate_rejected_valid'", "if (false) add('debate_rejected_valid'",
+    (t) => ({ x: withRejected(t, { r2: { message: validR2() } }), code: 'debate_rejected_valid' })],
+  ['F-7: the result re-parse is schema-only (no request binding)', "answers.push(['result', parseResponse(resultAnswer, null)]);", "answers.push(['result', parseResponse(resultAnswer, expect)]);",
+    (t) => ({ x: withRejected(t, { r2: { message: validR2({ request_id: 'req-other' }) } }), code: 'debate_rejected_valid' })],
+  ['F-7 r1: the native message re-parse is schema-only (Fable M-A)', "answers.push(['message', parseResponseBytes(got.message, null)]);", "answers.push(['message', parseResponseBytes(got.message, expect)]);",
+    (t) => ({ x: nativeConverged(t, { message: validP3({ request_id: 'req-other' }) }), code: 'debate_rejected_valid' })],
+  ['F-7 r1: the result source is re-parsed', "if (resultAnswer !== undefined) answers.push(", "if (false) answers.push(",
+    (t) => ({ x: withRejected(t, { r2: { message: validR2() } }), code: 'debate_rejected_valid' })],
+  ['F-7 r1: the message source is re-parsed', "if (got.message) answers.push(", "if (false) answers.push(",
+    (t) => ({ x: nativeConverged(t, { message: validP3() }), code: 'debate_rejected_valid' })],
+  ['F-7 r1: a native-session rejected round carries no result file', "if (r.status === 'rejected' && kind === 'native_session' && files.result) add(", 'if (false) add(',
+    (t) => ({ x: nativeConverged(t, { result: {} }), code: 'debate_evidence_mismatch' })],
+  ['F-7: a rejected last round is an incomplete review', "res.finalMessage : null; out.relay.status = 'rejected'; }", "res.finalMessage : null; }",
+    (t) => ({ x: unresolved(t, { r2: { status: 'rejected' }, over: { incomplete_review: false } }), code: 'debate_attestation_invalid' })],
+  ['F-7: a rejected round needs the evidence of a completed one', "const need = !answered ? []", 'const need = true ? []',
+    (t) => ({ x: withRejected(t, { r2: { noResult: true } }), code: 'debate_evidence_missing' })],
+  ['F-7: a rejected round maps to a completed relay result', "const want = r.status === 'rejected' ? 'completed' : r.status;", "const want = r.status === 'rejected' ? res.status : r.status;",
+    (t) => ({ x: withRejected(t, { r2: { result_status: 'failed' } }), code: 'debate_evidence_mismatch' })],
+  ['F-7: a rejected round completed with exit 0', "if (r.status === 'rejected' && (r.exit_code !== 0 || res.exitCode !== 0)) add(", 'if (false) add(',
+    (t) => ({ x: withRejected(t, { r2: { exit_code: 1, result_exit: 1 } }), code: 'debate_evidence_mismatch' })],
+  ['F-7: a rejected round carries its session id', "if (r.status === 'rejected' && !nonEmpty(r.session_id))", 'if (false && !nonEmpty(r.session_id))',
+    (t) => ({ x: withRejected(t, { r2: { session: '' } }), code: 'debate_carrier_invalid' })],
+  ['F-7: a rejected round records no verdict', "if (r.status === 'rejected' && r.verdict !== null", 'if (false && r.verdict !== null',
+    (t) => ({ x: withRejected(t, { r2: { verdict: 'AGREE' } }), code: 'debate_attestation_invalid' })],
+  ['F-7: a rejected Codex round is bound to its thread', "if (answered && res.threadId !== r.session_id)", "if (r.status === 'completed' && res.threadId !== r.session_id)",
+    (t) => ({ x: withRejected(t, { r2: { result_session: 'thread-9' } }), code: 'debate_carrier_invalid' })],
+  ['F-7: a rejected Claude round is bound to its session', "if (answered && res.sessionId !== r.session_id)", "if (r.status === 'completed' && res.sessionId !== r.session_id)",
+    (t) => ({ x: claudeRejected(t, { result_session: 's9' }), code: 'debate_carrier_invalid' })],
   ['no symlink inside a bundle', "if (lstatSync(p).isSymbolicLink()) return { code: 'debate_evidence_mismatch'", "if (false) return { code: 'debate_evidence_mismatch'",
     (t) => { const x = converged(t); spawnSync('mv', [join(x.bundle, 'r2'), join(x.bundle, 'r2real')]); symlinkSync('r2real', join(x.bundle, 'r2')); return { x, code: 'debate_evidence_mismatch' }; }],
   ['dispositions-line outcome matches the attestation', "if (D && D.outcome !== outcome) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
@@ -1858,4 +1889,227 @@ test('[c1-bounds] JSON_BOUNDS are pinned: exactly N passes and N+1 is refused fo
   assert.match(p({ ['k'.repeat(1_000_001)]: 1 }) ?? '', /key longer than 1000000/);
   for (const v of [Infinity, -Infinity, NaN]) assert.equal(p({ a: [v] }), 'a non-finite number', String(v));
   assert.equal(p({ a: [1e308, -0, 0.5] }), null);
+});
+
+// ================================================================== STAB-410 F-7: a completed relay round whose answer fails the schema is `rejected`
+// The relay completed with exit 0, but the retained answer is not a valid counterpart-response-v1 object. The round keeps its
+// hash-bound evidence (brief, result, events), is never in the ledger and can never be the final AGREE; the verifier re-parses
+// the retained answer (schema only, no request binding) and refuses a `rejected` record whose answer is valid.
+const notAny = (r) => r.errors.every((e) => !/is not one of/.test(e.message));
+const msgOf = (r, re) => r.errors.some((e) => re.test(e.message));
+/** CONVERGED with a `rejected` middle round: r1 CHANGES_REQUESTED (P1 major), r2 rejected, r3 AGREE for the frozen digest. */
+function withRejected(t, { r1 = {}, r2 = {}, r3 = {}, over = {} } = {}) {
+  const narr = withResult(narrative(), over.outcome ?? 'CONVERGED');
+  const bundle = tmp(t, 'debate-bundle-');
+  const D = digestOf(narr);
+  const rounds = [round(bundle, 1, { plan_version: 'v1', ...r1 }), round(bundle, 2, { plan_version: 'v2', status: 'rejected', ...r2 }),
+    round(bundle, 3, { plan_version: 'v2', plan_digest: D, verdict: 'AGREE', request_id: 'req-final', ...r3 })];
+  const att = attestation({ plan_digest: D, rounds, final: { request_id: 'req-final', plan_version: 'v2', plan_digest: D, verdict: 'AGREE' },
+    metrics: { rounds: 3, calls: 3, minutes: 15, started_at: '2026-11-22T10:00:00Z', ended_at: '2026-11-22T10:15:00Z', tokens: null }, findings: [FIND({ closed_round: 3, evidence: 'r3 confirms' })], ...over });
+  const line = B.serializeAttestation(att);
+  return { bundle, D, att, line, narr, text: planText(narr, [line]) };
+}
+/** withRejected on the Claude relay carrier (a Codex host): every round is Claude-shaped with session s1. */
+function claudeRejected(t, r2 = {}) {
+  const claude = { agent: 'claude', kind: 'claude_relay', identity: 'claude:opus-5-5', degraded: false };
+  const c = { kind: 'claude_relay', session: 's1' };
+  return withRejected(t, { r1: c, r2: { ...c, ...r2 }, r3: c, over: { host: { agent: 'codex', identity: 'codex:gpt-5.5' }, carrier: claude } });
+}
+/** A schema-valid answer for round 2 of withRejected (it maintains P1): recording it `rejected` would drop a maintained finding. */
+const validR2 = (o = {}) => respond({ verdict: 'CHANGES_REQUESTED', request_id: 'req-2', plan_version: 'v2', plan_digest: OLD_DIGEST, findings: [{ id: 'P1', status: 'maintained' }], ...o });
+/** The degraded native-session carrier (Fable), UNRESOLVED: r1 opens P3, r2 is `rejected` (the last round). */
+function nativeRejected(t, r2 = {}) {
+  const fable = { agent: 'fable', kind: 'native_session', identity: 'claude:fable', degraded: true };
+  const narr = withResult(narrative({ carrier: { degraded: true, degradationAck: B.DEGRADED_ACK } }), 'UNRESOLVED');
+  const bundle = tmp(t, 'debate-bundle-');
+  const rounds = [round(bundle, 1, { kind: 'native_session', plan_version: 'v1', session: 'host-session-1', findings: [{ id: 'P3', status: 'new', severity: 'major' }] }),
+    round(bundle, 2, { kind: 'native_session', plan_version: 'v2', session: 'host-session-1', status: 'rejected', ...r2 })];
+  const att = attestation({ outcome: 'UNRESOLVED', plan_digest: digestOf(narr), carrier: fable, rounds, final: null, incomplete_review: true,
+    findings: [FIND({ id: 'P3', status: 'open', closed_by: undefined, closed_round: undefined, host_position: 'A', counterpart_position: 'B' })] });
+  const line = B.serializeAttestation(att);
+  return { bundle, att, line, narr, text: planText(narr, [line]) };
+}
+
+/**
+ * Round 1 review (Fable PROBE-5): the degraded native-session carrier, CONVERGED: r1 CHANGES_REQUESTED (P3 major), r2 `rejected`,
+ * r3 AGREE confirming P3. `message` is r2's retained message (default: invalid, the note slip); `result` adds a result.json to the
+ * native round (a relay file a native session never produces).
+ */
+function nativeConverged(t, { message, result, r2 = {} } = {}) {
+  const fable = { agent: 'fable', kind: 'native_session', identity: 'claude:fable', degraded: true };
+  const narr = withResult(narrative({ carrier: { degraded: true, degradationAck: B.DEGRADED_ACK } }), 'CONVERGED');
+  const bundle = tmp(t, 'debate-bundle-');
+  const D = digestOf(narr);
+  const n = { kind: 'native_session', session: 'host-session-1' };
+  const rec2 = round(bundle, 2, { ...n, plan_version: 'v2', status: 'rejected', ...(message !== undefined ? { message } : {}), ...r2 });
+  if (result) {
+    const text = JSON.stringify({ schema: 1, workdir: WORKDIR, status: 'completed', exitCode: 0, finalMessage: 'not json', ...result });
+    writeFileSync(join(bundle, 'r2', 'result.json'), text);
+    rec2.files.result = 'r2/result.json'; rec2.sha256.result = sha(Buffer.from(text));
+  }
+  const rounds = [round(bundle, 1, { ...n, plan_version: 'v1', findings: [{ id: 'P3', status: 'new', severity: 'major' }] }), rec2,
+    round(bundle, 3, { ...n, plan_version: 'v2', plan_digest: D, verdict: 'AGREE', request_id: 'req-final', concede: ['P3'] })];
+  const att = attestation({ carrier: fable, plan_digest: D, rounds, final: { request_id: 'req-final', plan_version: 'v2', plan_digest: D, verdict: 'AGREE' },
+    findings: [FIND({ id: 'P3', closed_round: 3, evidence: 'r3 confirms' })] });
+  const line = B.serializeAttestation(att);
+  return { bundle, D, att, line, narr, text: planText(narr, [line]) };
+}
+const validP3 = (o = {}) => respond({ verdict: 'CHANGES_REQUESTED', request_id: 'req-2', plan_version: 'v2', plan_digest: OLD_DIGEST, findings: [{ id: 'P3', status: 'maintained' }], ...o });
+
+test('[F-7 r1-A] PROBE-5: a rejected native-session round is refused when ANY retained answer is valid; a native round carries no result file', (t) => {
+  // control: an invalid message and no result file converges (the rejected round stays out of the ledger)
+  assert.deepEqual(pre(nativeConverged(t)).errors, []);
+  // PROBE-5: a valid retained message beside a bogus result.json (finalMessage 'not json') must not reach CONVERGED
+  const probe = pre(nativeConverged(t, { message: validP3(), result: {} }));
+  assert.equal(probe.ok, false);
+  assert.ok(codes(probe).includes('debate_rejected_valid'), JSON.stringify(probe.errors));
+  assert.equal(probe.debate_qualified, false);
+  // the message source alone, also with a foreign request binding (schema-only re-parse)
+  assert.ok(codes(pre(nativeConverged(t, { message: validP3() }))).includes('debate_rejected_valid'));
+  assert.ok(codes(pre(nativeConverged(t, { message: validP3({ request_id: 'req-other' }) }))).includes('debate_rejected_valid'));
+  // a result file on a native-session rejected round is refused even when every answer is invalid
+  const extra = pre(nativeConverged(t, { result: {} }));
+  assert.ok(codes(extra).includes('debate_evidence_mismatch') && msgOf(extra, /native-session round carries no result file/), JSON.stringify(extra.errors));
+  // a relay round with a valid answer in an extra message file is refused too (every retained answer is re-parsed)
+  const x = withRejected(t);
+  const m = validR2();
+  writeFileSync(join(x.bundle, 'r2', 'message.txt'), m);
+  const att = { ...x.att, rounds: x.att.rounds.map((r) => (r.n === 2 ? { ...r, files: { ...r.files, message: 'r2/message.txt' }, sha256: { ...r.sha256, message: sha(Buffer.from(m)) } } : r)) };
+  assert.ok(codes(pre(x, planText(x.narr, [B.serializeAttestation(att)]))).includes('debate_rejected_valid'));
+});
+
+test('[F-7a] a completed round with a non-conforming answer, recorded `rejected`, passes debate-check and stays out of the ledger', (t) => {
+  const x = withRejected(t);
+  const r = pre(x);
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.outcome, 'CONVERGED');
+  assert.equal(r.debate_qualified, true);
+  // the rejected answer would have opened a blocker P9 (and broken the note limit): it is never read into the ledger
+  const p9 = respond({ verdict: 'CHANGES_REQUESTED', request_id: 'req-2', plan_version: 'v2', plan_digest: OLD_DIGEST, findings: [{ id: 'P9', status: 'new', severity: 'blocker', note: 'n'.repeat(2001) }] });
+  const y = withRejected(t, { r2: { message: p9 } });
+  assert.deepEqual(pre(y).errors, [], 'P9 is not in the derived ledger');
+  for (const message of ['AGREE, looks good.', '```json\n{}\n```', '']) assert.deepEqual(pre(withRejected(t, { r2: { message } })).errors, [], JSON.stringify(message));
+  // the Claude relay shape too
+  assert.deepEqual(pre(claudeRejected(t)).errors, [], 'claude_relay');
+});
+
+test('[F-7 START] a plan with a rejected round passes start-check from the retained debate bundle alone (the scratch bundle deleted)', (t) => {
+  const x = withRejected(t);
+  const kept = retain(t, x);
+  rmSync(x.bundle, { recursive: true, force: true });
+  const s = sc(planText(x.narr, [x.line, startLine(x)]), kept);
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.ok, true);
+  const n = nativeConverged(t);
+  const nk = retain(t, n);
+  rmSync(n.bundle, { recursive: true, force: true });
+  assert.deepEqual(sc(planText(n.narr, [n.line, startLine(n)]), nk).errors, [], 'native-session carrier');
+});
+
+test('[F-7b] anti-cherry-pick: a `rejected` record whose retained answer is valid is refused (debate_rejected_valid), also when its request binding differs', (t) => {
+  const x = withRejected(t, { r2: { message: validR2() } });
+  const r = pre(x);
+  assert.ok(codes(r).includes('debate_rejected_valid'), JSON.stringify(r.errors));
+  assert.equal(r.ok, false);
+  // schema-only re-parse: a valid object bound to another request is still a valid answer, never a rejection
+  for (const o of [{ request_id: 'req-other' }, { plan_digest: `sha256:${'c'.repeat(64)}` }, { plan_version: 'v9' }]) {
+    assert.ok(codes(pre(withRejected(t, { r2: { message: validR2(o) } }))).includes('debate_rejected_valid'), JSON.stringify(o));
+  }
+  // an AGREE recorded as rejected, too
+  assert.ok(codes(pre(withRejected(t, { r2: { message: validR2({ verdict: 'AGREE', findings: [] }) } }))).includes('debate_rejected_valid'));
+});
+
+test('[F-7c] a `rejected` last round makes incomplete_review true; with CONVERGED it is refused, never the final AGREE', (t) => {
+  // CONVERGED whose last round (the claimed final AGREE) is rejected
+  const narr = withResult(narrative(), 'CONVERGED');
+  const bundle = tmp(t, 'debate-bundle-');
+  const D = digestOf(narr);
+  const agreeBad = respond({ verdict: 'AGREE', request_id: 'req-final', plan_version: 'v2', plan_digest: D, findings: [{ id: 'P1', status: 'confirmed', note: 'n'.repeat(2001) }] });
+  const rounds = [round(bundle, 1, { plan_version: 'v1' }), round(bundle, 2, { plan_version: 'v2', plan_digest: D, request_id: 'req-final', status: 'rejected', message: agreeBad })];
+  const mk = (over) => planText(narr, [B.serializeAttestation(attestation({ plan_digest: D, rounds, final: { request_id: 'req-final', plan_version: 'v2', plan_digest: D, verdict: 'AGREE' }, findings: [FIND({ status: 'open', closed_by: undefined, closed_round: undefined })], ...over }))]);
+  for (const incomplete_review of [false, true]) {
+    const r = B.debateCheck(mk({ incomplete_review }), { bundleDir: bundle, repo: REPO });
+    assert.equal(r.ok, false);
+    assert.ok(notAny(r), `rejected is a known status: ${JSON.stringify(r.errors)}`);
+    assert.ok(codes(r).includes('debate_request_mismatch'), 'the final AGREE is not a verified response object');
+    assert.equal(r.debate_qualified, false);
+    if (!incomplete_review) assert.ok(msgOf(r, /incomplete_review must be true/), JSON.stringify(r.errors));
+    else assert.ok(msgOf(r, /CONVERGED is never an incomplete review/), JSON.stringify(r.errors));
+  }
+  // UNRESOLVED with a rejected last round: an incomplete review, presentable, needing the owner's LIMIT disposition
+  const u = unresolved(t, { r2: { status: 'rejected' }, over: { incomplete_review: true } });
+  const ru = pre(u);
+  assert.deepEqual(ru.errors, []);
+  assert.deepEqual(ru.outstanding, ['P3']);
+  assert.ok(ru.pending.includes('LIMIT'), JSON.stringify(ru.pending));
+  const claimed = pre(unresolved(t, { r2: { status: 'rejected' }, over: { incomplete_review: false } }));
+  assert.ok(notAny(claimed) && msgOf(claimed, /incomplete_review must be true/), JSON.stringify(claimed.errors));
+  // the native-session carrier: a rejected last message is an incomplete review; a valid one recorded rejected is refused
+  assert.deepEqual(pre(nativeRejected(t)).errors, []);
+  assert.ok(codes(pre(nativeRejected(t, { message: respond({ verdict: 'CHANGES_REQUESTED', request_id: 'req-2', plan_version: 'v2', plan_digest: OLD_DIGEST, findings: [{ id: 'P3', status: 'maintained' }] }) }))).includes('debate_rejected_valid'));
+});
+
+test('[F-7d] a `rejected` round keeps its evidence hash-bound: tampered, missing or contradicting evidence is refused', (t) => {
+  const tampered = withRejected(t);
+  writeFileSync(join(tampered.bundle, 'r2', 'result.json'), readFileSync(join(tampered.bundle, 'r2', 'result.json'), 'utf8').replace('"status":"completed"', '"status":"completed" '));
+  assert.ok(codes(pre(tampered)).includes('debate_evidence_mismatch'), 'result bytes no longer match the recorded hash');
+  const events = withRejected(t);
+  writeFileSync(join(events.bundle, 'r2', 'events.jsonl'), '{"type":"other"}\n');
+  assert.ok(codes(pre(events)).includes('debate_evidence_mismatch'), 'events bytes no longer match');
+  assert.ok(codes(pre(withRejected(t, { r2: { noResult: true } }))).includes('debate_evidence_missing'), 'no result file');
+  const cases = [
+    [{ result_status: 'failed' }, 'debate_evidence_mismatch', /relay result says failed/],
+    [{ exit_code: 1, result_exit: 1 }, 'debate_evidence_mismatch', /rejected round needs exit code 0/],
+    [{ result_session: 'thread-9' }, 'debate_carrier_invalid', /thread thread-9 answered/],
+    [{ session: '' }, 'debate_carrier_invalid', /rejected round needs its non-empty session/],
+    [{ brief: 'request_id: other\nplan_version: v2\n' }, 'debate_request_mismatch', /the brief that was sent/],
+    [{ sandbox: 'workspace-write' }, 'debate_carrier_invalid', /not read-only/],
+    [{ verdict: 'AGREE' }, 'debate_attestation_invalid', /rejected round records no verdict/],
+  ];
+  for (const [r2, code, re] of cases) {
+    const r = pre(withRejected(t, { r2 }));
+    assert.ok(codes(r).includes(code) && msgOf(r, re) && notAny(r), `${JSON.stringify(r2)}: ${JSON.stringify(r.errors)}`);
+  }
+  // the Claude relay: another session answered the rejected round
+  const c = pre(claudeRejected(t, { result_session: 's9' }));
+  assert.ok(codes(c).includes('debate_carrier_invalid') && msgOf(c, /session s9 answered/) && notAny(c), JSON.stringify(c.errors));
+});
+
+test('[F-7e] green pins: failed/timeout/aborted/unavailable rounds and a legacy two-round CONVERGED verify as before; the status list names rejected', (t) => {
+  assert.deepEqual(pre(converged(t)).errors, [], 'legacy attestation, no rejected round');
+  for (const status of ['failed', 'timeout', 'aborted', 'unavailable']) assert.deepEqual(pre(incomplete(t, { roundOpts: { status } })).errors, [], status);
+  const x = converged(t);
+  const bogus = { ...x.att, rounds: [x.att.rounds[0], { ...x.att.rounds[1], status: 'bogus' }] };
+  const r = pre(x, planText(x.narr, [B.serializeAttestation(bogus)]));
+  assert.ok(msgOf(r, /is not one of completed, rejected, failed, timeout, aborted, unavailable/), JSON.stringify(r.errors));
+});
+
+// ================================================================== STAB-410 F-8: attestation bookkeeping lives outside the digest
+test('[F-8] adding a rejected round or changing timing leaves the narrative digest unchanged; a narrative edit changes it and the stale AGREE is refused', (t) => {
+  const x = converged(t);
+  // the same debate recorded with a rejected round between the two substantive ones (its evidence in its own directory) and new timing
+  const rej = { ...round(x.bundle, 3, { plan_version: 'v2', status: 'rejected', request_id: 'req-rej' }), n: 2 };
+  const att2 = { ...x.att, rounds: [x.att.rounds[0], rej, { ...x.att.rounds[1], n: 3 }], findings: [FIND({ closed_round: 3 })],
+    metrics: { ...x.att.metrics, rounds: 3, calls: 3, minutes: 31, ended_at: '2026-11-22T10:31:00Z' } };
+  const text2 = planText(x.narr, [B.serializeAttestation(att2)]);
+  assert.equal(B.planDigest(text2), x.D, 'the attestation line is outside the digest');
+  assert.equal(planNarrativeDigest(text2), x.D, 'the engine digest agrees');
+  const r2 = pre(x, text2);
+  assert.deepEqual(r2.errors, [], 'no reconfirmation round is needed for bookkeeping');
+  assert.equal(r2.debate_qualified, true);
+  const edited = planText(withResult(narrative({ body: 'Do the thing. Section 7 now also narrates round 2.' }), 'CONVERGED'), [B.serializeAttestation(att2)]);
+  assert.notEqual(B.planDigest(edited), x.D, 'a narrative edit is a plan change');
+  assert.ok(codes(pre(x, edited)).includes('debate_digest_mismatch'), 'the final AGREE confirmed the old digest');
+});
+
+test('[F-7/F-8] cross-model.md documents the rejected status and the section-7 rule', () => {
+  const doc = readFileSync(fileURLToPath(new URL('../references/cross-model.md', import.meta.url)), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(doc.includes('`completed|rejected|failed|timeout|aborted|unavailable`'), 'the round status enum');
+  assert.ok(doc.includes('`rejected` means the relay completed with exit code 0 but the answer is not a valid counterpart-response-v1 object'), 'rejected defined');
+  assert.ok(doc.includes('`debate_rejected_valid`'), 'the anti-cherry-pick refusal is named');
+  assert.ok(doc.includes('Section 7 holds only the attestation reference (the `debate_id` named in the dispositions line, fixed before the final confirmation request) and the findings ledger of the substantive rounds'), 'F-8 rule');
+  assert.ok(!doc.includes('predeclared attestation reference'), 'the undefined phrase is gone');
+  assert.ok(doc.includes('can be recorded neither `rejected` nor `completed`: re-asking then means leaving that round out of the attestation, and the verifier fails closed'), 'the dead end is stated');
+  assert.ok(!doc.includes('or the round fails and the host re-asks'));
+  assert.ok(doc.includes('live only in the plan-resident attestation, outside the digest'), 'F-8 rule: bookkeeping outside the digest');
 });
