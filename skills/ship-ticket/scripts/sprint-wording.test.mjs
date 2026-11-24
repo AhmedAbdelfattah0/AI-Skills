@@ -19,7 +19,7 @@ const has = (doc, sentence) => assert.ok(doc.includes(flat(sentence)), `missing:
 
 test('sprint.md has the section headings in order', () => {
   const raw = read('../references/sprint.md');
-  const heads = ['## Sprint intake and extended run are separate', '## Intake', '## Dependency and parallelism analysis',
+  const heads = ['## Sprint intake and extended run are separate', '## Intake', '## Code reality check', '## Dependency and parallelism analysis',
     '## Wave split rules', '## One consolidated question list', '## Queue file', '## Per-wave plan', '## Merge mode',
     '## Execution rules', '## Extended-run preflight', '## Cold resume', '## Final report'];
   let at = -1;
@@ -47,10 +47,35 @@ test('analysis: every inference is a GUESS shown for approval', () => {
 });
 
 test('wave split rules', () => {
-  has(sprint, '3-4 tickets per wave; 2 for a large or ELEVATED ticket.');
-  has(sprint, 'An ELEVATED ticket is isolated in its own wave.');
-  has(sprint, 'Tickets that touch migrations are serialized, never in the same wave.');
+  has(sprint, '3-4 tickets per wave; 2 for a large ticket.');
+  has(sprint, 'At most 2 ELEVATED tickets per wave, and only when they share no file, function, table or migration object, verified from the code and not guessed.');
+  has(sprint, 'only when the objects differ, the migration timestamps are pre-assigned in merge order after the latest on the base, and the wave plan says so.');
+  has(sprint, "Tickets that share a function or table go in different waves in dependency order, and the later one rebases on the earlier one's merged body.");
   has(sprint, 'A ticket with an unanswered product question is dropped from the sprint until it is answered.');
+  has(sprint, 'Every wave-plan ticket names its blocking questions or `none`. A ticket with an external prerequisite pending (sandbox, certificate, accreditation) is `waiting` and is not started in an extended run.');
+});
+
+test('code reality check classifies tickets before the split', () => {
+  has(sprint, 'compare each ticket\'s tracker status with the code and the PRs on a freshly fetched base');
+  has(sprint, '`done_in_code`: a merged PR exists but the tracker still says To Do. Exclude it; the owner decides the tracker transition.');
+  has(sprint, '`needs_rescope`: the ticket\'s premise is stale or obsolete.');
+  has(sprint, '`line-drift`: the cited paths or lines moved. Keep it; each plan re-derives positions from the current base.');
+  const raw = read('../references/sprint.md');
+  assert.ok(raw.indexOf('## Code reality check') > raw.indexOf('\n## Intake') && raw.indexOf('## Code reality check') < raw.indexOf('## Wave split rules'));
+});
+
+test('more than one open sprint: ask which one', () => {
+  has(sprint, 'If more than one sprint is open, list them and ask the owner which one; never read all of them.');
+});
+
+test('queue states, header reconciliation, cap units, verification evidence', () => {
+  has(sprint, 'States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `waiting`, `excluded`, `parked`.');
+  has(sprint, '`excluded` means not part of the run, with a kind: `done_in_code`, `owner_parked`, `open_pr`, `needs_rescope` or `merged_elsewhere`.');
+  has(sprint, '`parked` is only for a blocked ticket, an unavailable reviewer, material drift or an open question.');
+  has(sprint, 'Header: sprint or run id and name, source ids, mode (`attended|extended`), merge mode and scope, ticket counts (read, in the queue, excluded by kind) that reconcile, the queue file path, the cap, the second-reviewer check, the permissions state (yes or no, and what was granted), owner answers.');
+  has(sprint, 'Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs).');
+  has(sprint, 'recorded as pass or fail, the route (Codex or the Fable exception) and the expected runs.');
+  has(sprint, 'A `merged` or `ship_ready` entry records the PR number, the merge commit and the date it was verified.');
 });
 
 test('one consolidated question list before any plan approval', () => {
@@ -60,9 +85,7 @@ test('one consolidated question list before any plan approval', () => {
 
 test('queue file: location, never committed, header, columns, states', () => {
   has(sprint, '`<git-common-dir>/ai-skills/ship-ticket/sprints/<sprint-or-run-id>.md`. It is never committed.');
-  has(sprint, 'Header: sprint or source, mode (`attended|extended`), merge mode and scope, cap (tickets and hours), second-reviewer check result, owner answers.');
-  has(sprint, 'Table columns: wave, tickets, state, PR, parked reason, plan digests.');
-  has(sprint, 'States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `parked`.');
+  has(sprint, 'Table columns: wave, tickets, state, PR, reason, plan digests.');
 });
 
 test('queue authority: a progress record, never an execution authority', () => {
@@ -91,6 +114,7 @@ test('execution rules: next-wave trigger, blocked tickets, base drift, extended-
 test('extended-run preflight and cold resume', () => {
   has(sprint, 'Before the first wave, verify that a second reviewer can run (Codex; else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted.');
   has(sprint, 'If either check fails, do not start.');
+  has(sprint, 'Before acting it RE-CHECKS the live tracker status, the PR states and the freshly fetched base; the artifacts win over the queue when they disagree.');
   has(sprint, 'A fresh session with no conversation context reads the queue file and the existing artifacts (plan files, run logs, engine state, PR state), reconstructs progress, and names the next permitted action.');
 });
 
