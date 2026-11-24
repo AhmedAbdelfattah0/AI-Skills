@@ -62,7 +62,9 @@ call `EnterPlanMode` or `ExitPlanMode`, and take back their findings. They never
 replace Plan Mode and never present the plan. The orchestrator writes the
 complete plan to the native plan file and presents it with `ExitPlanMode`. If
 you notice you drafted without entering Plan Mode, enter it now, present the plan
-through `ExitPlanMode`, and record the miss in the run state.
+through `ExitPlanMode`, and record the miss in the run state. The PLAN debate runs
+only through the read-only relay ([cross-model.md](cross-model.md)); the relay's own
+out-dir under the host session scratchpad is the one write besides the plan file.
 
 **Only `ExitPlanMode` approves.** Chat text, an `AskUserQuestion` answer and a
 typed "approve" are not plan approval; never ask the user to type one.
@@ -143,7 +145,7 @@ The YAML header above this body carries (plain text in this template; a debate_p
      codex_route: {dispatch, fresh_result, resume, cancellation, coverage}   PLAN carrier probe: each pass|fail with class permission_denied|auth|provider|relay
      worker_width: <available concurrent workers>
      parallelism_degradations: []
-     approval_status: pending|approved   a human approval flips this, and only this
+     approval_status: recorded in START   fixed value: the START event is the approval record; never edit this header after approval
      design_ref: <SHA>                   the pin
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
      review_profile: STANDARD|ELEVATED
@@ -207,6 +209,8 @@ no producer/consumer boundary changes.>
 ```
 
 contract body: <the `contract body: sha256:<hex>` line printed by `check-pr-scope.mjs contract`>
+
+**Recording paths:** `.specs/plans/<TICKET>.md` (this plan) and the predeclared ticket-keyed `session-log.md` entry. Both are committed with the ticket, so the commit has two files more than the contract lists; they are not contract paths and are never added to the block above. State this line next to the scope when presenting it to the owner.
 
 **Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
 rationale: <independent boundaries · shared contracts · acceptance criteria per
