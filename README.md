@@ -28,8 +28,10 @@ a digest or a test.
 | [`nn-guard`](skills/nn-guard/SKILL.md) | Deterministic enforcement of the `code-quality` non-negotiable rules: an editor hook plus a CI job. |
 | [`generate-ticket`](skills/generate-ticket/SKILL.md) | Writes implementation-ready ticket content (markdown, CSV, index). It never creates items in a tracker. |
 
-General-purpose skills (design, security guidance, Cloudflare, session tools and similar) no longer
-live here. They are in [ai-agent-skills](https://github.com/AhmedAbdelfattah0/ai-agent-skills).
+General-purpose skills (design-prompts, marketing-video, project-audit, security, security-audit,
+self-healing, session-logger, session-restore) no longer live here. They are in
+[ai-agent-skills](https://github.com/AhmedAbdelfattah0/ai-agent-skills). If you installed the removed
+skills from this repository, `node scripts/cli.mjs update --prune` removes the links that are now dead.
 
 [AGENTS.md](AGENTS.md) is the canonical instruction file for anyone changing this repository.
 
@@ -43,7 +45,7 @@ flowchart LR
   H --> B["BUILD<br/>ticket branch,<br/>parallel workers"]
   B --> V["PROVE<br/>repo checks, rule pass,<br/>vapt attacks, docs, UI"]
   V --> R["REVIEW<br/>primary review +<br/>second opinion"]
-  R --> S["SHIP<br/>one commit, one PR,<br/>green CI"]
+  R --> S["SHIP<br/>one commit, one PR,<br/>then CI green"]
   R -. "one repair batch,<br/>one targeted confirmation" .-> B
 ```
 
@@ -65,8 +67,9 @@ flowchart TB
   CID --> PR2["Second opinion:<br/>Codex, else fresh same-provider session"]
   PR1 --> G3{"Review gate"}
   PR2 --> G3
-  G3 --> G4{"Ship-ready gate:<br/>candidate id unchanged,<br/>CI green"}
+  G3 --> G4{"Ship-ready gate:<br/>candidate id unchanged,<br/>local checks green"}
   G4 --> PRN["Pull request"]
+  PRN --> CI["CI green<br/>before tracker close"]
 ```
 
 Details: [docs/architecture.md](docs/architecture.md), [docs/gates-and-security.md](docs/gates-and-security.md),
@@ -137,7 +140,7 @@ one pull request. Use `generate-ticket` first when you need to write the backlog
 
 ## Installation
 
-Requires Node.js 22 or newer and `git`. The supported ways to install are these three.
+Needs `git` and Node 22+. The supported ways to install are these three.
 
 ```bash
 # A. One line, with automatic updates (macOS, Linux, WSL or Git Bash)
@@ -164,11 +167,11 @@ does not own. Full options, collision handling and automatic updates:
 
 | Area | Status | Evidence |
 |---|---|---|
-| A full ticket run, end to end, on a real product repository | Verified | Recorded run; its defects are closed in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) ("found by the first real-ticket run"). |
-| Installed engine and gates under CI on three operating systems | Verified | [`.github/workflows/validate.yml`](.github/workflows/validate.yml): CLI and harness suites on ubuntu, macOS and Windows, Node 22. |
+| Engine and gate test suites run in CI on three operating systems | Verified | [`.github/workflows/validate.yml`](.github/workflows/validate.yml): CLI and harness suites on ubuntu, macOS and Windows, Node 22. |
 | Installer protection against replacing things it does not own | Verified | Installer tests in `scripts/cli.test.mjs` (collision, backup and `--replace-foreign` cases). |
+| A full ticket run on a real repository | Partially evidenced | Exercised on a real repository; the first real run ended in a terminal review FAIL that exposed a defect, now closed in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) (issue 8). No public run record is committed. |
 | Sprint intake and wave queue | Dry run only | Procedure in [sprint.md](skills/ship-ticket/references/sprint.md); exercised as a dry run and a cold-resume test, not as a live multi-wave run. |
-| Azure DevOps path | Not exercised | `sprint.md` marks it untested until first use. |
+| Azure DevOps | Not exercised | Only sprint intake is marked untested in [sprint.md](skills/ship-ticket/references/sprint.md); single-ticket Azure DevOps use is documented but has not been exercised end to end. |
 | Unattended driver | Not exercised | No detached driver exists; extended run is an orchestration procedure, not a scheduler. |
 
 The independent second opinion currently runs on a **same-provider substitute** (a fresh session of a
@@ -190,4 +193,4 @@ Add `skills/<name>/SKILL.md`, keep the folder name equal to the frontmatter `nam
 
 Parts of `test-quality`, `docs-accuracy` and `code-quality` are adapted from
 [amElnagdy/guard-skills](https://github.com/amElnagdy/guard-skills) (MIT), with primary-source citations in
-their `references/` (`sources.md` in `test-quality` and `docs-accuracy`). License: MIT.
+their `references/` (`sources.md` in `test-quality` and `docs-accuracy`). License: MIT (see `package.json`).

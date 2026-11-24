@@ -37,7 +37,7 @@ Out of scope, as briefed: N1, N2 and N7.
 - Neither runner path compares the plan's RUN-STATE before and after the run.
 - The post-RED and post-proof `verifyBinding` (`engine-gates.mjs:38`, `:145`) checks only the narrative digest and the DAG bytes. RUN-STATE is outside the narrative by design.
 - Result: no judgment, no event and no `worker_appends` entry.
-- Reproduced by `/private/tmp/claude-501/-Users-ahmedabdelfatah-Documents-personal-projects-AI-Skills/6a0d2a76-3170-4806-8985-cba4e74bd55a/scratchpad/mut/scripts/probe-red.test.mjs`:
+- Reproduced by `<SCRATCH>/6a0d2a76-3170-4806-8985-cba4e74bd55a/scratchpad/mut/scripts/probe-red.test.mjs`:
   1. A spec file appends `{event:'RETRY', review_execution:'rx-2', predecessor:'rx-1', authorized_by:'owner'}`.
   2. `gate red` returns `red_accepted`.
   3. `drive` succeeds and review `rx-1` passes.
@@ -48,7 +48,7 @@ Out of scope, as briefed: N1, N2 and N7.
 - An append the worker makes afterwards is never recorded: the final settle returns early at `:129`.
 - `changes()` still flags the plan file as `ownership_violation`, but the forged line is honoured by `gate review`.
 - `gate review` does not check `S.judgments`. After `mark failed->pending` clears the violation, the run proceeds normally.
-- Reproduced by `/private/tmp/claude-501/-Users-ahmedabdelfatah-Documents-personal-projects-AI-Skills/6a0d2a76-3170-4806-8985-cba4e74bd55a/scratchpad/mut/scripts/probe-forge.test.mjs`:
+- Reproduced by `<SCRATCH>/6a0d2a76-3170-4806-8985-cba4e74bd55a/scratchpad/mut/scripts/probe-forge.test.mjs`:
   1. Start `drive`, then SIGKILL the engine while the worker waits.
   2. `resume` reconciles the attempt as live (`appends_recorded: true`).
   3. The worker appends RETRY and exits.

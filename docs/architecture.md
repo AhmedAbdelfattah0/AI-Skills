@@ -35,8 +35,9 @@ and `sprint.md` are opened only when named.
 | `host-admit.mjs` | Admission check before heavy work (macOS). |
 | `wave.mjs` | Wave manifest verification and status. |
 
-State lives under the target repository's Git common directory (`ai-skills/ship-ticket/`), not in
-the worktree, so it does not alter the reviewed candidate.
+Engine state, telemetry and the sprint queue live under the target repository's Git common
+directory (`ai-skills/ship-ticket/`), not in the worktree, so they do not alter the reviewed
+candidate. The append-only RUN-STATE of a ticket lives in its plan file, `.specs/plans/<ticket>.md`.
 
 ## Parallelism
 

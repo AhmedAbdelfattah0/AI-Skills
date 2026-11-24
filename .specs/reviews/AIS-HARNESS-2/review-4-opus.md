@@ -40,7 +40,7 @@ OUTCOME: FAIL
   - An editor that normalizes mixed EOLs on save.
 - At the next command, `through` is current, so the now-visible RETRY is trusted on first observation. `gate review rx-2` is then accepted.
 
-**Proof (end to end, CLI).** The probe is `/private/tmp/claude-501/-Users-ahmedabdelfatah-Documents-personal-projects-AI-Skills/6a0d2a76-3170-4806-8985-cba4e74bd55a/scratchpad/r4/m2/scripts/probe-cr-e2e.test.mjs`. It runs on an unmodified copy of HEAD's scripts, and it passes:
+**Proof (end to end, CLI).** The probe is `<SCRATCH>/6a0d2a76-3170-4806-8985-cba4e74bd55a/scratchpad/r4/m2/scripts/probe-cr-e2e.test.mjs`. It runs on an unmodified copy of HEAD's scripts, and it passes:
 1. A RED spec appends the raw text `{"event":"NOTE",…}\r{"event":"RETRY",…}`.
 2. `gate red` returns `red_accepted`, with no judgment and `authority.untrusted == []`, so the line was never classified. The engine's `runStateEvents` sees no RETRY.
 3. `drive` runs, and `gate review rx-1` PASS is accepted. The lone CR is still present: the engine's writes preserved it.

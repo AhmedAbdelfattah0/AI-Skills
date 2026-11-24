@@ -8,7 +8,7 @@
 | RED | For security-sensitive work, a failing test proving the secure behaviour exists before any production path is written. | `gate.mjs` |
 | PROVE | The repository's own commands, applicable static rules, runtime attacks, docs and UI evidence. | `references/prove.md` |
 | Review | Primary review plus second opinion on an identified candidate. | `gate.mjs`, `candidate-id.mjs` |
-| Ship-ready | Candidate id unchanged since review, scope and CI checks satisfied before the commit. | `ship-ready-check.mjs`, `check-pr-scope.mjs` |
+| Ship-ready | Candidate id unchanged since review and local checks and scope satisfied before the commit. CI is checked after the pull request exists. | `ship-ready-check.mjs`, `check-pr-scope.mjs` |
 
 Outcomes use one vocabulary (`PASS`, `FAIL`, `NOT_TRIGGERED`, `NOT_APPLICABLE`, `DEGRADED`), defined
 in exactly one file so a failure is always recordable.

@@ -15,7 +15,8 @@ By default every implementation plan is debated with the opposite model: a Claud
 a Codex host uses Claude. The host drafts, the counterpart challenges, and the same counterpart
 session defends or concedes. `CONVERGED` needs the counterpart's agreement on the exact final plan
 digest as a schema-validated object; anything else, including a provider failure, is `UNRESOLVED`
-and goes to the human approval rather than being treated as consensus. Skipping the debate needs an
+and goes to the human approval rather than being treated as consensus. When Codex is unavailable, a fresh session of the other available model stands in as a declared
+degraded carrier (`carrier.degraded: true`). Skipping the debate needs an
 explicit owner exception recorded in the plan.
 
 ## Review chain

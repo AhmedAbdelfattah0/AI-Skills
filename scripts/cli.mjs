@@ -11,6 +11,7 @@
 //   install [names...]         install all skills, or only the named ones
 //     --copy / -c              copy real files instead of symlinking
 //     --link / -l              force symlink even from an ephemeral source
+//     --replace-foreign        back up an existing entry that is not ours, then install
 //   update [names...]          bring already-installed skills up to date
 //     --check / -n             report what would change; write nothing
 //     --force / -f             overwrite copies that were edited after install
@@ -509,8 +510,8 @@ const RETIRED_SKILLS = {
 };
 const SUCCESSORS = new Set(Object.values(RETIRED_SKILLS));
 
-// Why an existing successor directory must not be replaced, or null when it is
-// absent or ours and untouched. Never overwrites what somebody else made or edited.
+// Why an existing entry must not be replaced, or null when it is absent or ours
+// and untouched. Never overwrites what somebody else made or edited.
 function successorCollision(dst, src, record) {
   let st = null;
   try { st = lstatSync(dst); } catch { return null; }
@@ -523,11 +524,39 @@ function successorCollision(dst, src, record) {
   return record.hash === hashSkill(dst) ? null : 'edited after install';
 }
 
+// Move an entry that is not ours into the state directory before anything
+// replaces it (--replace-foreign, or --force on a successor); never delete it.
+// Returns the backup path. A rename that crosses filesystems falls back to
+// copy-then-remove: links stay links (a top-level link, dangling or not, is
+// recreated, not followed), and the original is removed only after the whole
+// copy succeeded. On any failure the original is left as it was, the partial
+// backup is dropped, and the error says so.
+function backUpForeign(dst, label, name, stamp) {
+  const backup = join(stateDir(), 'replaced', stamp, label, name);
+  mkdirSync(dirname(backup), { recursive: true });
+  try { renameSync(dst, backup); return backup; } catch (err) {
+    if (err.code !== 'EXDEV') throw err;
+  }
+  try {
+    if (lstatSync(dst).isSymbolicLink()) symlinkSync(readlinkSync(dst), backup, isWin ? 'junction' : undefined);
+    else cpSync(dst, backup, { recursive: true, verbatimSymlinks: true });
+  } catch (err) {
+    try { removeExisting(backup); } catch { /* leave the partial backup; the original is untouched */ }
+    throw new Error(`could not copy it to a backup (${err.code || err.message}); the original is untouched`);
+  }
+  removeExisting(dst);
+  return backup;
+}
+
 function cmdInstall(args) {
   const wantCopy = args.includes('--copy') || args.includes('-c');
   const wantLink = args.includes('--link') || args.includes('-l');
-  // --force lets install replace a successor (code-quality) that is edited or not ours.
+  // --force lets install replace a successor (code-quality) that is edited or not
+  // ours, after backing it up exactly as --replace-foreign does.
   const force = args.includes('--force') || args.includes('-f');
+  // An entry that is not ours is left alone unless this asks to back it up first.
+  const replaceForeign = args.includes('--replace-foreign');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
   // Parse --target <t1,t2|all> and --dest <path>; remaining bare words = skill names.
   const { names, targetSpec, destOverride } = parseFlags(args);
@@ -597,31 +626,47 @@ function cmdInstall(args) {
 
     let ok = 0;
     let collided = 0;
-    // Requested names first, then the successors their aliases need.
-    for (const [name, alias] of [...targets.map((n) => [n, null]), ...successorOf]) {
-      const src = join(SKILLS_DIR, name);
-      const dst = join(dir, name);
-      // A successor holds the rules its aliases point at. Whether it was named,
-      // part of a bare install or pulled in by an alias, never replace one that
-      // somebody edited or installed independently, unless --force says so.
-      const why = SUCCESSORS.has(name) && !force && successorCollision(dst, src, manifest.skills[name]);
-      if (why) {
+    // Record whatever was applied even if a later skill throws.
+    try {
+      // Requested names first, then the successors their aliases need.
+      for (const [name, alias] of [...targets.map((n) => [n, null]), ...successorOf]) {
+        const src = join(SKILLS_DIR, name);
+        const dst = join(dir, name);
+        // Never replace an entry somebody edited or installed independently
+        // without backing it up first. --replace-foreign asks for that backup;
+        // --force asks for it too, but only for a successor (which holds the
+        // rules its aliases point at). Nothing that is not ours is ever deleted.
+        const why = successorCollision(dst, src, manifest.skills[name]);
         const need = alias ? `needed by the ${alias} alias, which holds no rules — ` : '';
-        console.log(`   ! ${name}  ${need}${why}, left alone; resolve this collision or re-run with --force`);
-        process.exitCode = 1;
-        collided++;
-        continue;
+        if (why && (replaceForeign || (force && SUCCESSORS.has(name)))) {
+          let backup;
+          try { backup = backUpForeign(dst, label, name, stamp); } catch (err) {
+            console.log(`   ! ${name}  ${need}${why}, left alone: ${err.message}`);
+            process.exitCode = 1;
+            collided++;
+            continue;
+          }
+          console.log(`   ↪ ${name}  moved to ${backup}`);
+        } else if (why) {
+          const options = SUCCESSORS.has(name) ? '--force or --replace-foreign' : '--replace-foreign';
+          console.log(`   ! ${name}  ${need}${why}, left alone; resolve this collision or re-run with ${options}`);
+          console.log(`     ${dst} is untouched; ${options} moves it to a backup under ${join(stateDir(), 'replaced')} and installs`);
+          process.exitCode = 1;
+          collided++;
+          continue;
+        }
+        // Same build-then-swap as update: a re-install over a working skill must
+        // not be able to leave a hole where that skill was.
+        if (applySkill(src, dst, mode, manifest, name)) {
+          console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}${alias ? `  (successor of ${alias})` : ''}`);
+          ok++;
+        } else if (mode === 'link') {
+          console.error('   symlink failed — retry with --copy');
+        }
       }
-      // Same build-then-swap as update: a re-install over a working skill must
-      // not be able to leave a hole where that skill was.
-      if (applySkill(src, dst, mode, manifest, name)) {
-        console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}${alias ? `  (successor of ${alias})` : ''}`);
-        ok++;
-      } else if (mode === 'link') {
-        console.error('   symlink failed — retry with --copy');
-      }
+    } finally {
+      if (ok) writeManifest(dir, manifest);
     }
-    if (ok) writeManifest(dir, manifest);
     console.log(`\n${collided ? '⚠️ ' : '✅'} [${label}] installed ${ok}/${targets.length + successorOf.size} skill(s) into ${dir}  (mode: ${mode})${collided ? `, ${collided} left alone` : ''}\n`);
   }
   if (mode === 'link') console.log(`   edits in ${SKILLS_DIR} are live everywhere they're linked.`);
@@ -1645,6 +1690,9 @@ Install flags:
                           antigravity  ~/.gemini/config/skills       (Google Antigravity)
                           all          claude + agents + gemini + antigravity
   --dest <path>         install into a custom directory instead
+  --replace-foreign     back up (never delete) an existing entry that is not ours, then install;
+                        without it such an entry is left alone and the command exits 1
+  --force, -f           the same backup-then-install, for the code-quality successor only
 
 Update flags (--target / --dest work here too):
   --check, -n           report what would change; write nothing

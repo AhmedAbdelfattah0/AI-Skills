@@ -1,6 +1,6 @@
 # Installation
 
-Requires Node.js 22 or newer and `git`. Repository: <https://github.com/AhmedAbdelfattah0/agentic-software-factory>.
+Needs `git` and Node 22+. Repository: <https://github.com/AhmedAbdelfattah0/agentic-software-factory>.
 
 > **Never run `npx` with the bare package names `ai-skills` or `ai-agent-skills`.** Those names on the npm registry belong
 > to other publishers. Use only the forms below, which name this repository explicitly.
@@ -55,7 +55,14 @@ hook; `ship-ticket` uses Claude Code commands and subagents); their knowledge st
 library recorded installing that nobody edited since. Anything else is left untouched, named, and the
 installer exits with code 1. `--replace-foreign` moves each such entry to a timestamped backup under
 `~/.local/state/ai-skills/` (or `$XDG_STATE_HOME/ai-skills/`, `%LOCALAPPDATA%\ai-skills\` on Windows)
-and then installs. Nothing that is not ours is deleted. Source: `scripts/cli.mjs` and the installer
+and then installs. `--force` does the same backup-then-replace for the `code-quality` successor only.
+Nothing that is not ours is deleted. When the one-line installer hits a collision it stops and says
+that automatic updates were not scheduled.
+
+`./scripts/install.sh` writes no manifest, so it recognises only its own links: a second `--copy` run
+skips its earlier copies, each `--copy --replace-foreign` run moves the previous copies into a new
+backup (backups accumulate until you remove them), and a copy made that way reads as unknown
+provenance on first `update` and needs `--force` once. Use the Node CLI if that matters. Source: `scripts/cli.mjs` and the installer
 tests in `scripts/cli.test.mjs`.
 
 ## Updating
@@ -71,7 +78,7 @@ node scripts/cli.mjs update --prune   # also remove skills deleted upstream
 | Symlink into your clone | Nothing to copy; the pull was the update. |
 | Symlink elsewhere | Reports it, never touches it. |
 | Copy that matches the record | Refreshes it. |
-| Copy you edited | Leaves it; `--force` overwrites. |
+| Copy you edited | Leaves it; `--force` overwrites (after a backup). |
 | Directory nobody recorded | Leaves it; `--adopt` takes it over. |
 
 The source refresh is `git pull --ff-only` from a clean tree with an upstream; it never stashes,
@@ -82,7 +89,7 @@ skill in place.
 
 `autoupdate --install` adds a daily job (launchd, systemd user timer or schtasks) and a Claude Code
 `SessionStart` hook. Both run `update --auto`, which takes a lock, runs at most once an hour, ignores
-`--force`, `--adopt` and `--prune`, and writes only to its own log. `autoupdate --remove` takes both
+`--force` and `--prune` (and `--adopt`), and writes only to its own log. `autoupdate --remove` takes both
 back out.
 
 ## Verify

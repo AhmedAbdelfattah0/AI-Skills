@@ -5,7 +5,7 @@ not ok 1 - T4a grammar (round 7): the decoder is unaliasable and `.decode` exist
   ---
   duration_ms: 3.816833
   type: 'test'
-  location: '/Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1'
+  location: '<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1'
   failureType: 'testCodeFailure'
   error: 'a1: stream option is refused'
   code: 'ERR_ASSERTION'
@@ -14,14 +14,14 @@ not ok 1 - T4a grammar (round 7): the decoder is unaliasable and `.decode` exist
   actual: false
   operator: '=='
   stack: |-
-    TestContext.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2156:52)
+    TestContext.<anonymous> (file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2156:52)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.start (node:internal/test_runner/test:944:17)
     startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
     run (node:internal/test_runner/harness:307:12)
     test (node:internal/test_runner/harness:316:12)
-    file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1
+    file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1
   ...
 1..1
 # tests 1
@@ -337,7 +337,7 @@ ok 60 - T4a grammar: every decode-capable form the grammar admits is a legacy-ru
 not ok 61 - T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict
   ---
   duration_ms: 4.136625
-  location: 'file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1'
+  location: 'file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1'
   failureType: 'testCodeFailure'
   error: 'a1: stream option is refused'
   code: 'ERR_ASSERTION'
@@ -346,7 +346,7 @@ not ok 61 - T4a grammar (round 7): the decoder is unaliasable and `.decode` exis
   actual: false
   operator: '=='
   stack: |-
-    TestContext.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2156:52)
+    TestContext.<anonymous> (file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2156:52)
     Test.runInAsyncScope (node:async_hooks:203:9)
     Test.run (node:internal/test_runner/test:631:25)
     Test.processPendingSubtests (node:internal/test_runner/test:374:18)

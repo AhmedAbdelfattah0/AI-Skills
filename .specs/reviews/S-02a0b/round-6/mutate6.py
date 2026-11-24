@@ -6,7 +6,7 @@
 import hashlib, os, re, shutil, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mutants6 import ALL
-REPO = '/Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b'
+REPO = '<HOME>/Documents/personal-projects/ais-s02b'
 SKILLS = REPO + '/skills'
 NODE = os.path.expanduser(os.environ.get('NODE', '~/.nvm/versions/node/v22.23.1/bin/node'))
 T = 'git-exec.test.mjs'

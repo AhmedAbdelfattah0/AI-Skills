@@ -33,8 +33,9 @@ cycle. See [model-routing-and-reviews.md](model-routing-and-reviews.md).
 
 ## Resume
 
-Run state is append-only and records the approved plan digest. A resumed run recomputes the candidate
-identity and performs only the missing idempotent SHIP steps; it never re-enters REVIEW.
+Run state is append-only and records the approved plan digest. A run resumed after REVIEW has passed
+recomputes the candidate identity and performs only the missing idempotent SHIP steps; it never
+re-enters REVIEW.
 
 ## Plan approval
 
