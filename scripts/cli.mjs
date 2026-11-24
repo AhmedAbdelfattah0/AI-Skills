@@ -367,6 +367,11 @@ function git(args, cwd = REPO_ROOT) {
 // Which LIBRARY this is, as opposed to which checkout. The remote survives a
 // clone being moved or re-cloned elsewhere, which a path does not; and it differs
 // for a fork, which is exactly the case a path cannot tell apart.
+// The library was renamed AI-Skills -> agentic-software-factory. Clones and manifests made under the
+// old name still carry the old remote, so for IDENTITY comparison only the two names are one library.
+// Nothing recorded and no remote is ever rewritten; this only changes what compares equal.
+const libraryIdentity = (u) => (u || '').replace(/^(https:\/\/github\.com\/ahmedabdelfattah0)\/ai-skills$/, '$1/agentic-software-factory');
+
 function originUrl() {
   // The git remote ONLY. package.json was tried here and is not provenance: it
   // is content inside the candidate tree, and a fork keeps the upstream
@@ -377,13 +382,13 @@ function originUrl() {
   const raw = git(['remote', 'get-url', 'origin']);
   if (!raw) return null;
   // Normalise the spellings of one remote: scp-form vs https, optional .git.
-  return raw.trim()
+  return libraryIdentity(raw.trim()
     .replace(/^git\+/, '')
     .replace(/^git@([^:]+):/, 'https://$1/')
     .replace(/^ssh:\/\/git@/, 'https://')
     .replace(/\.git$/, '')
     .replace(/\/+$/, '')
-    .toLowerCase();
+    .toLowerCase());
 }
 
 // Was this destination populated by THIS library? A manifest written by a fork,
@@ -401,7 +406,7 @@ function sameLibrary(manifest) {
   // trusted: it can offer nothing about its own provenance that a fork could not
   // offer identically. Such installs need --adopt once, which is the honest
   // price of not being able to tell them apart.
-  if (manifest.origin) { const mine = originUrl(); return !!mine && manifest.origin === mine; }
+  if (manifest.origin) { const mine = originUrl(); return !!mine && libraryIdentity(String(manifest.origin).toLowerCase()) === mine; }
   if (manifest.source) return resolve(manifest.source) === resolve(REPO_ROOT);
   // No identity evidence at all. Absence of a contradiction is not proof of
   // ownership: a manifest carrying hashes but naming no library is exactly what

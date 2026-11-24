@@ -25,6 +25,9 @@
 set -euo pipefail
 
 REPO="https://github.com/AhmedAbdelfattah0/agentic-software-factory.git"
+# The repository was renamed. Clones made under the old name keep the old origin; they are the same
+# project, so the identity check below accepts either. The remote is never rewritten.
+FORMER_REPO="https://github.com/AhmedAbdelfattah0/AI-Skills.git"
 HOME_DIR="${AI_SKILLS_HOME:-$HOME/.ai-skills}"
 REF="${AI_SKILLS_REF:-main}"
 TARGET="${AI_SKILLS_TARGET:-claude}"
@@ -66,7 +69,8 @@ if [ -d "$HOME_DIR/.git" ]; then
   # from whatever else happens to be sitting at that path — so the origin is
   # checked before anything is fetched and long before anything is run.
   EXISTING="$(git -C "$HOME_DIR" remote get-url origin 2>/dev/null || true)"
-  if [ "$(normalize_url "$EXISTING")" != "$(normalize_url "$REPO")" ]; then
+  GOT="$(normalize_url "$EXISTING")"
+  if [ "$GOT" != "$(normalize_url "$REPO")" ] && [ "$GOT" != "$(normalize_url "$FORMER_REPO")" ]; then
     echo "❌ $HOME_DIR is a git repository, but its origin is not this project." >&2
     echo "   found:    ${EXISTING:-<no origin remote>}" >&2
     echo "   expected: $REPO" >&2
