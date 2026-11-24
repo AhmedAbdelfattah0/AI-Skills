@@ -133,7 +133,7 @@ decision, and an ownership violation fails that node into bounded repair.
 
 **Before HEAVY work** (full suites, builds, mutation runs) run
 `node <SHIP_TICKET_SKILL>/scripts/host-admit.mjs --class heavy [--running N]` and reduce parallelism
-or wait while it holds (exit 1; memory pressure level 2 is only a warning, level 4 holds); on non-macOS it prints `platform_unsupported`
+or wait while it holds (exit 1; memory pressure level 2 is only a warning, level 4 holds; level 4 is a pragmatic, unproven threshold, see execution-harness.md); on non-macOS it prints `platform_unsupported`
 (exit 2), which is not an allow: apply the manual rule (check memory and load
 yourself, run one heavy job at a time). Details in execution-harness.md.
 

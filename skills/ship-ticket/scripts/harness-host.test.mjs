@@ -79,9 +79,30 @@ test('SCRUM-410-shaped host (level 2, swap flat, load fine, no provider errors) 
   const l = LIGHT(s(), R(0));
   assert.equal(l.admit, true); assert.equal(l.reason, 'admitted'); assert.equal(l.signals.pressure_warn, true);
   const h = HEAVY(s(), R(0));
-  assert.equal(h.admit, true); assert.equal(h.signals.heavy_slots, 2);
-  assert.equal(HEAVY(s(), R(1, 1)).admit, true);
+  assert.equal(h.admit, true); assert.equal(h.signals.heavy_slots, 1);
+  assert.deepEqual(HEAVY(s(), R(1, 1)).reasons, ['held_heavy']);
   assert.deepEqual(HEAVY(s(), R(2, 2)).reasons, ['held_heavy']);
+});
+
+test('heavy slots: second slot opens only when level 1 throughout the window; any level-2 sample keeps 1 slot; pressure_warn is window-wide', () => {
+  const win = (a, b) => snap({ samples: [S({ pressure_level: a }), S({ t_ms: T0 + 20000, pressure_level: b })] });
+  const exp = { '1,1': [2, false], '1,2': [1, true], '2,1': [1, true], '2,2': [1, true] };
+  for (const [k, [slots, warn]] of Object.entries(exp)) {
+    const [a, b] = k.split(',').map(Number);
+    const r = HEAVY(win(a, b), R(1, 1));
+    assert.equal(r.signals.heavy_slots, slots, k); assert.equal(r.signals.pressure_warn, warn, k);
+    assert.equal(r.admit, slots === 2, k);
+    assert.equal(HEAVY(win(a, b), R(0)).admit, true, k);
+  }
+});
+
+test('heavy slots: level-4 recovery needs two clean windows, then still 1 slot while level 2 persists', () => {
+  const bad = LIGHT(withLatest({ pressure_level: 4 }), R(0));
+  const c1 = HEAVY(NEXT(1, { pressure_level: 2 }), R(0), bad.history);
+  assert.deepEqual(c1.reasons, ['held_hysteresis']);
+  const c2 = HEAVY(NEXT(2, { pressure_level: 2 }), R(0), c1.history);
+  assert.equal(c2.admit, true); assert.equal(c2.signals.heavy_slots, 1);
+  assert.deepEqual(HEAVY(NEXT(3, { pressure_level: 2 }), R(1, 1), c2.history).reasons, ['held_heavy']);
 });
 
 test('level 2 does not mask the other holds: swap growth, high load and provider errors still hold', () => {

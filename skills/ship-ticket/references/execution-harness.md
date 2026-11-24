@@ -99,7 +99,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   snapshot; there is no fallback admit and it never terminates running work. HEAVY cap is 1, or 2 only
   when healthy. Memory pressure: level 1 is normal, level 2 (`warn`) is a NON-BLOCKING warning reported as
   the boolean signal `pressure_warn` (not a hold reason), and only a sample at level 4 (`critical`) anywhere
-  in the window holds with `held_pressure`; level 1 and 2 samples both count as clean for hysteresis. Level 4 is a
+  in the window holds with `held_pressure`; level 1 and 2 samples both count as clean for hysteresis. Level 2 never blocks, but it does not open the second HEAVY slot: that needs level 1 on every sample of the window (`pressure_warn` is window-wide: any level-2 sample). Level 4 is a
   pragmatic threshold, subject to real-world validation, not a proven safety boundary; swap growth, load and
   provider errors keep their own holds. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
   `held_hysteresis`, `held_resample`. Caller contract: a host that is recovering (`held_hysteresis`)
