@@ -185,6 +185,7 @@ node scripts/fast-checks.mjs run --repo <repo> --base <base sha> [--ticket <key>
   under its new path (paths are passed relative to `--repo`). Nothing narrows the set to committed files, and
   `--allow-dirty` does not apply: a dirty secret is scanned. Git-ignored files are out of scope, and the index is not
   scanned separately (a staged secret whose working copy was cleaned is not seen).
+- A repository gate script that diffs `merge-base...HEAD` (for example a `local-gates.sh`) proves nothing before the one commit exists: run the underlying commands on the working tree instead. A rehearsal with `--allow-dirty` is never evidence.
 - A changed submodule, nested repository, symlink, unresolvable path, or a tracked file with an assume-unchanged or
   skip-worktree bit is a **failure**, never a silent drop.
 - Anything but a clean exit 0 fails: a non-zero exit, a **timeout**, a signal, a missing binary, an invalid or

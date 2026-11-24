@@ -1089,3 +1089,22 @@ test('the record hash: stdout bytes equal the written record', (t) => {
   assert.equal(h(readFileSync(defaultOut(r))), h(out.stdout));
   unlinkSync(defaultOut(r));
 });
+
+// STAB-410 F-3: an owner who approves "three files" plus the Recording paths line gets the 5-file commit
+// (3 contract files, the plan, session-log.md) and the scope check is CLEAN: the two recording paths are the pinned
+// candidate exclusions, never contract paths. Characterization of existing behavior; the wording pin is in
+// stabilization-wording.test.mjs.
+test('STAB-410 F-3: a plan listing 3 contract files plus a Recording paths line is CLEAN with the 5-file commit shape', (t) => {
+  const r = repo(t);
+  const recording = '**Recording paths:** `.specs/plans/T-1.md` (this plan) and the predeclared ticket-keyed `session-log.md` entry.';
+  const three = contract({ planned: ['src/a.ts', 'src/b.ts', 'tests/a.test.ts'] });
+  writePlan(r, `${TABLE}\n\n${three}\n\n${recording}`);
+  r.write('src/a.ts'); r.write('src/b.ts'); r.write('tests/a.test.ts');
+  r.write('session-log.md');
+  const out = run(r);
+  assert.equal(out.status, 0, out.stderr + out.stdout);
+  assert.equal(out.json.outcome, 'CLEAN');
+  assert.deepEqual(out.json.counts, { planned: 3, supporting: 0, material: 0, total: 3 });
+  assert.ok(existsSync(join(r.dir, PLAN_REL)) && existsSync(join(r.dir, 'session-log.md')), 'the 5 files exist in the commit shape');
+  assert.deepEqual(out.json.files.map((x) => x.path).sort(), ['src/a.ts', 'src/b.ts', 'tests/a.test.ts']);
+});

@@ -68,8 +68,7 @@ Finish these checks before announcing REVIEW or appending its start event:
   report says so;
   When an engine state file exists, the RED event is `gate.mjs` `gateRed`
   evidence (runner-produced by the DAG-bound `config.testCommands` runner, bound to
-  the spec digests and the baseline), not hand-written; unsupported runner output
-  falls back to the manual event, marked degraded. The engine cannot release its RED
+  the spec digests and the baseline), not hand-written. On an engine run the RED record is the `gate red` evidence and no hand-written RUN-STATE RED line is required; on the manual flow the orchestrator appends the RED line. Unsupported runner output (a refused `gate red`) falls back to the manual event, marked degraded. The engine cannot release its RED
   barrier on a manual event, so `drive` keeps every dependent of that node blocked:
   either fix the runner format and re-run `gate red`, or continue the rest of the
   ticket in the manual workflow (record `harness degraded`, stop calling `drive`

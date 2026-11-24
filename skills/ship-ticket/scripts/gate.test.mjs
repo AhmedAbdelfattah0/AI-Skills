@@ -976,3 +976,37 @@ test('P4r delta: RED and proof outcomes are identical with and without the added
     assert.deepEqual([now.hit?.status, now.hit?.failure_kind], want, spec.name);
   }
 });
+
+// STAB-410 F-1: the Angular `@angular/build:unit-test` builder (`nx test <project> --reporters=json --outputFile=<tmp>`)
+// writes jest-shaped JSON that the `sh -c` wrapper in execution-harness.md prints alone. The raw run output of SCRUM-410
+// was not retained; this fixture is RECONSTRUCTED to the documented parseJestLike shape using the real spec path and
+// test name recorded in the accepted `gate red` evidence (stab410-evidence/gate-red.out), which is the acceptance evidence.
+const NG_SPEC = 'apps/storefront/src/app/core/data/store-orders.service.spec.ts';
+const NG_NAME = 'StoreOrdersService.track — bounded timeout (SCRUM-410) > a stalled lookup resolves null after 30s and cancels the request';
+const NG_JSON = JSON.stringify({
+  numTotalTests: 1, numFailedTests: 1, numPassedTests: 0,
+  testResults: [{
+    name: `/workspace/${NG_SPEC}`, status: 'failed',
+    assertionResults: [{
+      ancestorTitles: ['StoreOrdersService.track — bounded timeout (SCRUM-410)'],
+      title: 'a stalled lookup resolves null after 30s and cancels the request',
+      status: 'failed',
+      failureMessages: ['AssertionError: expected undefined to be null'],
+      failureDetails: [{ matcherResult: { pass: false } }],
+    }],
+  }],
+});
+
+test('STAB-410 F-1: Angular unit-test-builder JSON parses via vitest-json and satisfies RED for the real spec path', () => {
+  const p = parseRunnerOutput('vitest-json', NG_JSON);
+  assert.equal(p.supported, true);
+  assert.equal(p.results.length, 1);
+  assert.equal(p.results[0].name, NG_NAME);
+  assert.equal(p.results[0].status, 'fail');
+  assert.equal(p.results[0].failure_kind, 'assertion');
+  const { hit } = findSpec({ file: NG_SPEC, name: NG_NAME }, p.results);
+  assert.equal(hit?.status, 'fail', 'the workspace-relative spec path matches the absolute path the runner printed');
+  assert.equal(specStatus({ file: NG_SPEC, name: NG_NAME }, p), 'fail');
+  // the same text with Nx banner lines in front is not valid JSON: the reason the wrapper prints only the report file
+  assert.equal(parseRunnerOutput('vitest-json', `> nx run storefront:test\n${NG_JSON}`).supported, false);
+});

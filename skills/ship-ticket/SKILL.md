@@ -44,6 +44,8 @@ tool or delegated task returns. End the assistant turn only in one of these stat
 | **FAIL** | the bounded execution ended unshipped | yes, with evidence and what remains |
 | **COMPLETE** | PR, CI and tracker completion succeeded | yes |
 
+The turn may also end while waiting on a background command the host tracks and will resume on exit, provided the next action is recorded; that is the CONTINUE row under that condition, not a new state.
+
 Do not ask whether to continue work the approved plan already authorizes. A
 recoverable timeout or optional companion failure invokes its fallback and
 continues; reporting the degradation is not a pause.
@@ -492,7 +494,7 @@ After approval:
   record its digest, and make both frontend and backend nodes depend on that same
   contract ID.
 
-In a headless environment, branch, write the plan with approval status pending,
+In a headless environment, branch, write the plan (pending, no START yet),
 and use **WAIT_FOR_USER**; do not implement. This fallback does not weaken the
 approval gate or permit implementation before approval.
 
@@ -544,7 +546,7 @@ Read the plan and Design Contract from disk before writing.
   while its design is in context.
 - **Red before production code.** For security-sensitive work, and for any bug
   fix, the plan's test node runs first and ends with a `RED` event (see
-  [references/ship.md](references/ship.md)). Until that event exists, write
+  [references/ship.md](references/ship.md)). On an engine run the RED record is the `gate red` evidence and no hand-written RUN-STATE RED line is required; on the manual flow the orchestrator appends the RED line. Unsupported runner output (a refused `gate red`) falls back to the manual event, marked degraded. Until that event exists, write
   only test files, fixtures and test stubs; no other Design Contract path. The
   red run must fail on a behavioral assertion. A missing module, import or type
   error is not red: stub the seam the test needs (a bare export or signature
