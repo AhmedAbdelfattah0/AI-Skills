@@ -5,7 +5,7 @@ not ok 1 - classify reads the spawn error code as own data, once: an inherited o
   ---
   duration_ms: 1.28175
   type: 'test'
-  location: '/Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:621:1'
+  location: '<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:621:1'
   failureType: 'testCodeFailure'
   error: |-
     Expected values to be strictly equal:
@@ -21,11 +21,11 @@ not ok 1 - classify reads the spawn error code as own data, once: an inherited o
   actual: 'git_unavailable'
   operator: 'strictEqual'
   stack: |-
-    Object.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:46:93)
+    Object.<anonymous> (file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:46:93)
     expectedException (node:assert:576:17)
     expectsError (node:assert:701:21)
     Function.throws (node:assert:757:3)
-    TestContext.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:623:10)
+    TestContext.<anonymous> (file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:623:10)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.start (node:internal/test_runner/test:944:17)
@@ -36,13 +36,13 @@ not ok 2 - run() normalises the status map before spawn: an accessor entry is re
   ---
   duration_ms: 27.043375
   type: 'test'
-  location: '/Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:633:1'
+  location: '<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:633:1'
   failureType: 'testCodeFailure'
   error: 'Missing expected exception: an accessor entry is refused'
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   stack: |-
-    TestContext.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:639:10)
+    TestContext.<anonymous> (file://<HOME>/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:639:10)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)

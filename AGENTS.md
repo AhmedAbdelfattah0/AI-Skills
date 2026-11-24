@@ -670,6 +670,17 @@ because byte-level and Git-semantics detours on a small evidence requirement cos
 review rounds. When the same class of review finding fails twice, stop patching, challenge the
 design, and escalate to the owner.
 
+## Privacy expectations
+
+- Use neutral project names, ticket identifiers and examples in all new docs,
+  commits and PR descriptions.
+- Never add Claude session URLs or session trailers to commits or PRs.
+- Never commit personal filesystem paths, emails or credentials; use placeholders
+  such as `<HOME>` and `<SCRATCH>`.
+- `.specs/` records are historical: they must be path-sanitized but are not
+  rewritten otherwise.
+- This is a convention only; no tooling or CI guard enforces it.
+
 ## Adding or editing a skill
 
 1. Create `skills/<name>/SKILL.md` (or edit an existing one) — with the symlink install, edits are
