@@ -31,7 +31,7 @@ import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, evidenceEntries, flatEntry, baseRef, pinnedBaseOn } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, evidenceEntries, flatEntry, baseRef, pinnedBaseOn, dagReadWriteConflicts } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract, testKindsModules, testKindsOn, testKindsStatus } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
@@ -338,7 +338,8 @@ async function bindObligations(sp, cat, block, nodes, root) {
 /**
  * F12a plan-time preflight: the checks `init` runs on the plan and DAG (validateEngineDag, bindSecurity, and for a
  * format-3 block the obligation matrix and inventory completeness), callable BEFORE approval: no lock, no state, no
- * START and no write. A DAG without config.securityPolicy is refused (security_policy_required: no START approves it).
+ * START and no write. It also refuses a node that reads what a transitive dependent writes (dag_read_write_dependency,
+ * STAB-410 F-9), a check init never runs. A DAG without config.securityPolicy is refused (security_policy_required: no START approves it).
  * ctx: { repoRoot, ticket, dagFile, planFile?, catalogFile? }. Returns the obligation matrix, or throws a coded refusal.
  */
 export async function preflight(ctx) {
@@ -348,6 +349,9 @@ export async function preflight(ctx) {
   try { text = readFileSync(planFile, 'utf8'); } catch { throw coded('plan_invalid', `plan ${planFile} unreadable`); }
   try { doc = JSON.parse(readFileSync(ctx.dagFile, 'utf8')); } catch { throw coded('dag_invalid', 'dagFile unreadable or not JSON'); }
   const dag = validateEngineDag(doc, { ticket: ctx.ticket });
+  // STAB-410 F-9 (plan time only, never init): a node must not read what a transitive dependent writes.
+  const rw = dagReadWriteConflicts(dag.nodes);
+  if (rw.length) throw coded('dag_read_write_dependency', `node ${rw[0].reader} reads ${rw[0].read}, which its dependent node ${rw[0].writer} writes (${rw[0].write}): the write would make the finished reader stale; reorder the nodes or move the read${rw.length > 1 ? ` (${rw.length} such pairs: ${rw.map((c) => `${c.reader}<-${c.writer}`).join(', ')})` : ''}`);
   const b = text.indexOf(BEGIN), e = text.indexOf(END);
   const narrative = b >= 0 && e > b ? text.slice(0, b) + text.slice(e) : text;
   await bindSecurity(ctx, dag.config, dag.nodes, null, text, narrative);

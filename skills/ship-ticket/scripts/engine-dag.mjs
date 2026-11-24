@@ -263,6 +263,44 @@ export function validateEngineDag(doc, { ticket } = {}) {
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }
 
+/**
+ * STAB-410 F-9, plan time only: every pair where a node READS a path that one of its TRANSITIVE dependents WRITES. Such a
+ * write lands after the reader finished, so drift() would mark the reader stale and re-run it (before the freeze) or raise
+ * post_freeze_drift (after). Overlap is equality or a whole-segment prefix in either direction, case-folded like the harness
+ * collision rule; a glob counts by its literal prefix (the whole segments before the first segment holding a glob character),
+ * so a glob without one overlaps everything (fail closed). Pure; `nodes` are validated DAG nodes (missing deps/reads/writes
+ * are empty). Returns [{ reader, writer, read, write }] in node, read and dependent order, each pair once. Called ONLY by
+ * run-engine `preflight`, never by validateEngineDag or init, so in-flight and legacy runs are untouched.
+ */
+const GLOB_CHAR = /[*?[\]{}!]/;
+const literalPrefix = (p) => {
+  const segs = String(p).toLowerCase().split('/');
+  const i = segs.findIndex((x) => GLOB_CHAR.test(x));
+  return (i < 0 ? segs : segs.slice(0, i)).join('/');
+};
+const pathsOverlap = (a, b) => {
+  const x = literalPrefix(a), y = literalPrefix(b);
+  return x === '' || y === '' || x === y || x.startsWith(y + '/') || y.startsWith(x + '/');
+};
+export function dagReadWriteConflicts(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const children = new Map(list.map((n) => [n.id, []]));
+  for (const n of list) for (const d of n.deps ?? []) children.get(d)?.push(n.id);
+  const byId = new Map(list.map((n) => [n.id, n]));
+  const out = [];
+  for (const n of list) {
+    const reads = n.reads ?? [];
+    if (!reads.length) continue;
+    const seen = new Set(), dependents = [], stack = [...(children.get(n.id) ?? [])];
+    while (stack.length) { const id = stack.shift(); if (seen.has(id) || id === n.id) continue; seen.add(id); dependents.push(id); stack.push(...(children.get(id) ?? [])); }
+    dependents.sort((a, b) => list.indexOf(byId.get(a)) - list.indexOf(byId.get(b)));
+    for (const read of reads) for (const id of dependents) for (const write of byId.get(id).writes ?? []) {
+      if (pathsOverlap(read, write)) out.push({ reader: n.id, writer: id, read, write });
+    }
+  }
+  return out;
+}
+
 /** A unit tagged node collapses into its unit; any other node is its own vertex (for unit cycles and order). */
 export const unitVertex = (n) => (n.unit !== undefined ? `u:${n.unit}` : `n:${n.id}`);
 

@@ -461,6 +461,20 @@ test('init: an engine whose semantics lack version 3 refuses a format-3 run (pol
   await assert.rejects(() => preflight({ repoRoot: gap.repo, ticket: 'T-1', dagFile: gap.dagFile }), (e) => e.code === 'surface_inventory_incomplete');
 });
 
+test('[STAB-410 F-9] preflight on a complete format-3 plan: a read a dependent writes is refused (dag_read_write_dependency); independent and read-after-predecessor DAGs pass; init keeps binding the legacy shape', { skip: WIN_SKIP }, async (t) => {
+  const pf = (fx) => preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile });
+  // SCRUM-410: the tests node reads the source file its dependent fix node rewrites
+  const bad = obFx(t, { nodes: [{ id: 'tests', deps: ['impl'], reads: ['src/orders.ts'] }, { id: 'patch', deps: ['tests'], writes: ['src/orders.ts'] }] });
+  await assert.rejects(() => pf(bad), (e) => e.code === 'dag_read_write_dependency' && e.message.includes('tests') && e.message.includes('patch') && e.message.includes('src/orders.ts'));
+  const dir = obFx(t, { nodes: [{ id: 'tests', deps: ['impl'], reads: ['src'] }, { id: 'patch', deps: ['tests'], writes: ['src/orders.ts'] }] });
+  await assert.rejects(() => pf(dir), (e) => e.code === 'dag_read_write_dependency', 'a directory read and a write inside it');
+  const glob = obFx(t, { nodes: [{ id: 'tests', deps: ['impl'], reads: ['src/**/*.ts'] }, { id: 'patch', deps: ['tests'], writes: ['src/orders.ts'] }] });
+  await assert.rejects(() => pf(glob), (e) => e.code === 'dag_read_write_dependency', 'a glob by its literal prefix');
+  assert.equal((await pf(obFx(t, { nodes: [{ id: 'tests', deps: ['impl'], reads: ['src/orders.ts'] }] }))).code, 'preflight_ok', 'read after write by a predecessor');
+  assert.equal((await pf(obFx(t, { nodes: [{ id: 'tests', reads: ['src/orders.ts'] }] }))).code, 'preflight_ok', 'an independent reader');
+  assert.equal(initCode(bad.cli('init', { dag: bad.dagFile })), 'ok', 'init never runs the plan-time check (in-flight and legacy runs untouched)');
+});
+
 test('[S46] (h) end to end: a reviewer FAIL on a dropped pair cannot be cleared by repair + confirmation; ship-ready refuses too', { skip: WIN_SKIP }, (t) => {
   const fx = obFx(t);
   const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);

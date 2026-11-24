@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as H from './harness.mjs';
 import { admitHost, hostSnapshot, parsePressure, parseSwapUsedKb100, HOST_SNAPSHOT_SCHEMA, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
 
 // Injected clock: samples are 20 s apart (inside the accepted 15..30 s window); now_ms is 1 s after the latest.
@@ -46,7 +47,7 @@ test('admit ONE then re-sample: the same sample cannot admit twice; a newer samp
   assert.equal(LIGHT(NEXT(1), R(1), first.history).admit, true);
 });
 
-test('pressure 2 and 4 hold with held_pressure; pressure 1 is healthy; an EARLIER sample at 4 is not ignored', () => {
+test('pressure 2 (without swap-free headroom in the snapshot) and 4 hold with held_pressure; pressure 1 is healthy; an EARLIER sample at 4 is not ignored', () => {
   for (const level of [2, 4]) {
     const r = LIGHT(withLatest({ pressure_level: level }), R(0));
     assert.deepEqual(r.reasons, ['held_pressure']);
@@ -603,4 +604,119 @@ test('hostSnapshot on non-darwin does no reading and the result is the fail-safe
   const none = await hostSnapshot({ platform: 'linux', exec: () => { throw new Error('must not read'); }, cpus: () => new Array(2) });
   assert.deepEqual(none.samples, []);
   assert.equal(LIGHT(none, R(0)).reason, 'snapshot_unavailable');
+});
+
+// ================================================================== STAB-410 stable-pressure admission (owner-approved temporary policy)
+// Rule 1 unsafe (both classes hold): any pressure level >= 4, swap used growing (or unknown), load high, provider errors, an
+// unusable snapshot, or swap FREE headroom below the floor (or unknown) in any sample. Rule 2 stable pressure (level 2, swap flat,
+// load fine, no provider errors, swap free >= 1 GB in every sample): LIGHT admits; HEAVY admits only when running.heavy == 0,
+// reason admitted_stable_pressure, signals.pressure_stable true. Rule 3: stable pressure with running.heavy >= 1 holds (held_heavy).
+// Rule 4: the healthy path (level 1) is unchanged and never reads swap free. Rule 5 (re-sample only while the reasons change)
+// is the documented anti-loop rule in execution-harness.md, not code.
+const GB = 1024 * MB;
+const FLOOR = HOST_POLICY.stable_pressure_swap_free_min_kb100;
+const SF = (o = {}) => S({ swap_free_kb100: 2 * GB, ...o });
+const stable = (latest = {}, first = {}) => snap({ samples: [SF({ pressure_level: 2, ...first }), SF({ t_ms: T0 + 20000, pressure_level: 2, ...latest })] });
+
+test('[stable] the swap-free floor is exactly 1 GB in hundredths of KB', () => {
+  assert.equal(FLOOR, 1024 * 1024 * 100);
+  assert.equal(FLOOR, GB);
+});
+
+test('[stable] rule 2: level 2 with swap flat, load fine, no provider errors and swap free >= 1 GB admits LIGHT, and HEAVY only with no heavy running', () => {
+  for (const [cls, running] of [['LIGHT', R(0)], ['LIGHT', R(3, 1)], ['HEAVY', R(0)], ['HEAVY', R(4, 0)]]) {
+    const r = admitHost(stable(), cls, running, H0);
+    assert.equal(r.admit, true, `${cls} ${JSON.stringify(running)} ${JSON.stringify(r.reasons)}`);
+    assert.equal(r.reason, 'admitted_stable_pressure');
+    assert.deepEqual(r.reasons, []);
+    assert.equal(r.signals.pressure_stable, true);
+    assert.equal(r.signals.healthy, false);
+    assert.equal(r.signals.heavy_slots, 1);
+    assert.deepEqual(r.history, { state: 'held', clean_streak: 0, last_admit_t_ms: T0 + 20000, last_sample_t_ms: T0 + 20000 }, 'no history schema change; never counted as clean');
+    assert.deepEqual(r.terminate, []);
+  }
+  // a pressure-2 sample in either position, and a cold start (no history: the window itself shows swap flat)
+  assert.equal(admitHost(stable({ pressure_level: 1 }), 'HEAVY', R(0), H0).reason, 'admitted_stable_pressure');
+  assert.equal(admitHost(stable({}, { pressure_level: 1 }), 'HEAVY', R(0), H0).reason, 'admitted_stable_pressure');
+  for (const h of [null, undefined]) assert.equal(admitHost(stable(), 'HEAVY', R(0), h).reason, 'admitted_stable_pressure');
+  // the next window admits again (no lockout); a later healthy window still needs the unchanged hysteresis
+  const a = admitHost(stable(), 'LIGHT', R(0), H0);
+  const n1 = NEXT(1, { pressure_level: 2, swap_free_kb100: 2 * GB });
+  n1.samples[0] = { ...n1.samples[0], pressure_level: 2, swap_free_kb100: 2 * GB };
+  assert.equal(admitHost(n1, 'LIGHT', R(0), a.history).reason, 'admitted_stable_pressure');
+  assert.deepEqual(admitHost(NEXT(1), 'LIGHT', R(0), a.history).reasons, ['held_hysteresis']);
+});
+
+test('[stable] the swap-free floor is checked at the boundary in every sample: exactly 1 GB admits, one hundredth of a KB less or unknown holds both classes', () => {
+  for (const cls of ['LIGHT', 'HEAVY']) {
+    assert.equal(admitHost(stable({ swap_free_kb100: FLOOR }, { swap_free_kb100: FLOOR }), cls, R(0), H0).reason, 'admitted_stable_pressure', cls);
+    for (const [latest, first] of [[{ swap_free_kb100: FLOOR - 1 }, {}], [{}, { swap_free_kb100: FLOOR - 1 }], [{ swap_free_kb100: 0 }, {}]]) {
+      const r = admitHost(stable(latest, first), cls, R(0), H0);
+      assert.equal(r.admit, false, `${cls} ${JSON.stringify([latest, first])}`);
+      assert.deepEqual(r.reasons, ['held_pressure']);
+      assert.equal(r.signals.pressure_stable, false);
+      assert.equal(r.signals.swap_free, 'low');
+    }
+    // absent in a sample (an older injected v2 snapshot): unknown, fail closed
+    const absent = snap({ samples: [S({ pressure_level: 2 }), SF({ t_ms: T0 + 20000, pressure_level: 2 })] });
+    const r = admitHost(absent, cls, R(0), H0);
+    assert.deepEqual(r.reasons, ['held_pressure']);
+    assert.equal(r.signals.swap_free, 'unknown');
+  }
+  for (const bad of [-1, 1.5, '3', null, Number.MAX_SAFE_INTEGER + 1]) assert.deepEqual(admitHost(stable({ swap_free_kb100: bad }), 'LIGHT', R(0), H0).reasons, ['held_pressure', 'snapshot_unavailable'], String(bad));
+});
+
+test('[stable] rule 1: level >= 4, swap growth or a single sample, high load, provider errors and an unusable snapshot still hold BOTH classes', () => {
+  const rows = [
+    ['level 4 latest', stable({ pressure_level: 4 }), ['held_pressure']],
+    ['level 4 earlier', stable({}, { pressure_level: 4 }), ['held_pressure']],
+    ['swap growth', stable({ swap_used_kb100: 100 * MB + TOL + 1 }), ['held_pressure', 'held_swap']],
+    ['one sample (swap unknown)', snap({ samples: [SF({ t_ms: T0 + 20000, pressure_level: 2 })] }), ['held_pressure', 'held_swap']],
+    ['load high', stable({ load5: 6 }), ['held_pressure', 'held_load']],
+    ['provider errors', { ...stable(), provider_errors: [{ kind: '429', t_ms: T0 }] }, ['held_pressure', 'held_provider']],
+    ['provider count', { ...stable(), provider_errors: 1 }, ['held_pressure', 'held_provider']],
+    ['unusable snapshot', stable({ load1: 'x' }), ['held_pressure', 'snapshot_unavailable']],
+    ['unknown key', { ...stable(), heavy_processes: 0 }, ['held_pressure', 'snapshot_unavailable']],
+    ['stale window', { ...stable(), now_ms: T0 + 20000 + 30001 }, ['held_pressure', 'held_resample']],
+  ];
+  for (const [name, s, reasons] of rows) for (const cls of ['LIGHT', 'HEAVY']) {
+    const r = admitHost(s, cls, R(0), H0);
+    assert.equal(r.admit, false, `${name} ${cls}`);
+    assert.deepEqual(r.reasons, reasons, `${name} ${cls}`);
+    assert.notEqual(r.signals.pressure_stable, true, `${name} ${cls}`);
+  }
+});
+
+test('[stable] rule 3: stable pressure with a HEAVY already running holds the next HEAVY (held_heavy); LIGHT still admits', () => {
+  for (const running of [R(1, 1), R(2, 2), R(5, 1)]) {
+    const h = admitHost(stable(), 'HEAVY', running, H0);
+    assert.equal(h.admit, false);
+    assert.deepEqual(h.reasons, ['held_heavy']);
+    assert.equal(h.reason, 'held_heavy');
+    assert.equal(h.signals.pressure_stable, true);
+    assert.equal(h.history.last_admit_t_ms, H0.last_admit_t_ms, 'a hold records no admit');
+    assert.equal(admitHost(stable(), 'LIGHT', running, H0).reason, 'admitted_stable_pressure');
+  }
+});
+
+test('[stable] rule 4: the healthy path is unchanged and never reads swap free (a low value at level 1 still admits, two heavy slots)', () => {
+  const low = snap({ samples: [S({ swap_free_kb100: 0 }), S({ t_ms: T0 + 20000, swap_free_kb100: 0 })] });
+  const r = HEAVY(low, R(1, 1));
+  assert.equal(r.admit, true);
+  assert.equal(r.reason, 'admitted');
+  assert.equal(r.signals.healthy, true);
+  assert.equal(r.signals.heavy_slots, 2);
+  assert.equal(r.signals.pressure_stable, false);
+  assert.deepEqual(HEAVY(low, R(2, 2)).reasons, ['held_heavy']);
+  assert.deepEqual(r.history, LIGHT(snap(), R(0)).history, 'the same history as without the field');
+});
+
+test('[stable] parseSwapKb100 returns used and free from the one-record grammar; hostSnapshot carries swap_free_kb100', async () => {
+  assert.deepEqual(H.parseSwapKb100(SW), { used: 674331 * 1024, free: 42469 * 1024 });
+  assert.deepEqual(H.parseSwapKb100('total = 2.00G  used = 512.00M  free = 1536.00M\n'), { used: 512 * MB, free: 1536 * MB });
+  for (const bad of ['', SW + SW, 'total = 10.00M  used = 4.00M  free = 5.99M\n', null]) assert.equal(H.parseSwapKb100(bad), null, String(bad));
+  const s = await hostSnapshot({ platform: 'darwin', exec: fakeExec([]), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
+  assert.deepEqual(s.samples.map((x) => x.swap_free_kb100), [715800 * 1024, 715300 * 1024]);
+  const dup = await hostSnapshot({ platform: 'darwin', exec: fakeExec([], { swap: () => SW + SW }), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
+  assert.deepEqual(dup.samples.map((x) => x.swap_free_kb100), [null, null]);
 });

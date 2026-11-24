@@ -182,7 +182,7 @@ export const DEBATE_OUTCOMES = Object.freeze(['CONVERGED', 'UNRESOLVED', 'SKIPPE
 export const DEBATE_CODES = Object.freeze(['debate_policy_missing', 'debate_attestation_missing', 'debate_attestation_invalid', 'debate_attestation_changed',
   'debate_evidence_missing', 'debate_evidence_mismatch', 'debate_digest_mismatch', 'debate_request_mismatch', 'debate_response_invalid', 'debate_carrier_invalid',
   'debate_degradation_unacknowledged', 'debate_open_finding', 'debate_outcome_invalid', 'debate_limit_unsupported', 'debate_exception_missing',
-  'debate_disposition_pending', 'debate_reconfirm_required', 'debate_workdir_unbound', 'debate_narrative_hidden_markup']);
+  'debate_disposition_pending', 'debate_reconfirm_required', 'debate_workdir_unbound', 'debate_narrative_hidden_markup', 'debate_rejected_valid']);
 /** The frozen acknowledgement sentences of the `debate-dispositions-v1` line (exact text). */
 export const DEGRADED_ACK = 'The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply.';
 export const SKIP_ACK = 'The owner approves skipping the Planning Debate for this ticket only.';
@@ -193,7 +193,12 @@ const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DEBATE_ID_FORMAT = /^debate-[A-Za-z0-9][A-Za-z0-9._-]{0,100}-\d{8}T\d{4}Z$/;
 const CARRIER_KINDS = { codex: ['codex_relay'], claude: ['claude_relay', 'native_session'], fable: ['native_session', 'claude_relay'] };
 const PAIRED = { claude: 'codex', codex: 'claude' };
-const ROUND_STATUS = ['completed', 'failed', 'timeout', 'aborted', 'unavailable'];
+/**
+ * The actual status of an attempted round. `rejected` (STAB-410 F-7): the relay completed with exit code 0, but the answer is
+ * not a valid counterpart-response-v1 object. Its evidence stays hash-bound like a completed round's; it is never in the
+ * ledger, never the final AGREE, and a rejected last round is an incomplete review.
+ */
+const ROUND_STATUS = ['completed', 'rejected', 'failed', 'timeout', 'aborted', 'unavailable'];
 const SEVERITIES = ['blocker', 'major', 'minor'];
 const CONCRETE = new Set(['accept_risk', 'decided', 'waived']);
 const BRIEF_LINE = /^(request_id|plan_version|plan_digest): (\S+)$/;
@@ -771,7 +776,8 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   const open = [...ledger].filter(([, d]) => d.open);
   base.outstanding = open.map(([id]) => id);
   const last = rounds.at(-1);
-  // incomplete_review is DERIVED: the last round has no retained relay result, or a failed one (status not completed, or exit not 0)
+  // incomplete_review is DERIVED: the last round has no retained relay result, or a failed one (status not completed, or exit not 0);
+  // a rejected last round reports relay status `rejected` (verifyRound), so it is an incomplete review too (F-7)
   const lastRelay = isObject(last) ? perRound.get(last.n)?.relay : null;
   const derivedIncomplete = isObject(last) && (!lastRelay || lastRelay.status !== 'completed' || lastRelay.exitCode !== 0);
   if ((att.incomplete_review === true) !== derivedIncomplete) add('debate_attestation_invalid', `incomplete_review must be ${derivedIncomplete}, as derived from the retained result of the last round`);
@@ -823,7 +829,11 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
  * never fabricated: a completed relay round needs exit code 0 in the record and the result, every round is read-only,
  * and a completed round carries a non-empty session id bound to the result. Its response is the counterpart-response-v1
  * object, bound to the round's request_id, plan_version and plan_digest (also those of the brief that was sent).
- * Returns { diag, response }.
+ * A `rejected` round (F-7) needs the same evidence, exit code 0 and session binding as a completed one and records no
+ * verdict; its retained answer is re-parsed against the schema alone (no request binding, so relabelling the round's ids
+ * cannot turn a valid answer into a rejection) and a valid answer is refused (`debate_rejected_valid`): only an answer
+ * that really fails the schema may be left out of the ledger. Its relay is reported as `rejected`, never `completed`.
+ * Returns { relay, response }.
  */
 function verifyRound(r, att, bundleDir, add, store = new Map()) {
   const out = { relay: null, response: null };
@@ -832,6 +842,9 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
   const hashes = isObject(r.sha256) ? r.sha256 : {};
   if (r.read_only !== true) add('debate_carrier_invalid', `round ${r.n} is not recorded read_only: true`);
   if (r.status === 'completed' && !nonEmpty(r.session_id)) add('debate_carrier_invalid', `round ${r.n}: a completed round needs its non-empty session or thread id`);
+  const answered = r.status === 'completed' || r.status === 'rejected'; // the relay completed: an answer exists
+  if (r.status === 'rejected' && !nonEmpty(r.session_id)) add('debate_carrier_invalid', `round ${r.n}: a rejected round needs its non-empty session or thread id (its relay completed)`);
+  if (r.status === 'rejected' && r.verdict !== null && r.verdict !== undefined) add('debate_attestation_invalid', `round ${r.n}: a rejected round records no verdict (its answer is not counted)`);
   const read = (name) => {
     const rel = files[name];
     if (!relativeEvidence(rel)) { add('debate_attestation_invalid', `round ${r.n} ${name}: evidence paths are bundle-relative (no absolute path, no ..); out_dir is provenance only`); return null; }
@@ -844,14 +857,15 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
   };
   const unknown = Object.keys(files).filter((n) => !EVIDENCE_NAMES.includes(n));
   if (unknown.length) add('debate_attestation_invalid', `round ${r.n} files holds ${unknown.length} unknown evidence name(s) (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? ', ...' : ''}): only ${EVIDENCE_NAMES.join(', ')}; none is read`);
-  const need = r.status !== 'completed' ? [] : kind === 'native_session' ? ['message'] : ['brief', 'result', 'events'];
+  const need = !answered ? [] : kind === 'native_session' ? ['message'] : ['brief', 'result', 'events'];
   for (const n of need) if (!files[n]) add('debate_evidence_missing', `round ${r.n} is ${r.status} but has no ${n} evidence file`);
   const got = Object.fromEntries(EVIDENCE_NAMES.filter((n) => Object.hasOwn(files, n)).map((n) => [n, read(n)]));
-  if (r.status !== 'completed' && !files.result && !files.message) {
+  if (!answered && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
   }
   const expect = { request_id: r.request_id, plan_version: r.plan_version, plan_digest: r.plan_digest };
+  const bind = r.status === 'rejected' ? null : expect;
   let parsed = null;
   if (got.result) {
     let res;
@@ -860,22 +874,25 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
     if (shape) { add('debate_evidence_mismatch', `round ${r.n}: ${shape}`); return out; }
     out.relay = { status: res.status, exitCode: res.exitCode };
     const status = /_unavailable$/.test(String(res.status)) ? 'unavailable' : res.status;
-    if (status !== r.status) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
+    const want = r.status === 'rejected' ? 'completed' : r.status;
+    if (status !== want) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
     if (res.exitCode !== r.exit_code) add('debate_evidence_mismatch', `round ${r.n} records exit ${r.exit_code}, the relay result says ${res.exitCode}`);
     if (r.status === 'completed' && (r.exit_code !== 0 || res.exitCode !== 0)) add('debate_evidence_mismatch', `round ${r.n}: a completed round needs exit code 0 in the record and in the relay result`);
+    if (r.status === 'rejected' && (r.exit_code !== 0 || res.exitCode !== 0)) add('debate_evidence_mismatch', `round ${r.n}: a rejected round needs exit code 0 in the record and in the relay result (its relay completed)`);
     if (kind === 'codex_relay') {
-      if (r.status === 'completed' && res.threadId !== r.session_id) add('debate_carrier_invalid', `round ${r.n}: thread ${res.threadId} answered, not ${r.session_id}`);
+      if (answered && res.threadId !== r.session_id) add('debate_carrier_invalid', `round ${r.n}: thread ${res.threadId} answered, not ${r.session_id}`);
       if (res.sandbox !== 'read-only') add('debate_carrier_invalid', `round ${r.n}: the relay ran with sandbox ${res.sandbox}, not read-only`);
     } else if (kind === 'claude_relay') {
-      if (r.status === 'completed' && res.sessionId !== r.session_id) add('debate_carrier_invalid', `round ${r.n}: session ${res.sessionId} answered, not ${r.session_id}`);
+      if (answered && res.sessionId !== r.session_id) add('debate_carrier_invalid', `round ${r.n}: session ${res.sessionId} answered, not ${r.session_id}`);
       if (res.readOnly !== true) add('debate_carrier_invalid', `round ${r.n}: the Claude relay did not run read-only`);
       if (r.auth_method !== 'claude.ai') add('debate_carrier_invalid', `round ${r.n}: the Claude relay needs verified subscription authentication (authMethod claude.ai), not ${r.auth_method}`);
     }
     if (resolve(String(res.workdir)) !== resolve(String(att.workdir))) add('debate_carrier_invalid', `round ${r.n}: the relay ran in ${res.workdir}, not the debate workdir ${att.workdir}`);
-    if (r.status === 'completed') parsed = parseResponse(typeof res.finalMessage === 'string' ? res.finalMessage : null, expect);
-  } else if (got.message && r.status === 'completed') {
-    parsed = parseResponseBytes(got.message, expect);
-    out.relay = { status: 'completed', exitCode: 0 };
+    if (answered) parsed = parseResponse(typeof res.finalMessage === 'string' ? res.finalMessage : null, bind);
+    if (r.status === 'rejected') out.relay.status = 'rejected';
+  } else if (got.message && answered) {
+    parsed = parseResponseBytes(got.message, bind);
+    out.relay = { status: r.status, exitCode: 0 };
   }
   if (got.brief) {
     const b = briefFields(got.brief.toString('utf8'));
@@ -884,6 +901,10 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
     }
   }
   if (!parsed) return out;
+  if (r.status === 'rejected') {
+    if (parsed.ok) add('debate_rejected_valid', `round ${r.n} is recorded rejected, but its retained answer is a valid counterpart-response-v1 object (${parsed.obj.verdict}): a valid answer is never left out of the ledger`);
+    return out;
+  }
   if (!parsed.ok) { add(parsed.code, `round ${r.n}: ${parsed.why}`); return out; }
   if (parsed.obj.verdict !== r.verdict) add('debate_attestation_invalid', `round ${r.n} records verdict ${r.verdict}, the response object says ${parsed.obj.verdict}`);
   out.response = parsed.obj;
