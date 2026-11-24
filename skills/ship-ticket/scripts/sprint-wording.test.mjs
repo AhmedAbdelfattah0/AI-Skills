@@ -164,7 +164,7 @@ test('extended-run preflight and cold resume', () => {
 });
 
 test('SKILL.md additions', () => {
-  has(skill, '| A sprint or board link, or an explicit ticket list for an extended run | [references/sprint.md](references/sprint.md) |');
+  has(skill, 'For a sprint or board link, or an explicit ticket list for an extended run, also load [references/sprint.md](references/sprint.md).');
   has(skill, 'For a sprint or an extended run, ask once per wave or sprint, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision');
   has(skill, 'Before the first wave of an extended run, verify that a second reviewer can run (Codex, else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted; otherwise do not start.');
   has(skill, 'Sprint or extended run: read the queue file under `<git-common-dir>/ai-skills/ship-ticket/sprints/` and the existing artifacts, then name the next permitted action');

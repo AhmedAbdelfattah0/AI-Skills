@@ -101,7 +101,6 @@ Load a phase reference only when entering that phase:
 | Entering | Load |
 |---|---|
 | Workflow start | [references/observability.md](references/observability.md) |
-| A sprint or board link, or an explicit ticket list for an extended run | [references/sprint.md](references/sprint.md) |
 | UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) (load it once; PLAN and REVIEW reuse it, reloading only if it is no longer in context) |
 | PLAN | [references/plan.md](references/plan.md) |
 | BUILD | this spine and [references/brief.md](references/brief.md) |
@@ -114,6 +113,8 @@ Load a phase reference only when entering that phase:
 | PLAN when the plan chooses SPLIT | [references/units.md](references/units.md) |
 | BUILD, PROVE or REVIEW when any DAG node has `unit` | [references/units.md](references/units.md) |
 | On demand, when the operator card names it | [references/harness-internals.md](references/harness-internals.md) |
+
+For a sprint or board link, or an explicit ticket list for an extended run, also load [references/sprint.md](references/sprint.md).
 
 ## Execution harness (outside PLAN)
 
