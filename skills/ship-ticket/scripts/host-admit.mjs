@@ -6,8 +6,6 @@
  * prints ONE JSON line and exits 0 admit, 1 hold, 2 usage error or unsupported platform.
  * Non-macOS is NOT an allow: it prints admit:false, reason platform_unsupported (use the manual rule).
  * --running N = tasks already running (default 0); for class heavy it is the heavy-slot count passed to admitHost.
- * Stable pressure (level 2, swap flat, load fine, no provider errors, swap free >= 1 GB) admits light, and heavy only with
- * --running 0, as reason admitted_stable_pressure (exit 0) from the first window; exit codes are unchanged.
  */
 import { admitHost, hostSnapshot, isEntrypoint } from './harness.mjs';
 

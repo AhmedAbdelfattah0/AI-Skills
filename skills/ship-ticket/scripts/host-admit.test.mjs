@@ -10,7 +10,7 @@ const mk = (o = {}) => {
   let t = 1_000_000; let calls = 0;
   const snapshot = async () => {
     calls++;
-    const s = (extra = {}) => ({ t_ms: t, pressure_level: 1, swap_used_kb100: 10240000, load1: 1, load5: 1, load15: 1, ...(o.both ?? {}), ...extra });
+    const s = (extra = {}) => ({ t_ms: t, pressure_level: 1, swap_used_kb100: 10240000, load1: 1, load5: 1, load15: 1, ...extra });
     const a = s(); t += 20000; const b = s({ ...(o.latest ?? {}), swap_used_kb100: 10240000 + (o.swapGrowth ?? 0) }); const now = t + 1000;
     return { schema: HOST_SNAPSHOT_SCHEMA, platform: 'darwin', cores: 10, now_ms: now, samples: [a, b], provider_errors: o.providers ?? [], ...(o.snap ?? {}) };
   };
@@ -42,7 +42,7 @@ test('heavy --running 2 holds with held_heavy as the headline after both windows
   const r = await go(['--class', 'heavy', '--running', '2'], { snapshot: m.snapshot });
   assert.equal(r.code, 1); assert.equal(r.line.reason, 'held_heavy'); assert.equal(m.calls(), 2);
 });
-test('pressure without swap-free headroom in the snapshot holds without a second window', async () => {
+test('pressure holds without a second window', async () => {
   const m = mk({ latest: { pressure_level: 2 } });
   const r = await go(['--class', 'heavy'], { snapshot: m.snapshot });
   assert.equal(r.code, 1); assert.equal(r.line.reason, 'held_pressure'); assert.equal(m.calls(), 1);
@@ -79,25 +79,4 @@ test('CLI: exactly one JSON line on stdout, usage error exits 2 (real process, n
   assert.equal(p.status, 2);
   const lines = p.stdout.split('\n').filter(Boolean);
   assert.equal(lines.length, 1); assert.equal(JSON.parse(lines[0]).reason, 'usage'); assert.ok(p.stdout.endsWith('\n'));
-});
-
-// STAB-410 stable pressure (level 2, swap flat, load fine, no provider errors, swap free >= 1 GB): one window decides; exit codes unchanged.
-const GB100 = 1024 * 1024 * 100;
-const STABLE = (free = 2 * GB100, extra = {}) => ({ both: { pressure_level: 2, swap_free_kb100: free }, ...extra });
-test('[stable] stable pressure admits heavy with no heavy running (exit 0, reason admitted_stable_pressure, one window)', async () => {
-  const m = mk(STABLE());
-  const r = await go(['--class', 'heavy'], { snapshot: m.snapshot });
-  assert.equal(r.code, 0); assert.equal(r.line.admit, true); assert.equal(r.line.reason, 'admitted_stable_pressure');
-  assert.equal(r.line.signals.pressure_stable, true); assert.equal(m.calls(), 1);
-  const l = await go(['--class', 'light', '--running', '3'], { snapshot: mk(STABLE()).snapshot });
-  assert.equal(l.code, 0); assert.equal(l.line.reason, 'admitted_stable_pressure');
-});
-test('[stable] stable pressure with a heavy running holds (exit 1, held_heavy); below the swap-free floor holds (exit 1, held_pressure)', async () => {
-  const h = await go(['--class', 'heavy', '--running', '1'], { snapshot: mk(STABLE()).snapshot });
-  assert.equal(h.code, 1); assert.equal(h.line.admit, false); assert.equal(h.line.reason, 'held_heavy');
-  const m = mk(STABLE(GB100 - 1));
-  const f = await go(['--class', 'light'], { snapshot: m.snapshot });
-  assert.equal(f.code, 1); assert.equal(f.line.reason, 'held_pressure'); assert.equal(f.line.signals.swap_free, 'low'); assert.equal(m.calls(), 1);
-  const g = await go(['--class', 'heavy'], { snapshot: mk(STABLE(2 * GB100, { swapGrowth: 50_000_000 })).snapshot });
-  assert.equal(g.code, 1); assert.deepEqual(g.line.reasons, ['held_pressure', 'held_swap']);
 });

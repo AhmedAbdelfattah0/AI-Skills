@@ -328,7 +328,7 @@ export function resourceSnapshot() {
 // ---------------------------------------------------------------------------------------------
 export const HOST_POLICY = Object.freeze({
   pressure_levels: Object.freeze([1, 2, 4]), // documented kern.memorystatus_vm_pressure_level values
-  pressure_hold_level: 2,        // any sample in the window >= 2 is held_pressure, except stable pressure (STAB-410, below)
+  pressure_hold_level: 2,        // any sample in the window >= 2 holds
   load_num: 3,                   // any of load1/5/15 >= 60% of cores (= 3/5, compared as 5*load >= 3*cores, no float fraction) holds
   load_den: 5,
   sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
@@ -341,10 +341,6 @@ export const HOST_POLICY = Object.freeze({
   clean_samples_to_resume: 2,    // hysteresis: two clean samples with distinct, strictly increasing t_ms
   heavy_slots_healthy: 2,
   heavy_slots_default: 1,
-  // STAB-410 stable pressure (owner-approved temporary policy): level 2 with swap flat, load fine and no provider errors admits
-  // LIGHT, and HEAVY only while no HEAVY runs, when EVERY sample also shows swap FREE headroom of at least this floor:
-  // 1 GB = 1024*1024 KB = 104857600 hundredths of KB (exact integer, inclusive). Below it, or unknown, the host holds as for unsafe.
-  stable_pressure_swap_free_min_kb100: 104857600,
 });
 export const HOST_SNAPSHOT_SCHEMA = 'ship-ticket-host-snapshot-v2';
 export const HOST_HOLD_REASONS = Object.freeze(['held_pressure', 'held_swap', 'held_load', 'held_provider', 'held_heavy', 'held_hysteresis', 'held_resample', 'snapshot_unavailable', 'invalid_args']);
@@ -387,13 +383,11 @@ function validHistory(h) {
   return x;
 }
 const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'provider_errors'];
-// swap_free_kb100 is OPTIONAL (STAB-410): older injected v2 snapshots omit it; it is read only for stable-pressure admission.
-const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swap_used_kb100', 'swap_free_kb100', 'load1', 'load5', 'load15'];
+const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swap_used_kb100', 'load1', 'load5', 'load15'];
 // Unknown properties are rejected (stricter): an unrecognised field could be a signal this version does not understand.
 const onlyKeys = (o, keys) => Object.keys(o).every(k => keys.includes(k));
 function validSample(x) {
   return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swap_used_kb100)
-    && (!Object.hasOwn(x, 'swap_free_kb100') || isInt(x.swap_free_kb100))
     && ['load1', 'load5', 'load15'].every(k => typeof x[k] === 'number' && Number.isFinite(x[k]) && x[k] >= 0);
 }
 
@@ -410,7 +404,7 @@ function validSample(x) {
  * history.last_sample_t_ms; closer or older samples are held_resample with history unchanged.
  */
 export function admitHost(snapshot, cls, running, history) {
-  const result = (admit, reasons, signals, h, how = 'admitted') => ({ admit, reason: admit ? how : reasons[0], reasons, signals, history: h, terminate: [] });
+  const result = (admit, reasons, signals, h) => ({ admit, reason: admit ? 'admitted' : reasons[0], reasons, signals, history: h, terminate: [] });
   const hist = validHistory(history);
   const run = running;
   if ((cls !== 'HEAVY' && cls !== 'LIGHT') || !isPlain(run) || !isInt(run.total) || !isInt(run.heavy) || run.heavy > run.total
@@ -475,20 +469,14 @@ export function admitHost(snapshot, cls, running, history) {
   const resumed = base.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
   const healthy = clean && resumed;
   const heavy_slots = healthy ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
-  // STAB-410 stable pressure: the ONLY hold is level-2 pressure (no level 4 in the window; swap flat, load fine and no provider
-  // errors, which are separate holds) and every sample shows swap FREE headroom >= the floor. It is never 'clean' (the streak and
-  // hysteresis are untouched) and has one heavy slot, so HEAVY is admitted only while running.heavy == 0 (held_heavy otherwise).
-  const swapFree = samples.every(x => isInt(x.swap_free_kb100)) ? (samples.every(x => x.swap_free_kb100 >= HOST_POLICY.stable_pressure_swap_free_min_kb100) ? 'ok' : 'low') : 'unknown';
-  const pressureStable = holds.length === 1 && holds[0] === 'held_pressure' && samples.every(x => x.pressure_level <= HOST_POLICY.pressure_hold_level) && swapFree === 'ok';
-  const reasons = pressureStable ? [] : [...holds];
+  const reasons = [...holds];
   if (clean && !resumed) reasons.push('held_hysteresis');
   // HEAVY occupancy comes only from the caller's `running.heavy` (wave journal); real suites are serialized at execution time by heavy.sh.
   if (cls === 'HEAVY' && run.heavy >= heavy_slots) reasons.push('held_heavy');
   const admit = reasons.length === 0;
   return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
-    clean, clean_streak, healthy, heavy_slots, heavy_running: run.heavy, pressure_stable: pressureStable, swap_free: swapFree },
-  { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms },
-  pressureStable ? 'admitted_stable_pressure' : 'admitted');
+    clean, clean_streak, healthy, heavy_slots, heavy_running: run.heavy },
+  { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
 }
 
 /**
@@ -518,10 +506,6 @@ const UNIT_KB100 = { K: 1n, M: 1024n, G: 1048576n };   // hundredths-of-KB per h
  * exactly; any rounding mismatch is rejected = fail-closed). Returns used in hundredths of KB as a safe integer, or null.
  */
 export function parseSwapUsedKb100(out) {
-  return parseSwapKb100(out)?.used ?? null;
-}
-/** The same one-record grammar and exact arithmetic as parseSwapUsedKb100, returning { used, free } (hundredths of KB) or null. */
-export function parseSwapKb100(out) {
   if (typeof out !== 'string') return null;   // the grammar itself is length-bounded (< 120 chars)
   const m = SWAP_RE.exec(out);
   if (!m) return null;
@@ -529,7 +513,7 @@ export function parseSwapKb100(out) {
   const total = v(1, 3), used = v(4, 6), free = v(7, 9);
   // used <= total is implied by the exact sum (free >= 0), so it needs no separate (tolerance-prone) comparison.
   if (total !== used + free || total > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return { used: Number(used), free: Number(free) };
+  return Number(used);
 }
 const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl' });
 /**
@@ -552,8 +536,7 @@ export async function hostSnapshot(probe = {}) {
     if (i > 0) await sleep(intervalMs);
     const la = loadavg();
     const [l1, l5, l15] = Array.isArray(la) && la.length === 3 ? la : [null, null, null];
-    const t = now(), pressure = parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), sw = parseSwapKb100(run(BIN.sysctl, ['-n', 'vm.swapusage']));
-    base.samples.push({ t_ms: t, pressure_level: pressure, swap_used_kb100: sw?.used ?? null, swap_free_kb100: sw?.free ?? null, load1: l1, load5: l5, load15: l15 });
+    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swap_used_kb100: parseSwapUsedKb100(run(BIN.sysctl, ['-n', 'vm.swapusage'])), load1: l1, load5: l5, load15: l15 });
   }
   base.now_ms = now();
   return base;

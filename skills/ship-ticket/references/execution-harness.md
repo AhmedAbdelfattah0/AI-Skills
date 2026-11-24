@@ -97,15 +97,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   `running` occupancy. It is fail-safe: any invalid snapshot, history or argument holds
   (`snapshot_unavailable` / `invalid_args`), including every non-darwin host without an injected valid
   snapshot; there is no fallback admit and it never terminates running work. HEAVY cap is 1, or 2 only
-  when healthy. Stable pressure (STAB-410, owner-approved temporary policy): when the only stop signal
-  is kernel pressure level 2 (no sample at level 4 or above, swap used flat, load below the limit, no
-  provider errors) and every sample shows swap FREE headroom of at least 1 GB
-  (`HOST_POLICY.stable_pressure_swap_free_min_kb100`, inclusive), LIGHT is admitted and HEAVY only while
-  `running.heavy` is 0 (strictly serial; otherwise `held_heavy`), with reason `admitted_stable_pressure`
-  and `signals.pressure_stable: true`. It is never counted as a clean sample (history stays `held`, the
-  hysteresis below is unchanged). Swap free below the floor, or not in the snapshot, holds both classes
-  with `held_pressure` (`signals.swap_free` is `low` or `unknown`); level 4, swap growth, high load,
-  provider errors and an unusable snapshot hold both classes as before. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
+  when healthy. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
   `held_hysteresis`, `held_resample`. Caller contract: a host that is recovering (`held_hysteresis`)
   needs two clean samples, each at least 15 s after the previous counted one, and the next sample must
   arrive within 30 s or the recovery streak restarts. An already-open host also needs counted samples at
@@ -116,8 +108,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   growth)"; `admitHost` uses swap USED growth (above a 2 MB tolerance, strictly greater, between any earlier and later
   sample of the window) from the single-record `sysctl -n vm.swapusage`, the same intent from a numeric
   one-line source instead of multi-line `vm_stat` text; high absolute swap alone never blocks. The snapshot
-  schema is `ship-ticket-host-snapshot-v2`; each sample may also carry `swap_free_kb100` (the `free` of the
-  same `vm.swapusage` record, read only for stable pressure; an older snapshot without it is still valid). Every kernel input is matched by ONE whole-output grammar (no
+  schema is `ship-ticket-host-snapshot-v2`. Every kernel input is matched by ONE whole-output grammar (no
   splitting or line selection): pressure `/^[124]\n?$/`, swap `total = N.NNu  used = N.NNu  free = N.NNu`
   with only `  (encrypted)` optional (`u` is K, M or G); any other shape is `snapshot_unavailable`. All swap
   and load decisions use EXACT arithmetic: each `N.NN` is parsed to an integer count of hundredths (BigInt), converted to
@@ -134,10 +125,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
   parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
   reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most
-  once every 5 minutes or ask the owner. An unsafe hold is any hold that stable pressure does not admit: pressure level 4 or
-  above, swap growth, high load, provider errors, an unusable snapshot, swap free below the 1 GB floor (or not in the
-  snapshot), or a HEAVY already running under pressure (`held_heavy`). A level-2 hold therefore still exists whenever swap
-  free is below the floor; under that hold, waiting rarely helps, so stop after 2 identical holds as above.
+  once every 5 minutes or ask the owner.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers
