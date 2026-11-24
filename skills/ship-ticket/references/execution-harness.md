@@ -134,7 +134,10 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
   parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
   reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most
-  once every 5 minutes or ask the owner.
+  once every 5 minutes or ask the owner. An unsafe hold is any hold that stable pressure does not admit: pressure level 4 or
+  above, swap growth, high load, provider errors, an unusable snapshot, swap free below the 1 GB floor (or not in the
+  snapshot), or a HEAVY already running under pressure (`held_heavy`). A level-2 hold therefore still exists whenever swap
+  free is below the floor; under that hold, waiting rarely helps, so stop after 2 identical holds as above.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers

@@ -74,6 +74,12 @@ test('F-14: the turn may end while waiting on a host-tracked background command,
 test('admission anti-loop: re-sample only while the reasons change; stop after 2 identical unsafe holds', () => {
   const t = doc('execution-harness.md');
   assert.ok(t.includes('Anti-loop rule: re-sample only while the set of hold reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most once every 5 minutes or ask the owner.'));
+  // STAB-410 PR-2: "unsafe" is defined against the stable-pressure admission, including the swap-free floor
+  assert.ok(t.includes('An unsafe hold is any hold that stable pressure does not admit: pressure level 4 or above, swap growth, high load, provider errors, an unusable snapshot, swap free below the 1 GB floor (or not in the snapshot), or a HEAVY already running under pressure (`held_heavy`).'));
+  assert.ok(!/stable-pressure-only hold no longer exists/i.test(t), 'a level-2 hold still exists below the swap-free floor');
+  const cm = doc('cross-model.md');
+  assert.ok(!cm.includes('is shown in section 7 as information'), 'F-8: cost is not narrated in the digest-bound section 7');
+  assert.ok(cm.includes('and timing are recorded only in the plan-resident attestation (`metrics`), outside the digest'));
 });
 
 test('F-4 resume: understand.md routes on the START event, not on the approval_status header', () => {

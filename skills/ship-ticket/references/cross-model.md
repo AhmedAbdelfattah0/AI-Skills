@@ -211,7 +211,9 @@ A blocker/major is closed only when a verified counterpart response object lists
 The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval. Escalate only for a
 genuine unresolved decision, stagnation after a strategy change, or an actual
 resource or provider limit. Cost (calls, minutes, tokens when the carrier reports
-them) is shown in section 7 as information.
+them) and timing are recorded only in the plan-resident attestation (`metrics`), outside the digest; section 7 holds the
+attestation reference and the findings ledger of the substantive rounds, so recording cost never needs another
+confirmation round.
 
 ### Initial challenge
 
