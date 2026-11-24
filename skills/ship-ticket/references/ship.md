@@ -29,7 +29,7 @@ Every event carries run_id, event and timestamp. Use only these event names:
 | Event | Required evidence |
 |---|---|
 | **START** | `approved_plan_digest` (`sha256:<64 hex>`), `approved_by` (REQUIRED for new runs; descriptive metadata only, presence-checked and not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding), optionally `approval_surface` (`terminal|desktop|plannotator`; OPTIONAL audit field, never evidence of approval), target base and approval time (`approved_at`, ISO-8601, not in the future; `timestamp` is read when absent), which sets security-policy grandfathering. Compute the digest with `node scripts/brief.mjs plan-digest --plan <plan>`, never with `shasum`; write START only after the narrative is final; run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>` before dispatching (`--run-id` is required; a START without a safe `run_id` is refused, as the engine ignores it; a `timestamp`-only START passes with a `start_timestamp_legacy` warning because the engine reads it, but new runs write `approved_at`; `ok` is necessary, not sufficient, because start-check cannot see the engine's trusted-START quiescence rule); never edit the narrative after START |
-| **RED** | test paths, exact command, failing test names with their assertion messages, any stub paths written first; appended before the first non-test Design Contract write |
+| **RED** | test paths, exact command, failing test names with their assertion messages, any stub paths written first; appended before the first non-test Design Contract write. On an engine run the RED record is the `gate red` evidence and no hand-written RUN-STATE RED line is required; on the manual flow the orchestrator appends the RED line. Unsupported runner output (a refused `gate red`) falls back to the manual event, marked degraded. |
 | **PROVE** | command outcomes, rule/test/docs/parity/VAPT evidence and degradations |
 | **REVIEW** | profile, candidate ID, primary identity, optional identity/degradation, coverage, findings, dispositions and outcome |
 | **REPAIR** | finding IDs, changed paths, affected closure, rerun commands and new candidate ID |
@@ -125,7 +125,7 @@ a second approval.
 **Reuse valid evidence** (before REVIEW freezes the candidate). After a green run, a docs-only or otherwise unaffected delta
 re-runs only the gates whose inputs it changes; unchanged evidence is reused. A run
 made with a dirty-tree override (a repository gate's `--allow-dirty` or equivalent) is
-never final evidence, and the final validation still runs on the delivered candidate. Record timing through the existing run log only.
+never final evidence (a gate script that diffs `merge-base...HEAD` checks nothing before the one commit), and the final validation still runs on the delivered candidate. Record timing through the existing run log only.
 
 Append SHIP_READY and the one predeclared ticket-keyed session-log entry. Those two
 recording writes are excluded from candidate identity. No code, test, comment,

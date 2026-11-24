@@ -132,7 +132,9 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   and exits 0 admit, 1 hold, 2 usage error, unsupported platform or an internal failure (`reason:"error"`). Non-macOS prints
   `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
-  parallelism or wait, then ask again; never terminate running work.
+  parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
+  reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most
+  once every 5 minutes or ask the owner.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers
@@ -299,7 +301,10 @@ are refused, never dropped.
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
   runs every entry as the local proof; On an Nx monorepo, the RED runner is the direct Vitest command (`vitest-json`), not
   Nx: Nx prints banner lines before the JSON, so `gate red` refuses it
-  `unsupported_output`. Nx stays fine as a PROVE/proof command (measured on a dry run:
+  `unsupported_output`. "Direct Vitest" applies only when a vitest config exists for the project. An Angular project whose `test` target is
+  `@angular/build:unit-test` has no vitest config; its RED runner is an `sh -c` wrapper with `format: vitest-json`:
+  `sh -c 'f=$(mktemp "${TMPDIR:-/tmp}/red.XXXXXX") || exit 97; npx nx test <project> --skip-nx-cache --include=<workspace-relative spec> --reporters=json --outputFile="$f" >/dev/null 2>&1; rc=$?; cat "$f"; rm -f "$f"; exit $rc'`
+  (it prints only the report file, which is jest-shaped JSON that `parseRunnerOutput('vitest-json')` accepts). Nx stays fine as a PROVE/proof command (measured on a dry run:
   direct Vitest RED accepted, Nx RED refused, Nx PROVE accepted). Choose it before
   approval, because `DAG_BOUND` fixes the runner.), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with

@@ -139,9 +139,16 @@ handling. Never authorize edits, nested agents, commits or tracker operations in
 a reviewer brief.
 
 Host Plan Mode restrictions also apply to the carrier. Temporary files do not
-make a forbidden shell write permissible. The carrier is derived from the
-host/counterpart pair (Claude host: the Codex relay; Codex host: the Claude relay
-or a Claude session; Fable only as the declared substitute). At PLAN start, inside
+make a forbidden shell write permissible. The one supported PLAN debate route is
+the read-only relay (`codex_relay` on a Claude host, `claude_relay` on a Codex host;
+Fable only as the declared substitute, through the same relay with `--model`, kind `claude_relay`). The
+relay's own out-dir under the host session scratchpad is the single write besides
+the plan file, and the orchestrator writes nothing else (no host-side scratch file).
+Dispatch goes through the host's normal permission flow: a permission prompt is the
+owner's approval, a refusal is reported with its class and the degradation policy
+below applies, and the relay's out-dir writes are disclosed next to the approval
+request. The `native_session` carrier kind is unsupported for PLAN on a host without
+a defined evidence writer (the verifier code stays; nothing is deleted). At PLAN start, inside
 the actual native Plan Mode context, run the PLAN carrier probe
 (`brief.mjs debate-probe`, [codex-cli.md](codex-cli.md) "PLAN carrier probe") and
 record its five separate capabilities in the plan header
@@ -157,7 +164,7 @@ A host permission prompt is the owner's normal approval. Never ask for a broad
 allow rule or a Plan Mode bypass; the only permission you may suggest, as the
 owner's choice, is one exact-command rule for the relay invocation. A failed probe
 is reported with its class, then the authorized policy follows: the Fable
-substitute (a subagent runs inside Plan Mode) with `carrier.degraded: true` and the
+substitute (through the same read-only relay, kind `claude_relay`) with `carrier.degraded: true` and the
 frozen acknowledgement; if Fable cannot run either, `WAIT_FOR_USER` or an explicit
 owner exception, without exiting Plan Mode early to run anything. The REVIEW probe
 is unchanged; this governs only the PLAN probe.
@@ -195,8 +202,7 @@ for display only; an alias never opens or closes a finding. A round is productiv
 uncertainty with evidence, or adds a concrete discriminating check or result
 relevant to an open canonical finding; a quoted line that changes none of these is
 not evidence. Two consecutive non-productive rounds on the same canonical finding are a diagnostic trigger, never a stop. Climb this ladder: (1) an evidence task
-(the host or a read-only agent runs a concrete repository check or scratch
-prototype and attaches the result); (2) a fresh counterpart session carrying the
+(the host or a read-only agent runs a concrete repository check and attaches the result; a scratch prototype is read-only or runs after approval, never as a host-side scratch file during PLAN); (2) a fresh counterpart session carrying the
 delta and the ledger, recording which strategies already failed; (3) if rounds are
 still non-productive, escalate as `UNRESOLVED` with both positions. A legitimately
 maintained finding may take more than two exchanges while rounds stay productive.
