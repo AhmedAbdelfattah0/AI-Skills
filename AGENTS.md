@@ -304,16 +304,16 @@ complexity ceilings and the YAGNI list — so if you touch either row, keep both
 `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards
 `code-quality` routes to when a diff touches tests or docs.
 
-**The four security skills, and the one line that separates them.** Three of them
-**read code**; only `vapt` **runs it**. Keep that boundary — it is the entire
-reason `vapt` exists as a separate skill rather than a section of one of the
-others:
+**The two security layers in this repository, and the one line that separates them.**
+`code-quality` **reads code**; only `vapt` **runs it**. Keep that boundary — it is the
+entire reason `vapt` exists as a separate skill rather than a section of the
+other. Write-time secure-coding patterns and whole-codebase static audits belong
+to the optional general skills `security` and `security-audit`, which no longer
+live in this repository.
 
 | Skill | When | Method |
 |---|---|---|
-| `security` | while writing | secure-by-default patterns, refuse-to-generate list |
 | `code-quality` `stack-backend.md` (`BE-SEC-*`/`BE-AUTH-*`/`BE-TEN-*`) | on the diff, in ship-ticket's rule pass | static rule IDs — *the control exists in the file* |
-| `security-audit` (external: cloudflare/security-audit-skill; output outside the repo) | whole codebase, on request | coverage-ledger hunting waves, independently verified findings, validated `findings.json` |
 | `vapt` (`VAPT-API-*`/`WEB-*`/`CFG-*`/`ABUSE-*`) | after the code is written, in ship-ticket's PROVE phase | attacks a **local** instance — *the control engages* — and commits the abuse cases as tests |
 
 `vapt` is scoped by **trust boundaries, not files** (a pure formatter has no
@@ -336,9 +336,8 @@ narrowed predicate cannot hide a surface. **Never point it at production or shar
 staging**; that rule of engagement is load-bearing, not boilerplate.
 
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
-library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
-(`.specs/vapt/`), `security-audit` (external Cloudflare skill), `project-audit`
-(`.specs/project-audit/`). The removed `spec-driven` skill historically
+library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`) and `vapt`
+(`.specs/vapt/`). The removed `spec-driven` skill historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
 existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
 working while new ones converge. **Never introduce a third root**, and when
@@ -541,58 +540,6 @@ check** (diff against that pinned SHA). Both carry a one-sentence fallback gloss
 skill still makes sense installed alone. If you rename a gate in `ship-ticket`,
 update those glosses too.
 
-**`project-audit` assesses a whole built application and changes nothing.** It
-fills the scope none of the others own: `ship-ticket` is one ticket,
-`security-audit` static security only, `vapt` runtime attacks only, and the
-code-quality family owns rules. It is an orchestrator with **no rule catalogue** —
-every judgment routes to those specialists (report-only, as an explicit audit)
-or to the repository's own commands. These properties are load-bearing:
-
-- **One pinned system state, read from detached audit worktrees.** Any stack or
-  shape: a single repository or monorepo has one pin; a system spread over several
-  local repositories has a per-repository pin vector plus a digest. Scope comes
-  from the user's selection and repository evidence, never from crawling sibling
-  directories or cloning referenced repositories. Edits in live checkouts cannot
-  enter the evidence. A checkout moving on invalidates nothing, but the report
-  names the unaudited commits per repository, and a changed pin vector is a new
-  run. Every path and finding carries its repository ID. Names come from
-  repository metadata, so they are never used raw on disk: evidence directories
-  use a slug-plus-hash `artifact_key`, every worktree and artifact destination
-  must resolve inside the audit's own directories or the run ends `INCOMPLETE`,
-  and repository identity has credentials, queries and fragments stripped before
-  it is hashed or stored. The only write is
-  `.specs/project-audit/<run-id>/` in one audit-root repository; other
-  repositories keep only this run's temporary worktree metadata.
-- **One coverage matrix, four lanes that never substitute** — static, automated,
-  functional, adversarial. Each subject-lane row gets exactly one of `PASS`,
-  `FAIL`, `DEGRADED` or `NOT_APPLICABLE`. A missing capability is `DEGRADED`,
-  never a pass, and a cross-system row with a missing participant is `DEGRADED`.
-  An in-scope repository that cannot be pinned becomes a placeholder component, so
-  it stays in the accounting, and a stub never passes a row for it. A `FAIL`
-  never cancels a gap: release assessment reads the critical coverage
-  degradations directly, not the outcome a row displays. It deliberately uses only these four tokens, not ship-ticket's
-  canonical five.
-- **`vapt` runs narrowed inside it:** AUDIT mode only with explicit authorization,
-  abuse tests written in a disposable worktree and exported as a patch, never
-  committed; no fix step, no CI change. Findings never authorize fixes.
-- **No health score.** The release assessment is categorical and derived from
-  the matrix, so an untested critical journey cannot be averaged away.
-- **No silent loss of historical findings.** Every observation from prior terminal
-  runs gets an explicit disposition; partial mappings and unverified claims keep
-  linked coverage gaps. Severity/status changes need evidence and a reason.
-  The bundled continuity checker gates REPORT structurally, not semantically.
-  Comparing completed reports is read-only and never reopens them or imports
-  historical runtime results as current passes.
-- **Tracker publication is a separate, confirmed post-audit action.** The audit
-  writes only its local artifacts by default. On an explicit publish request,
-  selected findings may be drafted as Azure DevOps or Jira `Bug`/`Task` items;
-  the exact redacted payloads, destination, types and selection are shown before
-  one action-time confirmation. A stable run-and-finding marker is searched
-  before every create and after ambiguous failures, partial success is recorded
-  per item, and exploitable detail goes only to a verified private destination
-  or is redacted. Publication never changes the audit verdict and never
-  authorizes implementation.
-
 **`ship-ticket`'s `codex review` invocation is version-pinned knowledge, verified on
 `codex-cli 0.145.0`:** the scope flags (`--uncommitted`, `--base`, `--commit`)
 **each conflict with a custom `[PROMPT]`**, including the `-` stdin form — the
@@ -631,9 +578,6 @@ matching pattern when extending them:
   target tip, overlap with declared paths). The engine's opt-in audit trail (`config.auditRecord`, W3-record) only adds fields to review
   records, gate lines and events; `run-engine-record.test.mjs` pins that no decision, authority or
   digest changes, and `engine-record-mutation.test.mjs` plants each guard's mutant.
-- **`project-audit`** — *executes its bundled dependency-free Node continuity
-  checker in place*. It reads current/prior manifests without writing to the
-  audited repositories; structural accounting does not replace evidence review.
 
 ## Reuse first, with a value test
 

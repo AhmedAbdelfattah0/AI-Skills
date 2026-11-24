@@ -36,7 +36,7 @@ npx github:AhmedAbdelfattah0/AI-Skills list
 npx github:AhmedAbdelfattah0/AI-Skills install
 
 # install ONE skill, or SEVERAL (space-separated)
-npx github:AhmedAbdelfattah0/AI-Skills install security
+npx github:AhmedAbdelfattah0/AI-Skills install vapt
 npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
 
 # the ticket workflow — write the backlog, then implement it ticket by ticket
@@ -121,7 +121,7 @@ re-syncs.
 node scripts/cli.mjs update           # pull the source, then re-sync every skill it installed
 node scripts/cli.mjs update --check   # say what would change; write nothing
 node scripts/cli.mjs update --prune   # also remove skills that no longer exist upstream
-node scripts/cli.mjs update security  # just this one
+node scripts/cli.mjs update vapt      # just this one
 ```
 
 It updates **every** skills directory it finds — Claude Code, Codex, Gemini, Antigravity — not only
@@ -192,7 +192,7 @@ node scripts/cli.mjs install --target codex               # OpenAI Codex   → ~
 node scripts/cli.mjs install --target gemini              # Gemini CLI     → ~/.gemini/skills
 node scripts/cli.mjs install --target antigravity         # Antigravity    → ~/.gemini/config/skills
 node scripts/cli.mjs install --target all                 # Claude + Codex + Gemini + Antigravity at once
-node scripts/cli.mjs install security --target claude,codex   # one skill, two tools
+node scripts/cli.mjs install vapt --target claude,codex       # one skill, two tools
 node scripts/cli.mjs install --dest /path/to/dir          # any other tool's skills dir
 ```
 
@@ -223,11 +223,11 @@ Per-tool notes:
 
 **Portability caveat:** every skill loads in every standard-compliant tool, but a few contain
 instructions that only make sense in Claude Code — `nn-guard` installs a Claude Code hook (its
-CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code commands like
+CI half is portable), and `ship-ticket` references Claude Code commands like
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (17)
+## Skills (9)
 
 | Skill | Extras |
 |---|---|
@@ -235,16 +235,8 @@ Claude-only.
 | docs-accuracy | `references/` (claim verification, code samples, docstrings) |
 | backend-code-quality | deprecated alias for one release: load `code-quality` (stack: backend) |
 | code-quality | `references/` (entry + `stack-angular.md` `NG-*`, `stack-backend.md` `BE-*`, constitution, guard, per-stack summaries) |
-| design-prompts | `references/` (core contract with the two gates and the binding, tool adapters for the Claude canvas and code generators, design-system template, motion and finish catalogue, part-2 split, codebase inventory, writer brief, depth standard, verification protocol) |
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
-| marketing-video | `references/` + `scripts/` (factual product videos from real captures: claim-gated timeline, local Remotion render, measured QA, independent frame review, shot-preserving revisions; `.specs/marketing-video/`) |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
-| project-audit | `references/` + `scripts/` (whole-project assessment, historical-finding continuity guard and read-only report comparison, with optional confirmed publishing as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
-| security | — |
-| security-audit | vendored from cloudflare/security-audit-skill; auto-synced daily (`scripts/sync-external.mjs`) |
-| self-healing | — |
-| session-logger | — |
-| session-restore | — |
 | ship-ticket | `references/` + `scripts/` (contract-first parallel delivery, Claude↔Codex planning debate and review, stable candidate identity, and timing telemetry) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
 | vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |
@@ -304,7 +296,7 @@ CI runs the same Node validator on every push/PR, so a skill that breaks the rul
 
 ```bash
 ./scripts/package.sh                 # build dist/<name>.skill zips (needs python3; dist/ is gitignored)
-./scripts/package.sh session-logger  # just one
+./scripts/package.sh ship-ticket     # just one
 ```
 
 `.skill` files are plain zips with the skill folder at the root — a `.md` renamed to `.skill` is **not**
@@ -316,4 +308,3 @@ valid, which is why `package.sh` zips programmatically.
   `ai-failure-modes.md` / `universal-principles.md` are adapted from
   [amElnagdy/guard-skills](https://github.com/amElnagdy/guard-skills) (MIT),
   with primary-source citations in each skill's `sources.md`.
-- `session-logger` / `session-restore` are the current inlined versions (no external scripts).

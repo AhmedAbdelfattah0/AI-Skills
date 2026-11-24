@@ -29,23 +29,14 @@ jobs:
       # Node validator is canonical and cross-platform (also runnable on Windows).
       - name: Run skill validator
         run: node scripts/cli.mjs validate
-      # Runs the extraction command exactly as skills/session-restore/SKILL.md documents it (needs sh and awk).
-      - name: Test session-restore extraction command
-        run: node --test skills/session-restore/restore.test.mjs
       - name: Test ship-ticket telemetry
         run: node --test skills/ship-ticket/scripts/run-log.test.mjs
-      - name: Test project-audit continuity
-        run: node --test skills/project-audit/scripts/check-continuity.test.mjs
-      - name: Test marketing-video gates
-        run: node --test skills/marketing-video/scripts/gates.test.mjs skills/marketing-video/scripts/qa.test.mjs
       - name: Test vapt control catalog
         run: node --test skills/vapt/controls.test.mjs
       - name: Test vapt selection fixtures
         run: node --test skills/vapt/fixtures.test.mjs
       - name: Test vapt effectiveness tools
         run: node --test skills/vapt/effectiveness.test.mjs
-      - name: Test vendored security-audit validators
-        run: node --test skills/security-audit/validate-findings.test.cjs skills/security-audit/validate-coverage-ledger.test.cjs
       # Append-only is checked against the PR base (pull_request) or the pre-push sha (push); needs fetch-depth: 0.
       - name: Test and check review-rounds ledgers
         env:
