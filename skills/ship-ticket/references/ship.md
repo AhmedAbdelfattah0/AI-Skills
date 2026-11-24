@@ -89,10 +89,8 @@ concurrently, then join once:
   change is a plan change, re-approved through `ExitPlanMode`, never an edit at
   SHIP. Rerun `contract --verify-quote` against the saved quote block (only the four-backtick quote, extracted from the request) and
   the SHIP record; a FAIL blocks SHIP. Verification does not prove what the
-  owner saw or authorize execution: native ExitPlanMode approval from a trusted
-  terminal remains mandatory, and without it SHIP reports `scope approval NOT
-  verified: the approval surface does not meet the trusted-terminal requirement;
-  do not build`.
+  owner saw or authorize execution: native ExitPlanMode approval given on a qualified
+  approval surface remains mandatory, and without it SHIP reports `scope approval NOT verified: the approval was not a native ExitPlanMode approval on a qualified approval surface; do not build`.
   At SHIP, exit 1 is **WAIT_FOR_USER** (a Design Contract expansion needs
   re-approval); exit 2 or 3 means fix the input and rerun, and never commit
   meanwhile. A refusal leaves any earlier record in place by design; it is never

@@ -93,6 +93,11 @@ function wholeFileHashes(planText) {
   return new Set([`sha256:${sha256(planText)}`, `sha256:${sha256(withoutStart)}`]);
 }
 
+/** Where the owner gave the plan decision. Recorded only; never evidence (see startCheck). Qualified surfaces are named in plan.md. */
+export const APPROVAL_SURFACES = Object.freeze(['terminal', 'desktop', 'plannotator']);
+/** A START approved from this instant on must carry approval_surface; earlier STARTs may omit it. FINALIZED BY THE OWNER AT MERGE/INSTALL, like DEBATE_POLICY_CUTOFF. */
+export const APPROVAL_SURFACE_CUTOFF = '2026-12-01T00:00:00.000Z';
+
 /**
  * Validate the START event of one run in a plan's RUN-STATE block. Read-only. Returns { ok, errors, warnings, run_id, digest }
  * where each error is { code, message }. `runId` is required (the engine always filters START on run_id).
@@ -147,6 +152,15 @@ export function startCheck(planText, { runId, now = Date.now(), bundleDir = null
   // authorization; authority is native Plan Mode approval plus the approved-plan digest binding (checked above).
   const by = start.approved_by;
   if (typeof by !== 'string' || !by.trim()) add('start_approver_missing', 'START has no approved_by (descriptive metadata: who approved the plan)');
+  // approval_surface: DESCRIPTIVE METADATA, recorded only (where the owner gave the decision). It is NEVER evidence of
+  // approval and never changes any other check: authority is the native ExitPlanMode approval on a qualified surface plus
+  // the digest binding above. Compatibility rule: a present value must be exactly one of APPROVAL_SURFACES (any START);
+  // an absent value is accepted on a START approved before APPROVAL_SURFACE_CUTOFF and refused from it on.
+  if (Object.hasOwn(start, 'approval_surface')) {
+    if (typeof start.approval_surface !== 'string' || !APPROVAL_SURFACES.includes(start.approval_surface)) add('start_approval_surface_invalid', `approval_surface must be exactly one of ${APPROVAL_SURFACES.join(', ')} (descriptive metadata only, never evidence of approval)`);
+  } else if (typeof at === 'string' && realInstant(at) && Date.parse(at) <= now + SKEW_MS && Date.parse(at) >= Date.parse(APPROVAL_SURFACE_CUTOFF)) { // a bad approval time keeps its one exact code
+    add('start_approval_surface_missing', `START has no approval_surface (one of ${APPROVAL_SURFACES.join(', ')}; required for a plan approved from ${APPROVAL_SURFACE_CUTOFF} on)`);
+  }
   // S4 debate fields: checked only on a valid approval time, so an invalid START keeps its one exact code.
   if (!errors.some((e) => /^start_(approved_at|at_not)/.test(e.code))) debateStartCheck(planText, start, { bundleDir, repo, digest, add });
   return { ok: errors.length === 0, errors, warnings, run_id: runId, digest };

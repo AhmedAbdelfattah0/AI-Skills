@@ -461,7 +461,7 @@ Plan Mode before the debate has been reconciled and
 `brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` plan is presented for the owner's disposition; see
 [references/cross-model.md](references/cross-model.md) "PLAN debate"); state the
 attestation line's sha256 in the text accompanying `ExitPlanMode`, and do not
-treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.
+treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text. The `debate-dispositions-v1:` line must also be in the plan text itself, so a surface that shows only the plan shows it.
 Before `ExitPlanMode` on a policy-2 plan with an execution DAG, run
 `scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`.
 It checks the plan and DAG as `init` will, with no START and no write. Fix any

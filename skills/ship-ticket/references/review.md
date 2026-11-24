@@ -43,12 +43,11 @@ Finish these checks before announcing REVIEW or appending its start event:
   It byte-compares the quoted body with the plan block and `record.contract`.
   Verification does not by itself prove what the owner saw and does not authorize
   execution: native ExitPlanMode approval remains mandatory, and it counts only
-  when the complete, untruncated, literal request was presented in a trusted
-  terminal (browser, GitHub and editor previews never count). If the approval
-  surface could not meet that, report `scope approval NOT verified: the approval
-  surface does not meet the trusted-terminal requirement; do not build` and stop.
-  Raw HTML in the plan is no longer refused by the check; such viewers are
-  excluded by that policy. The reviewer reads the block and checks every supporting path, which lies outside the Design Contract (on an
+  when given on a qualified approval surface (see [plan.md](plan.md); browser,
+  GitHub and editor previews never count). If the approval was not a native
+  ExitPlanMode approval on a qualified surface, report `scope approval NOT verified: the approval was not a native ExitPlanMode approval on a qualified approval surface; do not build` and stop.
+  Raw HTML in the plan is no longer refused by the check; a viewer that lets it
+  hide or run content does not qualify, by that policy. The reviewer reads the block and checks every supporting path, which lies outside the Design Contract (on an
   engine policy-2 run reassess reports it as out-of-plan; supporting is most
   useful in manual mode). Exit 1 (a material
   path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through

@@ -1048,7 +1048,7 @@ test('S6 and F11 wording pins', () => {
   assert.ok(ref('plan.md').includes('````markdown\n'), 'the template has a four-backtick outer fence');
   assert.ok(plan.includes('```scope-contract {"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]} ```'));
   assert.ok(plan.includes('The Files touched column is explanation for the approver and is read by no script; the fenced `scope-contract` block is the authoritative scope.'));
-  assert.ok(plan.includes('Scope approval is valid only when the complete, untruncated, literal ExitPlanMode request is presented in a trusted terminal, without active rendering or control-sequence ambiguity, and the canonical contract is verified byte for byte with `contract --verify-quote`.'));
+  assert.ok(plan.includes('Scope approval is valid only from a native ExitPlanMode approval given on a qualified approval surface: a surface that shows the complete, untruncated plan and does not let raw HTML or Markdown extensions hide or run content. Qualified surfaces: the Claude Code terminal, Claude Desktop, and Plannotator\'s Approve action.')); // supersedes the old single-surface pin (2026-11-24)
   assert.ok(plan.includes('Browser, GitHub and editor previews are never valid approval surfaces.'));
   assert.ok(plan.includes('native ExitPlanMode approval remains mandatory'));
   assert.ok(plan.includes('Raw HTML in a plan is no longer refused by `check-pr-scope.mjs`'));
