@@ -4,7 +4,7 @@
 # .md renamed to .skill is NOT valid, which is why we zip programmatically.
 #
 #   ./scripts/package.sh                 # package every skill
-#   ./scripts/package.sh session-logger  # package just one
+#   ./scripts/package.sh ship-ticket     # package just one
 
 set -euo pipefail
 

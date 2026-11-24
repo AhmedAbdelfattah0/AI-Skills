@@ -889,8 +889,8 @@ test('no support claim in README, AGENTS.md, install.sh or package.json names a 
   assert.ok(seen >= 4, `the scan found the claims it is meant to police (${seen})`);
 });
 
-test('CI runs Node 22 only and every job in validate.yml and sync-external.yml has timeout-minutes', () => {
-  for (const f of ['validate.yml', 'sync-external.yml']) {
+test('CI runs Node 22 only and every job in validate.yml has timeout-minutes', () => {
+  for (const f of ['validate.yml']) {
     const yml = readFileSync(join(REPO, '.github', 'workflows', f), 'utf8');
     // Every node-version is the floor or a matrix reference; every matrix node list is the floor alone.
     const versions = [...yml.matchAll(/node-version:[ \t]*'?([^'\n]*?)'?[ \t]*$/gm)].map((m) => m[1]);

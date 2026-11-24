@@ -3,7 +3,7 @@
 # INTO this repo's skills/ folder, so the repo becomes the single source of truth.
 #
 # Safe by default: it will NOT overwrite a skill that already exists in the repo
-# (e.g. the fixed session-logger / session-restore shipped here). Pass --force to
+# (e.g. the ship-ticket shipped here). Pass --force to
 # overwrite repo copies with the installed ones.
 #
 #   ./scripts/import.sh           # import only skills not already in the repo
