@@ -100,7 +100,14 @@ Remain in Plan Mode while drafting and throughout the host/counterpart debate.
 Reconcile its result there. For a policy-2 plan with an execution DAG, run
 `scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`
 on the final draft. It runs init's plan checks with no START and no write. Fix
-every refusal before you invoke `ExitPlanMode` with the final plan.
+every refusal before you invoke `ExitPlanMode` with the final plan. Preflight also
+refuses `dag_read_write_dependency`: a node reads a path that one of its transitive
+dependents writes (equal paths, or one a whole-segment prefix of the other; a glob
+counts by its literal prefix). Resolve it by dropping the read, or by reordering so
+the writer runs first (the reader then `deps` on the writer). It fails closed: a
+literal bracket segment such as `app/[id]/page.tsx` reads as a glob with prefix
+`app`, so it may over-refuse; name the parent directory explicitly instead, or
+order the nodes as above.
 That tool presents the approval surface and exits only through the host's approval
 flow. Do not emit a separate approval message and end the turn before calling it.
 The pending tool approval is the PLAN phase's `WAIT_FOR_USER` state.
@@ -141,7 +148,7 @@ The YAML header above this body carries (plain text in this template; a debate_p
      host_agent: claude|codex|other|unknown
      counterpart_agent: codex|claude|fable|other|unavailable
      debate_policy: 2                    every new implementation plan (START refuses a new plan without it)
-     plan_debate: {outcome: CONVERGED|UNRESOLVED|SKIPPED (LIMIT_REACHED is reserved and refused; SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}, rounds, calls, minutes}
+     plan_debate: {outcome: CONVERGED|UNRESOLVED|SKIPPED (LIMIT_REACHED is reserved and refused; SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}}   known before the freeze; round counts, calls, minutes and timing live only in the plan-resident attestation `metrics` (RUN-STATE body, outside the digest)
      codex_route: {dispatch, fresh_result, resume, cancellation, coverage}   PLAN carrier probe: each pass|fail with class permission_denied|auth|provider|relay
      worker_width: <available concurrent workers>
      parallelism_degradations: []
@@ -262,10 +269,10 @@ Not applicable: <check>: <one-line reason>, ...
 
 ## 7. Cross-model planning debate
 <Every implementation plan; the debate rules live in cross-model.md "PLAN debate". Freeze this section before the final confirmation request. The Markdown below is the human-readable ledger only and is never authoritative.>
-**Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
+**Participants:** <host identity> ↔ <counterpart identity and CLI version>
 **Result:** <CONVERGED / UNRESOLVED / SKIPPED (only with the owner exception) and why, for the reader; the authoritative outcome is the one in the dispositions line below>
-**Draft:** <final version; last version actually checked by counterpart>
-**Timing and cost:** <start/end UTC, rounds, calls attempted, responses received, minutes, tokens when reported> (information only)
+**Draft:** <the plan_version the final confirmation request names>
+<Session ids, the version each round checked, rejected rounds, retries, timing and cost live ONLY in the plan-resident attestation (`rounds`, `metrics`; RUN-STATE body, outside the digest). Never edit them into this section after the last round: a narrative edit changes the digest and needs another confirmation.>
 
 | Finding ID / severity | Host response and evidence | Counterpart response (from its response objects) | Final disposition |
 |---|---|---|---|

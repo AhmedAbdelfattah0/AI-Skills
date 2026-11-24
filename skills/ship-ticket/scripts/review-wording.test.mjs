@@ -314,7 +314,8 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(skill.includes('Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.'));
   assert.ok(plan.includes('the ExitPlanMode text quotes this line verbatim beside the attestation hash. Only single-line HTML comments may appear in the narrative.'));
   assert.ok(x.includes('A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text.'));
-  assert.ok(x.includes('instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence.'));
+  assert.ok(x.includes('instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object; otherwise record the round `rejected` with its evidence kept (see the rounds below) and re-ask with a new `request_id`.'));
+  assert.ok(x.includes('Free text is never approval evidence.'));
   assert.ok(x.includes('the last counterpart response object is schema-valid and AGREE for the exact plan_version/plan_digest/request_id, verified from the retained relay evidence; the canonical ledger DERIVED from the response objects has no open blocker/major'));
   assert.ok(agents.includes('The reciprocal PLAN debate is the default for every implementation plan, STANDARD or ELEVATED'));
   assert.ok(obs.includes('Never invoke the logger per debate round while native Plan Mode is active.'));

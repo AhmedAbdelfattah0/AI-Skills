@@ -865,8 +865,10 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
   }
   const expect = { request_id: r.request_id, plan_version: r.plan_version, plan_digest: r.plan_digest };
-  const bind = r.status === 'rejected' ? null : expect;
   let parsed = null;
+  let resultAnswer; // a rejected round's relay answer (result.finalMessage), re-parsed below with every other retained answer
+  // review round 1 (PROBE-5): a native session produces no relay result; a result file there could shadow the message
+  if (r.status === 'rejected' && kind === 'native_session' && files.result) add('debate_evidence_mismatch', `round ${r.n}: a native-session round carries no result file (its answer is the retained message)`);
   if (got.result) {
     let res;
     try { res = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(got.result)); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not UTF-8 JSON`); return out; }
@@ -888,10 +890,10 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
       if (r.auth_method !== 'claude.ai') add('debate_carrier_invalid', `round ${r.n}: the Claude relay needs verified subscription authentication (authMethod claude.ai), not ${r.auth_method}`);
     }
     if (resolve(String(res.workdir)) !== resolve(String(att.workdir))) add('debate_carrier_invalid', `round ${r.n}: the relay ran in ${res.workdir}, not the debate workdir ${att.workdir}`);
-    if (answered) parsed = parseResponse(typeof res.finalMessage === 'string' ? res.finalMessage : null, bind);
-    if (r.status === 'rejected') out.relay.status = 'rejected';
+    if (r.status === 'completed') parsed = parseResponse(typeof res.finalMessage === 'string' ? res.finalMessage : null, expect);
+    if (r.status === 'rejected') { resultAnswer = typeof res.finalMessage === 'string' ? res.finalMessage : null; out.relay.status = 'rejected'; }
   } else if (got.message && answered) {
-    parsed = parseResponseBytes(got.message, bind);
+    if (r.status === 'completed') parsed = parseResponseBytes(got.message, expect);
     out.relay = { status: r.status, exitCode: 0 };
   }
   if (got.brief) {
@@ -900,11 +902,16 @@ function verifyRound(r, att, bundleDir, add, store = new Map()) {
       add('debate_request_mismatch', `round ${r.n}: the brief that was sent carries request_id ${b.request_id}, plan_version ${b.plan_version}, plan_digest ${b.plan_digest}`);
     }
   }
-  if (!parsed) return out;
   if (r.status === 'rejected') {
-    if (parsed.ok) add('debate_rejected_valid', `round ${r.n} is recorded rejected, but its retained answer is a valid counterpart-response-v1 object (${parsed.obj.verdict}): a valid answer is never left out of the ledger`);
+    // EVERY retained answer source is re-parsed against the schema alone (no request binding); any valid one refuses the record
+    const answers = [];
+    if (resultAnswer !== undefined) answers.push(['result', parseResponse(resultAnswer, null)]);
+    if (got.message) answers.push(['message', parseResponseBytes(got.message, null)]);
+    const valid = answers.find(([, p]) => p.ok);
+    if (valid) add('debate_rejected_valid', `round ${r.n} is recorded rejected, but its retained ${valid[0]} answer is a valid counterpart-response-v1 object (${valid[1].obj.verdict}): a valid answer is never left out of the ledger`);
     return out;
   }
+  if (!parsed) return out;
   if (!parsed.ok) { add(parsed.code, `round ${r.n}: ${parsed.why}`); return out; }
   if (parsed.obj.verdict !== r.verdict) add('debate_attestation_invalid', `round ${r.n} records verdict ${r.verdict}, the response object says ${parsed.obj.verdict}`);
   out.response = parsed.obj;

@@ -47,6 +47,9 @@ test('a glob counts by its literal prefix (whole segments before the first glob 
   assert.equal(one('src/{a,b}.ts', 'src/c.ts'), 1);
   assert.equal(one('*.ts', 'docs/readme.md'), 1, 'no literal prefix: overlaps everything');
   assert.equal(one('**', 'x'), 1);
+  assert.equal(one('docs/readme.md', '*.ts'), 1, 'an unanchored glob on the WRITE side overlaps everything too');
+  assert.equal(one('x', '**'), 1);
+  assert.equal(one('app/[id]/page.tsx', 'app/other.ts'), 1, 'documented over-refusal: a literal bracket segment reads as a glob (prefix app), fail closed');
   assert.equal(one('src/gen/a.ts', 'src/gen/*'), 1, 'a glob on the write side too');
   assert.equal(one('lib/a.ts', 'src/gen/*'), 0);
 });

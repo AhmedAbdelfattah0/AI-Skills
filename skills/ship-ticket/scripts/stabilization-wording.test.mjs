@@ -82,6 +82,21 @@ test('STAB-410 F-8: debate cost and timing are not narrated in the digest-bound 
   assert.ok(cm.includes('and timing are recorded only in the plan-resident attestation (`metrics`), outside the digest'));
 });
 
+test('STAB-410 F-8 (review round 1): the plan template keeps timing, cost and session ids out of the digest-bound narrative', () => {
+  const p = doc('plan.md');
+  assert.ok(!p.includes('**Timing and cost:**'), 'no section-7 timing and cost line');
+  assert.ok(!p.includes('last version actually checked by counterpart'));
+  assert.ok(!p.includes('carrier: {agent, kind, degraded}, rounds, calls, minutes}'), 'no counts in the plan_debate header');
+  assert.ok(p.includes('live ONLY in the plan-resident attestation (`rounds`, `metrics`; RUN-STATE body, outside the digest)'));
+  assert.ok(p.includes('live only in the plan-resident attestation `metrics` (RUN-STATE body, outside the digest)'));
+  assert.ok(p.includes('Preflight also refuses `dag_read_write_dependency`'), 'F-9 refusal documented where preflight is described');
+  assert.ok(p.includes('a literal bracket segment such as `app/[id]/page.tsx` reads as a glob'), 'the fail-closed over-refusal and its resolution');
+  const sk = flat(read('../SKILL.md'));
+  assert.ok(sk.includes('a non-conforming answer is recorded as a `rejected` round with its evidence kept'));
+  assert.ok(sk.includes('(`dag_read_write_dependency`,'));
+  assert.ok(!sk.includes('a non-conforming answer fails the round'));
+});
+
 test('F-4 resume: understand.md routes on the START event, not on the approval_status header', () => {
   const t = doc('understand.md');
   assert.ok(t.includes("read the START event in the plan's RUN-STATE (present and digest-valid = approved; absent = pending approval)"));

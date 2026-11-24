@@ -246,7 +246,7 @@ occur during debate.
 
 ### Responses, outcomes and the attestation
 
-The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
+The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object; otherwise record the round `rejected` with its evidence kept (see the rounds below) and re-ask with a new `request_id`. A schema-valid answer bound to the wrong `request_id`, `plan_version` or `plan_digest` can be recorded neither `rejected` nor `completed`: re-asking then means leaving that round out of the attestation, and the verifier fails closed on any record of it. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
 
 The brief starts with the three lines `request_id: <id>`, `plan_version: <v>` and
 `plan_digest: <digest>`, each exactly once, and states the schema:
@@ -306,7 +306,7 @@ Outcomes, independent of the carrier:
 "Same-provider" is stated only where the identities really share a provider,
 computed from `provider:model`, not from the host name.
 
-Section 7 holds only the predeclared attestation reference and the findings ledger of the substantive rounds (besides
+Section 7 holds only the attestation reference (the `debate_id` named in the dispositions line, fixed before the final confirmation request) and the findings ledger of the substantive rounds (besides
 the dispositions line below), frozen before the final confirmation request; rejected rounds, retries, timing and any other
 attestation bookkeeping live only in the plan-resident attestation, outside the digest, so recording them never needs
 another confirmation round. Any edit of the narrative is a plan change and needs the counterpart's confirmation of the
