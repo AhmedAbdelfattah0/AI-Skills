@@ -325,10 +325,11 @@ export function resourceSnapshot() {
 // an injected history, performs no I/O and never terminates running work. Anything unknown,
 // invalid or malformed HOLDS. hostSnapshot() is the only reader.
 // Thresholds are the recorded TEMPORARY operating policy (STAB-followups-register FR-2).
+// Pressure threshold 4 (level 2 = non-blocking warn, no second heavy slot): owner decision 2026-11-24, Option A, see ADMISSION-INVESTIGATION-2026-11-24.md.
 // ---------------------------------------------------------------------------------------------
 export const HOST_POLICY = Object.freeze({
   pressure_levels: Object.freeze([1, 2, 4]), // documented kern.memorystatus_vm_pressure_level values
-  pressure_hold_level: 2,        // any sample in the window >= 2 holds
+  pressure_hold_level: 4,        // any sample in the window >= 4 (critical) holds; level 2 (warn) is a non-blocking signal (pressure_warn). Pragmatic threshold, subject to real-world validation, not a proven safety boundary
   load_num: 3,                   // any of load1/5/15 >= 60% of cores (= 3/5, compared as 5*load >= 3*cores, no float fraction) holds
   load_den: 5,
   sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
@@ -408,25 +409,25 @@ export function admitHost(snapshot, cls, running, history) {
   const hist = validHistory(history);
   const run = running;
   if ((cls !== 'HEAVY' && cls !== 'LIGHT') || !isPlain(run) || !isInt(run.total) || !isInt(run.heavy) || run.heavy > run.total
-    || hist === null || !isPlain(snapshot)) return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
+    || hist === null || !isPlain(snapshot)) return result(false, ['invalid_args'], { available: false, pressure_warn: false }, { ...HELD_HISTORY });
   const samples = Array.isArray(snapshot.samples) ? snapshot.samples : [];
   const providers = providerCount(snapshot.provider_errors);
   const cores = snapshot.cores;
   const recovering = { ...hist, state: 'held', clean_streak: 0 };
   // Unusable timestamps are a hard hold: samples cannot be ordered or aged.
   if (samples.some(x => !isPlain(x) || !isInt(x.t_ms)) || (samples.length > 0 && !isInt(snapshot.now_ms)))
-    return result(false, [...knownStops(samples.filter(isPlain), snapshot.provider_errors), 'held_resample'], { available: false, timestamps_ok: false }, recovering);
+    return result(false, [...knownStops(samples.filter(isPlain), snapshot.provider_errors), 'held_resample'], { available: false, pressure_warn: false, timestamps_ok: false }, recovering);
   // ONE admit path. Any invalid field holds the whole call; valid stop signals still get their specific reason first.
   const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && snapshot.schema === HOST_SNAPSHOT_SCHEMA && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
     && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
   if (!fieldsOk) {
     const stop = knownStops(samples, snapshot.provider_errors);
-    return result(false, [...stop, 'snapshot_unavailable'], { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 }, recovering);
+    return result(false, [...stop, 'snapshot_unavailable'], { platform: snapshot.platform ?? null, available: false, pressure_warn: false, heavy_slots: 1 }, recovering);
   }
   const latest = samples[samples.length - 1];
   // History timestamps must not be in the future relative to the snapshot clock.
   if ((hist.last_sample_t_ms !== null && hist.last_sample_t_ms > snapshot.now_ms) || (hist.last_admit_t_ms !== null && hist.last_admit_t_ms > snapshot.now_ms))
-    return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
+    return result(false, ['invalid_args'], { available: false, pressure_warn: false }, { ...HELD_HISTORY });
   const holds = [];
   if (samples.some(x => x.pressure_level >= HOST_POLICY.pressure_hold_level)) holds.push('held_pressure');
   let swap = 'flat';
@@ -468,13 +469,14 @@ export function admitHost(snapshot, cls, running, history) {
   const clean_streak = clean ? base.clean_streak + 1 : 0;
   const resumed = base.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
   const healthy = clean && resumed;
-  const heavy_slots = healthy ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
+  const pressure_warn = samples.some(x => x.pressure_level === 2);   // window-wide
+  const heavy_slots = healthy && !pressure_warn ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
   const reasons = [...holds];
   if (clean && !resumed) reasons.push('held_hysteresis');
   // HEAVY occupancy comes only from the caller's `running.heavy` (wave journal); real suites are serialized at execution time by heavy.sh.
   if (cls === 'HEAVY' && run.heavy >= heavy_slots) reasons.push('held_heavy');
   const admit = reasons.length === 0;
-  return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
+  return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, pressure_warn, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
     clean, clean_streak, healthy, heavy_slots, heavy_running: run.heavy },
   { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
 }

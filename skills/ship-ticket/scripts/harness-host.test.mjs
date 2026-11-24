@@ -46,15 +46,86 @@ test('admit ONE then re-sample: the same sample cannot admit twice; a newer samp
   assert.equal(LIGHT(NEXT(1), R(1), first.history).admit, true);
 });
 
-test('pressure 2 and 4 hold with held_pressure; pressure 1 is healthy; an EARLIER sample at 4 is not ignored', () => {
-  for (const level of [2, 4]) {
+test('pressure boundary: level 4 holds with held_pressure; levels 1 and 2 admit; an EARLIER sample at 4 is not ignored', () => {
+  const r4 = LIGHT(withLatest({ pressure_level: 4 }), R(0));
+  assert.deepEqual(r4.reasons, ['held_pressure']);
+  assert.equal(r4.reason, 'held_pressure');
+  for (const level of [1, 2]) {
     const r = LIGHT(withLatest({ pressure_level: level }), R(0));
-    assert.deepEqual(r.reasons, ['held_pressure']);
-    assert.equal(r.reason, 'held_pressure');
+    assert.equal(r.admit, true, 'level ' + level);
+    assert.deepEqual(r.reasons, [], 'level ' + level);
   }
-  assert.equal(LIGHT(withLatest({ pressure_level: 1 }), R(0)).admit, true);
   const early = LIGHT(snap({ samples: [S({ pressure_level: 4 }), S({ t_ms: T0 + 20000 })] }), R(0));
   assert.deepEqual(early.reasons, ['held_pressure']);
+  assert.equal(HOST_POLICY.pressure_hold_level, 4);
+});
+
+test('pressure window: a level-4 sample anywhere holds; level 2 anywhere (first, middle, last) alone admits', () => {
+  const three = (a, b, c) => snap({ now_ms: T0 + 41000, samples: [S({ pressure_level: a }), S({ t_ms: T0 + 20000, pressure_level: b }), S({ t_ms: T0 + 40000, pressure_level: c })] });
+  for (const [a, b, c] of [[4, 1, 1], [1, 4, 1], [1, 1, 4], [2, 4, 2], [4, 2, 2]]) assert.deepEqual(LIGHT(three(a, b, c), R(0)).reasons, ['held_pressure'], [a, b, c].join());
+  for (const [a, b, c] of [[2, 1, 1], [1, 2, 1], [1, 1, 2], [2, 2, 2]]) { const r = LIGHT(three(a, b, c), R(0)); assert.equal(r.admit, true, [a, b, c].join()); }
+});
+
+test('pressure_warn is a boolean signal: true for a level-2 latest sample, false for level 1, and not a hold reason', () => {
+  assert.equal(LIGHT(withLatest({ pressure_level: 2 }), R(0)).signals.pressure_warn, true);
+  assert.equal(LIGHT(withLatest({ pressure_level: 1 }), R(0)).signals.pressure_warn, false);
+  assert.equal(LIGHT(withLatest({ pressure_level: 4 }), R(0)).signals.pressure_warn, false);
+  assert.equal(LIGHT(withLatest({ pressure_level: 2 }), R(0)).signals.pressure_level, 2);
+  assert.ok(!HOST_HOLD_REASONS.includes('pressure_warn'));
+});
+
+test('SCRUM-410-shaped host (level 2, swap flat, load fine, no provider errors) admits LIGHT and HEAVY', () => {
+  const s = () => snap({ samples: [S({ pressure_level: 2 }), S({ t_ms: T0 + 20000, pressure_level: 2 })] });
+  const l = LIGHT(s(), R(0));
+  assert.equal(l.admit, true); assert.equal(l.reason, 'admitted'); assert.equal(l.signals.pressure_warn, true);
+  const h = HEAVY(s(), R(0));
+  assert.equal(h.admit, true); assert.equal(h.signals.heavy_slots, 1);
+  assert.deepEqual(HEAVY(s(), R(1, 1)).reasons, ['held_heavy']);
+  assert.deepEqual(HEAVY(s(), R(2, 2)).reasons, ['held_heavy']);
+});
+
+test('heavy slots: second slot opens only when level 1 throughout the window; any level-2 sample keeps 1 slot; pressure_warn is window-wide', () => {
+  const win = (a, b) => snap({ samples: [S({ pressure_level: a }), S({ t_ms: T0 + 20000, pressure_level: b })] });
+  const exp = { '1,1': [2, false], '1,2': [1, true], '2,1': [1, true], '2,2': [1, true] };
+  for (const [k, [slots, warn]] of Object.entries(exp)) {
+    const [a, b] = k.split(',').map(Number);
+    const r = HEAVY(win(a, b), R(1, 1));
+    assert.equal(r.signals.heavy_slots, slots, k); assert.equal(r.signals.pressure_warn, warn, k);
+    assert.equal(r.admit, slots === 2, k);
+    assert.equal(HEAVY(win(a, b), R(0)).admit, true, k);
+  }
+});
+
+test('heavy slots: level-4 recovery needs two clean windows, then still 1 slot while level 2 persists', () => {
+  const bad = LIGHT(withLatest({ pressure_level: 4 }), R(0));
+  const c1 = HEAVY(NEXT(1, { pressure_level: 2 }), R(0), bad.history);
+  assert.deepEqual(c1.reasons, ['held_hysteresis']);
+  const c2 = HEAVY(NEXT(2, { pressure_level: 2 }), R(0), c1.history);
+  assert.equal(c2.admit, true); assert.equal(c2.signals.heavy_slots, 1);
+  assert.deepEqual(HEAVY(NEXT(3, { pressure_level: 2 }), R(1, 1), c2.history).reasons, ['held_heavy']);
+});
+
+test('level 2 does not mask the other holds: swap growth, high load and provider errors still hold', () => {
+  const sw = LIGHT(snap({ samples: [S({ pressure_level: 2 }), S({ t_ms: T0 + 20000, pressure_level: 2, swap_used_kb100: 100 * 102400 + 204801 })] }), R(0));
+  assert.deepEqual(sw.reasons, ['held_swap']);
+  const ld = LIGHT(withLatest({ pressure_level: 2, load5: 9 }), R(0));
+  assert.deepEqual(ld.reasons, ['held_load']);
+  const pv = LIGHT(snap({ samples: [S({ pressure_level: 2 }), S({ t_ms: T0 + 20000, pressure_level: 2 })], provider_errors: [{ kind: '429', t_ms: T0 }] }), R(0));
+  assert.deepEqual(pv.reasons, ['held_provider']);
+});
+
+test('hysteresis: level-2 samples count as clean; from a held history two level-2 samples resume, a level-4 one resets', () => {
+  const held = { state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: T0 };
+  const c1 = LIGHT(NEXT(1, { pressure_level: 2 }), R(0), held);
+  assert.deepEqual(c1.reasons, ['held_hysteresis']);
+  assert.equal(c1.signals.clean, true);
+  assert.equal(c1.history.clean_streak, 1);
+  const c2 = LIGHT(NEXT(2, { pressure_level: 2 }), R(0), c1.history);
+  assert.equal(c2.admit, true);
+  assert.equal(c2.history.state, 'open');
+  const hit = LIGHT(NEXT(2, { pressure_level: 4 }), R(0), c1.history);
+  assert.deepEqual(hit.reasons, ['held_pressure']);
+  assert.equal(hit.history.clean_streak, 0);
 });
 
 const MB = 102400;                      // hundredths of KB per MB (1 MB = 1024 KB = 102400 hundredths of KB)
@@ -140,7 +211,7 @@ test('provider errors (429, quota, timeout) hold with held_provider; a numeric c
 });
 
 test('every signal combination reports all its reasons in a fixed order', () => {
-  const sigs = { held_pressure: { pressure_level: 2 }, held_swap: { swap_used_kb100: 999 * 102400 }, held_load: { load5: 9 } };
+  const sigs = { held_pressure: { pressure_level: 4 }, held_swap: { swap_used_kb100: 999 * 102400 }, held_load: { load5: 9 } };
   const names = Object.keys(sigs);
   for (let mask = 0; mask < 16; mask++) {
     const latest = {}; const expected = [];
@@ -154,7 +225,7 @@ test('every signal combination reports all its reasons in a fixed order', () => 
 });
 
 test('hysteresis: after a hold ONE clean sample is not enough; the second DISTINCT clean sample resumes', () => {
-  const bad = LIGHT(withLatest({ pressure_level: 2 }), R(0));
+  const bad = LIGHT(withLatest({ pressure_level: 4 }), R(0));
   assert.equal(bad.history.state, 'held');
   const clean1 = LIGHT(NEXT(1), R(0), bad.history);
   assert.deepEqual(clean1.reasons, ['held_hysteresis']);
@@ -166,7 +237,7 @@ test('hysteresis: after a hold ONE clean sample is not enough; the second DISTIN
 });
 
 test('hysteresis: REPLAYING the same clean snapshot never counts as a second clean sample', () => {
-  const bad = LIGHT(withLatest({ pressure_level: 2 }), R(0));
+  const bad = LIGHT(withLatest({ pressure_level: 4 }), R(0));
   const clean1 = LIGHT(NEXT(1), R(0), bad.history);
   for (let i = 0; i < 3; i++) {
     const replay = LIGHT(NEXT(1), R(0), clean1.history);
@@ -210,7 +281,7 @@ test('heavy: recovering hosts and unhealthy hosts have cap 1 and report held_hea
   const rec = HEAVY(snap(), R(1, 1), { state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null });
   assert.equal(rec.signals.heavy_slots, 1);
   assert.deepEqual(rec.reasons, ['held_hysteresis', 'held_heavy']);
-  const bad = HEAVY(withLatest({ pressure_level: 2 }), R(1, 1));
+  const bad = HEAVY(withLatest({ pressure_level: 4 }), R(1, 1));
   assert.equal(bad.signals.heavy_slots, 1);
   assert.deepEqual(bad.reasons, ['held_pressure', 'held_heavy']);
 });
@@ -276,7 +347,7 @@ test('a gap of more than 30 s since the last counted sample restarts the streak;
     assert.equal(admitHost(snap({ now_ms: T0 + 40000 + g + 1000, samples: [S({ t_ms: T0 + 20000 + g }), S({ t_ms: T0 + 40000 + g })] }), 'LIGHT', R(0), r.history).admit, true);   // second clean sample resumes
   }
   // ... but a stop signal after a long gap still blocks and resets
-  const hit = admitHost(snap({ now_ms: T0 + 80000 + 1000, samples: [S({ t_ms: T0 + 60000 }), S({ t_ms: T0 + 80000, pressure_level: 2 })] }), 'LIGHT', R(0), open.history);
+  const hit = admitHost(snap({ now_ms: T0 + 80000 + 1000, samples: [S({ t_ms: T0 + 60000 }), S({ t_ms: T0 + 80000, pressure_level: 4 })] }), 'LIGHT', R(0), open.history);
   assert.equal(hit.admit, false);
   assert.equal(hit.history.state, 'held');
 });
