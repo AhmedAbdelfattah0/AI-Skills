@@ -289,7 +289,7 @@ disposition row is pending and blocks START.
      an existing entry. The event vocabulary is defined in ship.md. -->
 <!-- After approval, append START with the workflow run_id,
      approved_plan_digest, approved_at (ISO-8601), approved_by (the human
-     approver, required) and approval_surface (terminal|desktop|plannotator). Every later event carries the same run_id. -->
+     approver, required) and, optionally, approval_surface (terminal|desktop|plannotator). Every later event carries the same run_id. -->
 <!-- RUN-STATE:END -->
 ````
 
@@ -302,9 +302,9 @@ Write the START only after the narrative is final. Compute `approved_plan_digest
 with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
 `sha256:<64 hex>`: the digest of the plan with the RUN-STATE body removed), never
 with `shasum` and never over the whole file. A START carries `approved_plan_digest`,
-`approved_at` (not `at`) and `approved_by` (descriptive metadata only: it is presence-checked, not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding). It also carries `approval_surface` (one of `terminal`, `desktop`, `plannotator`: where the owner gave the decision); it is recorded only and is never evidence of approval, and a self-reported surface cannot make an approval valid. A START without it is accepted when approved before the cutoff (`APPROVAL_SURFACE_CUTOFF` in `brief.mjs`) and refused from it on (`start_approval_surface_missing`); a present value that is not exactly one of the three is always refused (`start_approval_surface_invalid`). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
+`approved_at` (not `at`) and `approved_by` (descriptive metadata only: it is presence-checked, not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding). It may also carry `approval_surface` (OPTIONAL audit field, one of `terminal`, `desktop`, `plannotator`: where the owner gave the decision); it is recorded only and is never evidence of approval. Absent is always accepted; a present value that is not exactly one of the three is refused (`start_approval_surface_invalid`). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
 before dispatching any worker (`--run-id` is required); it refuses a malformed
-RUN-STATE block, a stale or malformed digest, a missing approval time or a missing `approved_by`.
+RUN-STATE block, a stale or malformed digest, a missing approval time, a missing `approved_by` or an invalid `approval_surface` (`start_approval_surface_invalid`).
 On a `debate_policy: 2` plan the START also carries `debate_attestation_sha256` (the
 attestation line's hash stated at `ExitPlanMode`); pass `--repo <repo>` so start-check
 verifies the retained debate bundle (`debate_attestation_missing`,
@@ -636,8 +636,8 @@ useful in manual mode. In manual mode `[ ]` and `{ }` are literal characters
 (`app/[id]/page.tsx`); `*` and `?` are refused. Entries are printable ASCII
 without `` ` ``, `|`, `"`, `<`, `>` or `&`.
 
-**Approval of the scope (owner policy, qualified surface).** Scope approval is valid only from a native ExitPlanMode approval given on a qualified approval surface: a surface that shows the complete, untruncated plan and does not let raw HTML or Markdown extensions hide or run content. Qualified surfaces: the Claude Code terminal, Claude Desktop, and Plannotator's Approve action. Plannotator is a view and approve layer over the same native ExitPlanMode result: its Deny returns feedback and a revised plan needs a fresh approval. Merely viewing or rendering a plan is never approval; chat text and AskUserQuestion are never approval. Editing the plan after approval voids it through the START digest binding (`approval_mismatch`). The canonical contract is still verified byte for byte with `contract --verify-quote`.
-The bytes the owner approves are the plan text: the `scope-contract` block and the `debate-dispositions-v1:` line must be in the plan itself, not only in chat, so a surface that shows only the plan shows them. The four-backtick quote in the ExitPlanMode text is a convenience copy.
+**Approval of the scope (owner policy, qualified surface).** Scope approval is valid only from a native ExitPlanMode approval given on a qualified approval surface: a surface that shows the complete, untruncated plan and does not let raw HTML or Markdown extensions hide or run content. Qualified surfaces: the Claude Code terminal, Claude Desktop, and Plannotator's Approve action. Plannotator is a view and approve layer over the same native ExitPlanMode result: its Deny returns feedback and a revised plan needs a fresh approval. Merely viewing or rendering a plan is never approval; chat text and AskUserQuestion are never approval. Editing the plan after START voids it through the START digest binding (`approval_mismatch`). Known accepted residual: an agent-written START, an auto-approving hook, or a local request to an approval UI endpoint (e.g. Plannotator `/api/approve`, no token or origin check in the installed build) cannot be detected by the engine; the owner accepted this for the current local workflow; `approval_surface` is audit metadata only, never evidence. The canonical contract is still verified byte for byte with `contract --verify-quote`.
+The bytes the owner approves are the plan text: the `scope-contract` block and the `debate-dispositions-v1:` line must be in the plan itself, not only in chat, so a surface that shows only the plan shows them. The four-backtick quote in the ExitPlanMode text is the input `--verify-quote` byte-compares with the plan block (a FAIL blocks SHIP); what the owner approves is the plan text.
 The ExitPlanMode request quotes the block inside a four-backtick fence (the
 `contract` helper prints it); for `--verify-quote` the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that, nothing else (a precise input definition, not an attempt to detect contradictory prose). Browser, GitHub and editor previews are never valid
 approval surfaces. A successful `--verify-quote` does not by itself prove what the

@@ -346,14 +346,14 @@ test('differential: start-check ok implies the engine accepts; they differ only 
 
 // ---- approval_surface (Change B, 2026-11-24): descriptive metadata, recorded only, NEVER evidence of approval ----
 import * as BRIEF from './brief.mjs';
-const SURFACES = ['terminal', 'desktop', 'plannotator'], APPROVAL_SURFACES = BRIEF.APPROVAL_SURFACES ?? [], APPROVAL_SURFACE_CUTOFF = BRIEF.APPROVAL_SURFACE_CUTOFF;
+const SURFACES = ['terminal', 'desktop', 'plannotator'], APPROVAL_SURFACES = BRIEF.APPROVAL_SURFACES ?? [];
 const NEW_AT = '2999-01-01T00:00:00Z'; // after the cutoff, but not in the future relative to `now` below
 const NOW = Date.parse('2999-01-01T00:01:00Z');
 const chkAt = (text) => startCheck(text, { runId: 'r1', now: NOW });
-const surfCodes = (r) => codes(r).filter((c) => c.startsWith('start_approval_surface')); // a post-cutoff START also meets the unrelated S4 debate rule
+const surfCodes = (r) => codes(r).filter((c) => c.startsWith('start_approval_surface')); // a START approved late also meets the unrelated S4 debate rule
 test('approval_surface: the allowed values are exactly terminal, desktop, plannotator', () => {
   assert.deepEqual([...APPROVAL_SURFACES], ['terminal', 'desktop', 'plannotator']);
-  assert.ok(Number.isFinite(Date.parse(APPROVAL_SURFACE_CUTOFF)));
+  assert.equal(BRIEF.APPROVAL_SURFACE_CUTOFF, undefined, 'no cutoff: the field is optional');
 });
 test('approval_surface: each allowed value passes, on a legacy and on a post-cutoff START', () => {
   for (const s of SURFACES) {
@@ -361,19 +361,20 @@ test('approval_surface: each allowed value passes, on a legacy and on a post-cut
     assert.deepEqual(surfCodes(chkAt(withStart({ approval_surface: s, approved_at: NEW_AT }))), [], `${s} new`);
   }
 });
-test('approval_surface: a present but unknown or non-string value is refused, legacy or new (no silent pass)', () => {
+test('approval_surface: a present but unknown or non-string value is refused, (no silent pass)', () => {
   for (const v of ['browser', ['trusted', 'terminal'].join('-'), 'Terminal', 'vscode', '', ' terminal', 'terminal ', null, 7, ['terminal'], {}, true]) {
     assert.deepEqual(codes(chk(withStart({ approval_surface: v }))), ['start_approval_surface_invalid'], JSON.stringify(v));
     assert.deepEqual(surfCodes(chkAt(withStart({ approval_surface: v, approved_at: NEW_AT }))), ['start_approval_surface_invalid'], `${JSON.stringify(v)} new`);
   }
 });
-test('approval_surface: compatibility rule: absent on a START approved before the cutoff is accepted without a code; absent after it is refused', () => {
+test('approval_surface: OPTIONAL: absent is accepted at any approved_at, with no surface code and no warning', () => {
+  for (const at of ['2026-11-01T10:00:00Z', '2026-12-15T10:00:00Z', NEW_AT]) {
+    const r = chkAt(withStart({ approved_at: at }));
+    assert.deepEqual(surfCodes(r), [], at);
+  }
   assert.equal(chk(withStart()).ok, true);
   assert.deepEqual(chk(withStart()).warnings, []);
-  assert.deepEqual(surfCodes(chkAt(withStart({ approved_at: NEW_AT }))), ['start_approval_surface_missing']);
-  assert.deepEqual(surfCodes(chk(withStart({ approved_at: '2026-11-30T23:59:59Z' }))), [], 'the last second before the cutoff is legacy');
-  assert.deepEqual(surfCodes(chk(withStart({ approved_at: APPROVAL_SURFACE_CUTOFF }), { now: Date.parse(APPROVAL_SURFACE_CUTOFF) + 1000 })), ['start_approval_surface_missing'], 'the cutoff instant itself is new');
-  // the existing codes keep their one exact code: an invalid approval time does not add a surface code
+  // the existing codes keep their one exact code
   assert.deepEqual(codes(chk(withStart({ approved_at: 'garbage' }))), ['start_approved_at_invalid']);
 });
 test('approval_surface: self-reported surface is never evidence: it cannot rescue a stale digest or a missing approver', () => {
