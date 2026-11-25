@@ -96,3 +96,19 @@ back out.
 
 Run `/skills` in Claude Code, or restart it, and confirm the skills appear. `node scripts/cli.mjs
 validate` lints a checkout.
+
+## Install and update layout
+
+```mermaid
+flowchart LR
+  subgraph Sources
+    A["curl install.sh"] --> CL["Clone in ~/.ai-skills"]
+    B["git clone"] --> CL2["Your clone"]
+    C["npx github:...<br/>agentic-software-factory"] --> CACHE["Throwaway npx cache"]
+  end
+  CL -->|"symlink"| SK["Skills directory<br/>~/.claude/skills and others"]
+  CL2 -->|"symlink"| SK
+  CACHE -->|"copy"| SK
+  SK --- MAN[".ai-skills-manifest.json<br/>records what was installed"]
+  UP["update / autoupdate<br/>daily job + SessionStart hook"] --> CL
+```

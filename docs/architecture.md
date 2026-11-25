@@ -24,7 +24,7 @@ and `sprint.md` are opened only when named.
 
 | Script | Responsibility |
 |---|---|
-| `harness.mjs` | Wave schedule, live host admission, model tiers. |
+| `harness.mjs` | Wave schedule, estimate-based admission used by the engine, host-admission functions used by `host-admit.mjs`, model tiers. |
 | `carrier.mjs` | Dispatches approved writers with ownership checks and provider-reported usage. Refuses PLAN and REVIEW. |
 | `run-engine.mjs` | Drives the approved task graph and keeps durable, resumable state. |
 | `gate.mjs`, `ship-ready-check.mjs` | Verify the RED, review and ship-ready gates. |
@@ -32,7 +32,7 @@ and `sprint.md` are opened only when named.
 | `brief.mjs` | Builds and lints the worker brief; computes the plan digest; checks the planning-debate attestation. |
 | `base-drift.mjs`, `ci-classify.mjs`, `check-pr-scope.mjs` | Detect base drift, classify CI results, check pull request scope. |
 | `run-log.mjs`, `run-summary.mjs` | Timing telemetry stored under the repository's Git metadata, never in the worktree. |
-| `host-admit.mjs` | Admission check before heavy work (macOS). |
+| `host-admit.mjs` | Admission check before heavy work (macOS). Run by the orchestrator; the engine does not call it. |
 | `wave.mjs` | Wave manifest verification and status. |
 
 Engine state, telemetry and the sprint queue live under the target repository's Git common
@@ -43,8 +43,10 @@ candidate. The append-only RUN-STATE of a ticket lives in its plan file, `.specs
 
 Every phase derives ready nodes with explicit inputs, write ownership and exclusive resources, and
 runs independent nodes concurrently. Serial execution needs a real dependency, overlapping writes,
-shared mutable state or unavailable concurrency. Writing workers receive disjoint owned paths and
-never run Git operations. The orchestrator owns shared seams and joins.
+shared mutable state or unavailable concurrency; without a concurrency-capable carrier the run is
+serial. Writing workers receive disjoint owned paths, and a write outside a worker's set is detected
+after the worker exits and fails the task. Workers are instructed not to run Git, and the carrier
+never gives them the Codex `danger-full-access` sandbox. The orchestrator owns shared seams and joins.
 
 ## Cross-skill conventions
 

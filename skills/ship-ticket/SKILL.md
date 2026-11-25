@@ -299,8 +299,9 @@ semantic assessment (your assessment owns business impact, indirect dependencies
 A floor only raises, and a path that matches nothing is not evidence of low risk. A repository that
 declares no paths gets no structural protection (`no_risk_paths_declared`); your assessment is then
 the only protection and is still recorded. A change to the declaration itself is ELEVATED. Missing or
-untrustworthy inputs mean ELEVATED. Record the `record_line` in the plan header. Today this is
-advisory, not enforced: no gate or engine step reads it (wiring is the driver slice, S-23/S-24).
+untrustworthy inputs mean ELEVATED. Record the `record_line` in the plan header. It is advisory
+unless the run is bound with the opt-in test-kinds policy, where the engine reassesses it
+(`engine-gates.mjs`); otherwise you run it and record the line.
 Text/keyword matching was evaluated and dropped; a measured corpus experiment is deferred.
 
 If the independent primary route or enforceable deadline is absent, follow the
@@ -649,7 +650,10 @@ dependencies:
     ([references/cross-model.md](references/cross-model.md)).
 
   Never let a subagent inherit the main model by default.
-- **Concurrency.** Run at most 2–3 agents at once.
+- **Concurrency.** Engine runs: the plan's `config.width` (1..32, default 1) plus the engine's
+  `admit` check. Hand-run schedules and non-DAG subagents: `maxConcurrency`, default
+  `min(3, cpu_count)`, reduced by `host-admit.mjs` before heavy work
+  ([execution-harness.md](references/execution-harness.md)). A hold means reduce parallelism or wait.
 - **Survey and planning.** Use one survey agent. The reciprocal Planning Debate
   is the default for every implementation plan, STANDARD and ELEVATED alike;
   risk classification alone never skips it. `SKIPPED` needs an explicit owner

@@ -1,7 +1,7 @@
 {
   "name": "ai-skills",
   "version": "1.0.0",
-  "description": "Personal Claude Code skill library with a cross-platform (Windows/macOS/Linux) installer.",
+  "description": "Open-source hybrid software engineering framework combining agentic intelligence, human governance, deterministic execution controls and independent review to deliver verified software changes.",
   "type": "module",
   "bin": {
     "ai-skills": "scripts/cli.mjs"
@@ -15,6 +15,8 @@
     "scripts/autoupdate.mjs",
     "install.sh",
     "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "CLAUDE.md"
   ],
   "scripts": {

@@ -21,7 +21,8 @@
  * as that marker is the marker's refusal code, never absence; homoglyphs and misspellings are not caught. A malformed
  * RUN-STATE is `run_state_invalid` in an opted-in plan. Output: one JSON object, enums, ids and numbers only.
  * Exit: 0 required/pass/not_declared, 1 refused/freeze_refused, 2 usage.
- * ADVISORY: no engine step enforces the result yet (freeze integration is S-01b2). Presence of a tagged title is not proof
+ * Wiring: on a run bound with the test-kinds policy the engine enforces the obligations (run-engine.mjs `requiredFor`, engine-gates.mjs
+ * evidence records); outside such a run this CLI is advisory. Presence of a tagged title is not proof
  * that the test exercises the property (mutation is S-01c), and `check` trusts the titles it is given.
  * REUSE: util.parseArgs (native); risk-floor.mjs parseRecordedLine/decodeStrict; security-plan.mjs parsePlanSecurityBlock;
  * worker-report.mjs parseWorkerReport. The declaration validator follows risk-floor.mjs (lib/shape.mjs is not on this base).
