@@ -2,7 +2,7 @@
 // Cross-platform skill manager for this repo (Windows / macOS / Linux).
 // Dependency-free — uses only Node built-ins. Runnable three ways:
 //
-//   npx github:AhmedAbdelfattah0/AI-Skills <cmd>   # no clone needed (installs by copy)
+//   npx github:AhmedAbdelfattah0/agentic-software-factory <cmd>   # no clone needed (installs by copy)
 //   node scripts/cli.mjs <cmd>                     # from a clone
 //   ai-skills <cmd>                                # after `npm i -g` or `npm link`
 //
@@ -364,6 +364,13 @@ function git(args, cwd = REPO_ROOT) {
 
 // True only when REPO_ROOT is itself the top of a work tree. A vendored copy
 // sitting inside someone else's repo would otherwise make `update` pull THEIR repo.
+// The library was renamed AI-Skills -> agentic-software-factory. Clones and manifests made under the
+// old name still carry the old remote. This maps the old name onto the new ONE for comparison only:
+// it is applied on both sides inside sameLibrary(), never to a value that is recorded, so a manifest
+// keeps the origin it was written with (older code still reads it) and no remote is rewritten.
+// Only that one repository is aliased; any other repository of the same owner is a different library.
+const libraryIdentity = (u) => (u || '').replace(/^(https:\/\/github\.com\/ahmedabdelfattah0)\/ai-skills$/, '$1/agentic-software-factory');
+
 // Which LIBRARY this is, as opposed to which checkout. The remote survives a
 // clone being moved or re-cloned elsewhere, which a path does not; and it differs
 // for a fork, which is exactly the case a path cannot tell apart.
@@ -401,7 +408,7 @@ function sameLibrary(manifest) {
   // trusted: it can offer nothing about its own provenance that a fork could not
   // offer identically. Such installs need --adopt once, which is the honest
   // price of not being able to tell them apart.
-  if (manifest.origin) { const mine = originUrl(); return !!mine && manifest.origin === mine; }
+  if (manifest.origin) { const mine = originUrl(); return !!mine && libraryIdentity(String(manifest.origin).toLowerCase()) === libraryIdentity(mine); }
   if (manifest.source) return resolve(manifest.source) === resolve(REPO_ROOT);
   // No identity evidence at all. Absence of a contradiction is not proof of
   // ownership: a manifest carrying hashes but naming no library is exactly what
@@ -1724,14 +1731,14 @@ Autoupdate flags:
   stdout, which a SessionStart hook would inject into your session.
 
 Examples:
-  npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
-  npx github:AhmedAbdelfattah0/AI-Skills install --target codex
+  npx github:AhmedAbdelfattah0/agentic-software-factory install ship-ticket generate-ticket
+  npx github:AhmedAbdelfattah0/agentic-software-factory install --target codex
   node scripts/cli.mjs install --target all
   node scripts/cli.mjs install vapt --target claude,codex
   node scripts/cli.mjs list
   node scripts/cli.mjs update --check
   node scripts/cli.mjs update --prune
-  npx github:AhmedAbdelfattah0/AI-Skills update
+  npx github:AhmedAbdelfattah0/agentic-software-factory update
   node scripts/cli.mjs autoupdate --install`);
 }
 

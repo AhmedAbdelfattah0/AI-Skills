@@ -1261,3 +1261,113 @@ test('install.sh says automatic updates were not scheduled when the install stop
   assert.ok(read(argLog).includes(' install --link'), 'the install ran');
   assert.ok(!read(argLog).includes('autoupdate'), 'nothing was scheduled');
 });
+
+// ---- the repository rename: one library under two names -----------------------------------------
+// AI-Skills was renamed agentic-software-factory. Clones and manifests made before keep the old
+// remote, so identity (never a recorded value) treats the two names as ONE library.
+
+const OLD_HTTPS = 'https://github.com/AhmedAbdelfattah0/AI-Skills.git';
+const OLD_SCP = 'git@github.com:AhmedAbdelfattah0/AI-Skills.git';
+const NEW_HTTPS = 'https://github.com/AhmedAbdelfattah0/agentic-software-factory.git';
+const NEW_SCP = 'git@github.com:AhmedAbdelfattah0/agentic-software-factory';
+
+function gitIn(dir, args) {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: childEnv({ GIT_CEILING_DIRECTORIES: dirname(dir) }) });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+}
+
+// Install under one origin, then look at the library from another. Returns what update says.
+function updateAcross(t, installedAs, nowAt) {
+  const w = world(t);
+  gitIn(w.lib, ['init', '-q']);
+  gitIn(w.lib, ['remote', 'add', 'origin', installedAs]);
+  const i = w.run(['install', '--copy', 'alpha']);
+  assert.equal(i.status, 0, i.out);
+  gitIn(w.lib, ['remote', 'set-url', 'origin', nowAt]);
+  const before = readFileSync(join(w.claudeDir(), MANIFEST), 'utf8');
+  const r = w.run(['update', '--no-pull']);
+  return { w, r, before };
+}
+
+for (const [label, was, now] of [
+  ['old manifest, new clone', OLD_HTTPS, NEW_HTTPS],
+  ['new manifest, old clone', NEW_HTTPS, OLD_SCP],
+  ['old manifest, old clone (scp)', OLD_SCP, OLD_HTTPS],
+  ['new manifest, new clone (scp)', NEW_SCP, NEW_HTTPS],
+]) {
+  test(`update treats the two repository names as one library (${label})`, (t) => {
+    const { r, w } = updateAcross(t, was, now);
+    assert.equal(r.status, 0, r.out);
+    assert.doesNotMatch(r.out, /installed by a different library/, r.out);
+    // Positive signal: the record was trusted, so the unchanged copy is reported as current.
+    assert.match(r.out, /1 already current/, r.out);
+    assert.ok(readManifest(w.claudeDir()).skills.alpha, 'record kept');
+  });
+}
+
+// A recorded origin is never rewritten by the alias: older code reads it back and must still agree.
+for (const [label, origin, recorded] of [
+  ['old-origin clone', OLD_HTTPS, 'https://github.com/ahmedabdelfattah0/ai-skills'],
+  ['new-origin clone', NEW_HTTPS, 'https://github.com/ahmedabdelfattah0/agentic-software-factory'],
+]) {
+  test(`install and a changing update record the clone's own origin (${label})`, (t) => {
+    const w = world(t);
+    gitIn(w.lib, ['init', '-q']);
+    gitIn(w.lib, ['remote', 'add', 'origin', origin]);
+    const i = w.run(['install', '--copy', 'alpha']);
+    assert.equal(i.status, 0, i.out);
+    assert.equal(readManifest(w.claudeDir()).origin, recorded, 'recorded by install');
+    const hashBefore = readManifest(w.claudeDir()).skills.alpha.hash;
+    w.writeSkill('alpha', ['Alpha body, revised.']);
+    const u = w.run(['update', '--no-pull']);
+    assert.equal(u.status, 0, u.out);
+    assert.notEqual(readManifest(w.claudeDir()).skills.alpha.hash, hashBefore, 'the update really changed the copy');
+    assert.equal(readManifest(w.claudeDir()).origin, recorded, 'recorded by update');
+  });
+}
+
+for (const other of ['https://github.com/AhmedAbdelfattah0/other-repo.git', 'https://github.com/someone-else/AI-Skills.git']) {
+  test(`update keeps a different repository foreign (${other})`, (t) => {
+    const { r, w, before } = updateAcross(t, NEW_HTTPS, other);
+    assert.match(r.out, /installed by a different library/);
+    assert.equal(readFileSync(join(w.claudeDir(), MANIFEST), 'utf8'), before, 'manifest untouched');
+  });
+}
+
+// install.sh over an EXISTING clone: the identity check runs before any fetch. A git shim fails the
+// fetch with a marker, so reaching the marker proves the check passed without touching the network.
+function installShOver(t, origin) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ais-rename-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const clone = join(root, 'clone');
+  mkdirSync(clone);
+  gitIn(clone, ['init', '-q', '-b', 'main']);
+  if (origin) gitIn(clone, ['remote', 'add', 'origin', origin]);
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const bin = join(root, 'bin');
+  put(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" fetch "*) echo FETCH-REACHED >&2; exit 1;; esac\nexec '${realGit}' "$@"\n`);
+  spawnSync('chmod', ['755', join(bin, 'git')]);
+  const home = join(root, 'home');
+  mkdirSync(home);
+  const r = spawnSync('bash', [join(REPO, 'install.sh')], {
+    encoding: 'utf8', timeout: 20000,
+    env: childEnv({ PATH: `${bin}:${process.env.PATH}`, HOME: home, USERPROFILE: home, AI_SKILLS_HOME: clone, AI_SKILLS_NO_AUTOUPDATE: '1' }),
+  });
+  return `${r.stdout}${r.stderr}`;
+}
+
+for (const origin of [OLD_HTTPS, OLD_SCP, 'https://github.com/AhmedAbdelfattah0/AI-Skills', NEW_HTTPS, NEW_SCP]) {
+  test(`install.sh accepts an existing clone whose origin is ${origin}`, unixOnly, (t) => {
+    const out = installShOver(t, origin);
+    assert.match(out, /FETCH-REACHED/, out);
+    assert.doesNotMatch(out, /origin is not this project/);
+  });
+}
+
+for (const origin of ['https://github.com/someone-else/AI-Skills.git', 'https://github.com/AhmedAbdelfattah0/other.git', null]) {
+  test(`install.sh still refuses an existing clone whose origin is ${origin}`, unixOnly, (t) => {
+    const out = installShOver(t, origin);
+    assert.match(out, /origin is not this project/, out);
+    assert.doesNotMatch(out, /FETCH-REACHED/);
+  });
+}

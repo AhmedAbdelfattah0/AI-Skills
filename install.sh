@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-line installer for this skill library:
 #
-#   curl -fsSL https://raw.githubusercontent.com/AhmedAbdelfattah0/AI-Skills/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/AhmedAbdelfattah0/agentic-software-factory/main/install.sh | bash
 #
 # It clones (or fast-forwards) the repo into a managed location, symlinks every
 # skill into your agents' skills directories, and turns on automatic updates.
@@ -24,7 +24,10 @@
 
 set -euo pipefail
 
-REPO="https://github.com/AhmedAbdelfattah0/AI-Skills.git"
+REPO="https://github.com/AhmedAbdelfattah0/agentic-software-factory.git"
+# The repository was renamed. Clones made under the old name keep the old origin; they are the same
+# project, so the identity check below accepts either. The remote is never rewritten.
+FORMER_REPO="https://github.com/AhmedAbdelfattah0/AI-Skills.git"
 HOME_DIR="${AI_SKILLS_HOME:-$HOME/.ai-skills}"
 REF="${AI_SKILLS_REF:-main}"
 TARGET="${AI_SKILLS_TARGET:-claude}"
@@ -66,10 +69,11 @@ if [ -d "$HOME_DIR/.git" ]; then
   # from whatever else happens to be sitting at that path — so the origin is
   # checked before anything is fetched and long before anything is run.
   EXISTING="$(git -C "$HOME_DIR" remote get-url origin 2>/dev/null || true)"
-  if [ "$(normalize_url "$EXISTING")" != "$(normalize_url "$REPO")" ]; then
+  GOT="$(normalize_url "$EXISTING")"
+  if [ "$GOT" != "$(normalize_url "$REPO")" ] && [ "$GOT" != "$(normalize_url "$FORMER_REPO")" ]; then
     echo "❌ $HOME_DIR is a git repository, but its origin is not this project." >&2
     echo "   found:    ${EXISTING:-<no origin remote>}" >&2
-    echo "   expected: $REPO" >&2
+    echo "   expected: $REPO (or its former name $FORMER_REPO)" >&2
     echo "   Refusing to fetch or run code from it. Move it aside, or set" >&2
     echo "   AI_SKILLS_HOME=<another dir> and re-run." >&2
     exit 1
