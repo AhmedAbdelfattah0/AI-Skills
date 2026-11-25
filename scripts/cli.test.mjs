@@ -1094,7 +1094,7 @@ test('defined citations, wildcards, ticket keys and other prefixes do not fail',
   const w = citingWorld(t, [
     'Defined: BE-SEC-01, BE-AUTH-01…02, TEST-01.',
     'A wildcard BE-SEC-* is not a citation.',
-    'Ticket SCRUM-108 and CWE-22 and SHA-256 and KEY-123 and A11Y-01.',
+    'Ticket TICKET-E and CWE-22 and SHA-256 and KEY-123 and A11Y-01.',
   ]);
   const r = w.validate();
   assert.equal(r.status, 0, r.out);

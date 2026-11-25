@@ -137,7 +137,7 @@ Opt in by committing `.ship-ticket/t0.json` **at the git top level of the base b
 
 `cmd` is an argv array, never a shell string. `kind` is one of `lint`, `typecheck`, `nn-guard`, `secrets`,
 `security`, `other`. `{files}` becomes one argument per scanned file. The scanners are the repository's own;
-this skill ships none (a StoreCraft `local-gates.sh --fast` is a separate ticket in that repository).
+this skill ships none (a product `local-gates.sh --fast` is a separate ticket in that repository).
 
 **Trust boundary.** The declared commands run with the caller's environment and permissions. Argv execution only
 stops shell interpolation of file names; it does not make a declaration trusted. So:

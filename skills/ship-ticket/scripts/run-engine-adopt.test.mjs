@@ -32,7 +32,7 @@ const R2 = { runId: 'run-2' };
 
 const FAILING_SPEC = `import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails on assertion', () => { assert.equal(1, 2); });\n`;
 const TAP = { cmd: process.execPath, args: ['--test', '--test-reporter=tap', 'spec/api.test.mjs'], format: 'tap' };
-/** The archived SCRUM-202 run 1 shape (PLAN-S13 fact 6): api-red (32 specs there, 1 here) -> api-impl; web-red -> web-state -> web-ui. */
+/** The archived TICKET-B run 1 shape (PLAN-S13 fact 6): api-red (32 specs there, 1 here) -> api-impl; web-red -> web-state -> web-ui. */
 const ARC_NODES = [
   { id: 'api-red', writes: ['spec/api.test.mjs'], redSpecs: [{ file: 'spec/api.test.mjs', name: 'fails on assertion' }] },
   { id: 'api-impl', deps: ['api-red'], reads: ['spec/api.test.mjs'], writes: ['src/api.txt'] },

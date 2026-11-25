@@ -88,7 +88,7 @@ export const IDENTITY_MUTANTS = [
     edits: [{ file: ID, from: "    const r = authGit(root, ['config', '-z', '--get-regexp', `^remote\\\\.${reEscape(remote)}\\\\.(url|pushurl)$`]);",
       to: "    const a = authGit(root, ['config', '--get-all', `remote.${remote}.url`]), p = authGit(root, ['config', '--get-all', `remote.${remote}.pushurl`]);\n    const r = { status: a.status === 0 ? 0 : a.status, stdout: [...a.stdout.split('\\n').filter(Boolean).map((v) => `remote.${remote}.url\\n${v}`), ...p.stdout.split('\\n').filter(Boolean).map((v) => `remote.${remote}.pushurl\\n${v}`)].join('\\0') };" }] },
   { tag: 'I27', name: 'the remote name is not regex-escaped (up.stream also matches upXstream)', edits: [{ file: ID, from: '${reEscape(remote)}', to: '${remote}' }] },
-  { tag: 'I28', name: 'reassess (flag on): a base refusal is ignored and security work runs (the SCRUM-202 latch)', edits: [{ file: GATES, from: '  if (baseNo) return baseNo;\n', to: '' }] },
+  { tag: 'I28', name: 'reassess (flag on): a base refusal is ignored and security work runs (the TICKET-B latch)', edits: [{ file: GATES, from: '  if (baseNo) return baseNo;\n', to: '' }] },
   { tag: 'I29', name: 'reassess (flag on): S-12\'s base check by the snapshot skips the rewind check against the pin',
     edits: [{ file: BASE, from: '    const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: B });', to: '    const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: record !== undefined ? null : B });' }] },
   { tag: 'I30', name: 'the snapshot read takes a git failure for "no URL"', edits: [{ file: ID, from: '    if (r.error || (r.status !== 0 && r.status !== 1)) return fail(', to: '    if (false) return fail(' }] },

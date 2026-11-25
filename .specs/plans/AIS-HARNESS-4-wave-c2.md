@@ -24,10 +24,10 @@ Waves A, C-1 and B are merged. Two things are pending: the effectiveness measure
 ## Decisions for you (approving accepts the default)
 | # | Decision | Default |
 |---|---|---|
-| 1 | Second set of test cases that is not StoreCraft | Real public security advisories from GitHub, picked by a fixed rule with no human choice. (Your old pen-test reports are not on this machine; they can be added later.) |
+| 1 | Second set of test cases that is not the product | Real public security advisories from GitHub, picked by a fixed rule with no human choice. (Your old pen-test reports are not on this machine; they can be added later.) |
 | 2 | Proof that the scoring rules were fixed before any result existed | I open one public issue on this repo and post only file hashes in it (GitHub's timestamps prove the order). |
 | 3 | Live before/after run with a model on 3 tasks | Off. The report will say it was not run. |
-| 4 | Privacy (this repo is public, StoreCraft is not) | StoreCraft code, paths, commit text and finding text stay on this machine. Only finding IDs, group names and true/false values are committed. |
+| 4 | Privacy (this repo is public, the product is not) | Product code, paths, commit text and finding text stay on this machine. Only finding IDs, group names and true/false values are committed. |
 | 5 | The two leftover fixes | Separate small PR (Ticket 2), same run. |
 
 ---
@@ -37,7 +37,7 @@ Waves A, C-1 and B are merged. Two things are pending: the effectiveness measure
 **Shape:** tooling (Node scripts, data, report; no UI) · security-sensitive: no (measures; changes no gate) · review: ELEVATED (the deliverable is a set of claims; honesty is the acceptance criterion) · branch `feat/AIS-HARNESS-4-wave-c2-effectiveness`
 
 ## 1. What & why (read this first)
-You get a report that says, in counts, how well the security catalog picks the right checks. It measures only; the catalog and the engine do not change. It covers the 24 real StoreCraft findings (described from the real pre-fix code by an agent that never saw the catalog) and about 24 public advisories from other projects. It never says "improves security", and it lists what was not measured.
+You get a report that says, in counts, how well the security catalog picks the right checks. It measures only; the catalog and the engine do not change. It covers the 24 real product findings (described from the real pre-fix code by an agent that never saw the catalog) and about 24 public advisories from other projects. It never says "improves security", and it lists what was not measured.
 
 ## 2. Integration contract and execution DAG
 ### Integration contract
@@ -48,9 +48,9 @@ NOT_TRIGGERED — no producer/consumer boundary changes.
 |---|---|---|---|---|
 | prereg | orchestrator | Write the scoring rules file exactly as approved here; post its hash and the catalog hash to the issue | `effectiveness/prereg.json` | — |
 | recheck | sonnet agent | Re-check one fact (`attempt_limit`) in the 35 existing scenarios against its reworded definition; re-seal only if a value changes | `skills/vapt/fixtures/*` (conditional) | prereg |
-| tools | sonnet builder | Scorer and its tests (failing first on made-up inputs), the advisory picker, the local StoreCraft export helper, one CI line | `effectiveness/{score,build-corpus2,prep-local}.mjs`, `skills/vapt/effectiveness.test.mjs`, `.github/workflows/validate.yml` | prereg |
+| tools | sonnet builder | Scorer and its tests (failing first on made-up inputs), the advisory picker, the local product export helper, one CI line | `effectiveness/{score,build-corpus2,prep-local}.mjs`, `skills/vapt/effectiveness.test.mjs`, `.github/workflows/validate.yml` | prereg |
 | corpus2 | orchestrator | Run the picker; post the list's hash before anyone reads it | `effectiveness/corpus2-index.json` | tools |
-| facts | 4 sonnet agents (2 StoreCraft, 2 advisories), ≤3 at once | Each writes the facts for its cases from the code. They see the fact definitions and the code only | `effectiveness/{storecraft,corpus2}-facts.json` | corpus2, recheck |
+| facts | 4 sonnet agents (2 product, 2 advisories), ≤3 at once | Each writes the facts for its cases from the code. They see the fact definitions and the code only | `effectiveness/{storecraft,corpus2}-facts.json` | corpus2, recheck |
 | judges | 2 opus agents, independent | Each marks, per case, which checks would catch the real weakness (yes / partly / no). They never see what was selected | `effectiveness/{storecraft,corpus2}-judgments.json` | corpus2 |
 | score | orchestrator | Hash the inputs, post the hashes, run the scorer once | `effectiveness/{manifest,results}.json` | facts, judges, tools |
 | report | sonnet builder | Report text around the generated results block; README pointer | `effectiveness/{REPORT,README}.md`, `skills/vapt/fixtures/README.md` | score |
@@ -67,24 +67,24 @@ NOT_TRIGGERED — no producer/consumer boundary changes.
 | R1 | Do the catalog-blind agent's facts agree with the 12 existing reference scenarios | per fact: agree / differ each way / unknown. Reported as agreement, not error: the reference facts were tuned to the catalog |
 | R2 | For each of the 24 findings, is the check that was written for it selected from the blind facts | selected / selected only because a fact was "unknown" / not selected. Ticket text = the commit messages that wrote the cited lines (mechanical, `git blame`) |
 | R3 | How much each group of findings depends on the checks written from it | per group, remove every check with a source in that group, and once remove all 8 abuse checks; count findings still caught by a specific check both judges accept |
-| R4 | Public advisories (the only non-StoreCraft data) | per case and specific check: needed and selected / needed and missed / not needed but selected / not needed and left out; cases with no check in the catalog at all; per weakness type; same counts for "select everything" and "select the always-on 11" |
+| R4 | Public advisories (the only non-product data) | per case and specific check: needed and selected / needed and missed / not needed but selected / not needed and left out; cases with no check in the catalog at all; per weakness type; same counts for "select everything" and "select the always-on 11" |
 | R5 | Breadth | checks selected per case (min / median / max) |
 
 "Specific check" = one of the 14 checks that are not selected for every kind of change (`boundaryUniversal`, `skills/vapt/fixtures/selector.mjs:65`); without this, "at least one right check was selected" would always be true. A check counts as right only when both judges say yes; judge agreement and agreement with the Wave A mapping are reported.
 
 **Advisory picking rule (no judgment):** GitHub Advisory Database, reviewed, npm and pip, published from 2026-08-01, newest first; keep an advisory when it links a fix commit on GitHub that changes 1–5 non-test source files totalling ≤200 KB; at most 2 per weakness type; stop at 24; every skipped ID is logged with the rule that excluded it. Only IDs, commit SHAs and paths are committed; the code is fetched on demand (no upstream code copied into this repo).
 
-**Claim rules (fixed now):** never "improves security"; R1–R3 are always labelled "retrospective, in-sample, development data"; a sentence about working beyond StoreCraft is allowed only if, in R4, a needed specific check is selected in at least half of the cases that need one **and** it leaves out at least as many unneeded specific checks as it selects. Otherwise the report must say "on this corpus the catalog did not show useful selection". Failures are listed for follow-up; nothing is tuned in this wave.
+**Claim rules (fixed now):** never "improves security"; R1–R3 are always labelled "retrospective, in-sample, development data"; a sentence about working beyond the product is allowed only if, in R4, a needed specific check is selected in at least half of the cases that need one **and** it leaves out at least as many unneeded specific checks as it selects. Otherwise the report must say "on this corpus the catalog did not show useful selection". Failures are listed for follow-up; nothing is tuned in this wave.
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
 |---|---|---|
 | Agents can open any file | "never saw the catalog" is by instruction, not enforced | inputs-only folder, each agent lists the files it read, stated as a limit |
-| The fact definitions contain examples taken from the audit | the fact writer is catalog-blind but audit-exposed on StoreCraft | label R1–R3 in-sample; only R4 can support a wider statement |
+| The fact definitions contain examples taken from the audit | the fact writer is catalog-blind but audit-exposed on the product | label R1–R3 in-sample; only R4 can support a wider statement |
 | Results may be unflattering or the advisory set may hold few business-abuse cases | tempting to adjust | report as found, per weakness type; catalog hash test fails if the catalog changes |
 | Both judges are the same model family | correlated judgment | both-yes rule, agreement counts, reviewer spot-check of 10 labels; stated limit |
 | The re-check changes a sealed value | baselines move | re-seal v6 before scoring; old and new baselines both recorded |
-| StoreCraft inputs are local only | reviewers cannot re-run that part | their hashes are recorded; the report says this cannot be checked from the public repo |
+| Product inputs are local only | reviewers cannot re-run that part | their hashes are recorded; the report says this cannot be checked from the public repo |
 | Engine test suite is load-flaky on clean main | false alarm | rerun a failing file alone before calling it a regression |
 
 ### 3a. Security risk assessment
@@ -95,7 +95,7 @@ No security-relevant surface: offline scoring scripts, data files and a report u
 - Mutation tests: flipping a fact, dropping a judge "yes" or removing a check must change the counts; committed inputs hold facts and judge labels only, never selections; the scorer uses the one evaluator in `skills/vapt/controls.mjs` (identity check).
 - `node --test skills/vapt/effectiveness.test.mjs`: file hashes equal the posted ones, catalog hash equals the frozen one, `results.json` regenerates byte for byte, the report's results block equals the generated block, the claim sentence is the one the rule selects.
 - Unchanged and green: `node --test skills/vapt/controls.test.mjs skills/vapt/fixtures.test.mjs`, `cd skills/ship-ticket/scripts && node --test`, `node scripts/cli.mjs validate`, `git diff --exit-code main -- skills/vapt/controls.json skills/vapt/controls.mjs skills/security-audit`.
-- Grep proof that no StoreCraft path, commit text or finding title is in any committed file.
+- Grep proof that no product path, commit text or finding title is in any committed file.
 
 ## 5. Not in this ticket
 - Any catalog, predicate or engine change; any fix for a weakness the measurement finds (follow-up list only).
@@ -110,7 +110,7 @@ A second corpus written by an agent from invented scenarios: weaker than real ad
 | Finding / severity | Disposition |
 |---|---|
 | "At least one right check selected" is always true (11 checks always fire; unknown selects everything) / blocker | fixed: specific checks only, baselines side by side, unknown-dependence counted (R2–R4) |
-| Ticket text written by someone who saw the finding leaks the answer / major | fixed: commit messages via `git blame` for StoreCraft; real pre-fix code, no written ticket, for advisories |
+| Ticket text written by someone who saw the finding leaks the answer / major | fixed: commit messages via `git blame` for the product; real pre-fix code, no written ticket, for advisories |
 | Fact writer is not blind to the audit (definition examples) / major | accepted and labelled; R1–R3 in-sample |
 | Hold-out rule kept checks that leak; conditions derived from a group remain on other checks / major | fixed: "any source" rule plus an all-abuse-removed fold; named "dependence", not hold-out generalization; per-fold rebuild stated as not feasible |
 | One judge, three-level scale / major | fixed: two judges, both-yes rule, agreement counts, Wave A concordance |
@@ -132,7 +132,7 @@ A second corpus written by an agent from invented scenarios: weaker than real ad
 | rule coverage | Node scripts and tests (code-quality hub, test-quality), report text (docs-accuracy) | one Opus primary review: every number in the report against `results.json`, every claim against the claim rules, 10 judge labels spot-checked, privacy grep |
 | second opinion (mandatory) | every ticket | Codex if its quota is back, else CodeRabbit, alongside the primary |
 
-**Ship threshold:** wording or cosmetic issues ship with a follow-up. These block: a number that does not regenerate, a claim outside the claim rules, any StoreCraft detail in a committed file, a broken blindness or ordering record, any change to the frozen catalog.
+**Ship threshold:** wording or cosmetic issues ship with a follow-up. These block: a number that does not regenerate, a claim outside the claim rules, any product detail in a committed file, a broken blindness or ordering record, any change to the frozen catalog.
 
 ---
 

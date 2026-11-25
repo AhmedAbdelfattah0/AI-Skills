@@ -644,7 +644,7 @@ dependencies:
   - `opus` for the one primary review (code review and the UI-parity grade
     together) and for designing money, auth or security logic. A Sonnet primary
     reviewer missed design and validation defects that a later Opus pass caught
-    (StoreCraft SCRUM-140/96, 2026-11-05); one strong review costs less than a
+    (product tickets TICKET-F and TICKET-G, 2026-11-05); one strong review costs less than a
     cheap one plus a fix ticket on merged code;
   - `fable` for the fresh second-opinion session when Codex is unavailable
     ([references/cross-model.md](references/cross-model.md)).

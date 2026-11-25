@@ -42,7 +42,7 @@ test('heavy --running 2 holds with held_heavy as the headline after both windows
   const r = await go(['--class', 'heavy', '--running', '2'], { snapshot: m.snapshot });
   assert.equal(r.code, 1); assert.equal(r.line.reason, 'held_heavy'); assert.equal(m.calls(), 2);
 });
-test('SCRUM-410 shape: level 2 (warn) with flat swap admits heavy and reports pressure_warn (exit 0)', async () => {
+test('TICKET-C shape: level 2 (warn) with flat swap admits heavy and reports pressure_warn (exit 0)', async () => {
   const m = mk({ latest: { pressure_level: 2 } });
   const r = await go(['--class', 'heavy'], { snapshot: m.snapshot });
   assert.equal(r.code, 0); assert.equal(r.line.reason, 'admitted'); assert.equal(r.line.signals.pressure_warn, true); assert.equal(m.calls(), 2);

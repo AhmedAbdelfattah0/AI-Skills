@@ -389,7 +389,7 @@ shape, never defaulted, bound by the DAG digest) pins the run's base at `init`. 
 records policy version 5 to 8. From then on every base read of the engine (the candidate id, RED and
 unit evidence bindings, the test-kind declaration, the reassess diff) uses `base.merge_base` through
 one accessor (`baseRef` in `engine-dag.mjs`), so a stale or moved local `main` never changes what the
-run measures. That is the SCRUM-202 latch: a local `main` 26 commits behind origin put the upstream
+run measures. That is the TICKET-B latch: a local `main` 26 commits behind origin put the upstream
 files into the candidate, and the first `gate reassess` recorded a permanent REAPPROVAL.
 
 `init` refuses, writing nothing:
@@ -578,7 +578,7 @@ the reviewed candidate, so ship-ready refuses `candidate_mismatch`: the owner ap
 `RETRY` and a new original final review is recorded on the reverted tree. A final review FAIL does
 not recover it by itself: while the judgment stands `drive` dispatches nothing, the repair included.
 **Before removing the ticket worktree: `archive`.** The state file, engine log and usage ledger live
-in the work tree's own git dir, so `git worktree remove` deletes them (SCRUM-307 lost its token and
+in the work tree's own git dir, so `git worktree remove` deletes them (TICKET-A lost its token and
 timing data that way). Run `run-engine.mjs archive` first: it copies them with a `manifest.json`
 (sha256 per file) to `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>/`, never
 overwriting an earlier archive. It is owner-invoked, takes the lock but changes nothing in engine state, refuses another run's id (`run_mismatch`), and does not copy
@@ -863,7 +863,7 @@ is no prune.
   commits the result and, on ship-ready, appends `SHIP_READY` to RUN-STATE once.
   Exit 0 accepted, 2 refused or judgment point, 1 usage error.
 - Real-ticket savings are not measured. The plan's fixture benchmark and an
-  `eval.mjs` comparison against the SCRUM-140/96/393 baseline are still to be run
+  `eval.mjs` comparison against the TICKET-F/G/H baseline are still to be run
   on a real ticket; do not quote a saving.
 - Windows behavior of the shims is covered by unit tests and the Windows CI job
   with a fake CLI. Real Claude/Codex Windows installs were not exercised.

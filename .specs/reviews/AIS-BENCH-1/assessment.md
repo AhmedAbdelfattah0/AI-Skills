@@ -38,7 +38,7 @@ Citations are `path:line`; reference-repo paths carry the prefix `ext:`.
 **What was read, and by whom.**
 - Read in full by the author: ours — `ship-ticket/SKILL.md`, `references/execution-harness.md`,
   `references/plan.md`, and the routing, recon, review-contract and proof sections of
-  `understand.md`, `review.md`, `prove.md`; the AIS-HARNESS-4 closing record and the SCRUM-307
+  `understand.md`, `review.md`, `prove.md`; the AIS-HARNESS-4 closing record and the TICKET-A
   baseline record. Reference — six scripts in full (`lint-agents.sh`,
   `check-agent-originality.sh`, `check-runbooks.sh`, `check-tools.sh`,
   `test-agent-selection.sh`, `integrations/mcp-memory/setup.sh`), `tools.json`, the workflow
@@ -84,9 +84,9 @@ Citations are `path:line`; reference-repo paths carry the prefix `ext:`.
    no code selects which checks to run; five rule IDs cited by `nn-guard` are not defined by the
    skill that owns them; the `session-restore` extraction command prints an empty line.
 5. **The largest cost lever is orchestrator overhead, which the reference repo does not address.**
-   The one recorded baseline (SCRUM-307, n=1, not a clean engine-gated run) shows about 183M
+   The one recorded baseline (TICKET-A, n=1, not a clean engine-gated run) shows about 183M
    tokens, 93.4M of them in the orchestrator
-   (`.specs/reviews/AIS-HARNESS-3/wave4-baseline-scrum307.md`).
+   (`.specs/reviews/AIS-HARNESS-3/wave4-baseline-ticket-a.md`).
 
 ## 2. What the reference repository is
 
@@ -246,7 +246,7 @@ side-by-side with our closest text, and a cheap check.
    constant interruption turns approval into rubber-stamping (`:325`).
 3. Difference: theirs leaves the call to the worker; ours leaves no call at all.
 4. Evidence: `evidence/ours-harness-scripts.md`, topic T11 (no mid-run expansion mechanism),
-   verified at the lines above. The SCRUM-307 baseline had two engine stops that needed hand work.
+   verified at the lines above. The TICKET-A baseline had two engine stops that needed hand work.
 5. Impact (expected): fewer overnight stops for trivial additions, with the approved plan still
    the boundary. Measured by judgments and owner stops per run.
 6. Risk: medium. It is an engine change (feature freeze) and it touches the authorization

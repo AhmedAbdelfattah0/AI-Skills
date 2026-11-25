@@ -114,7 +114,7 @@ test('paths are literal text: only the PATTERN * is a wildcard (literal *, **, ?
 });
 
 // ---- floor, final, profiles, record ----
-test('AC1: a SCRUM-202-shaped plan touching a declared money path is floored to ELEVATED even when claimed and AI say STANDARD', () => {
+test('AC1: a TICKET-B-shaped plan touching a declared money path is floored to ELEVATED even when claimed and AI say STANDARD', () => {
   const r = chk(repo(), ['apps/api/src/billing/cart-validation.service.ts', 'apps/storefront/src/app/features/cart/cart.component.ts']);
   assert.equal(r.floor, 'ELEVATED'); assert.equal(r.final, 'ELEVATED'); assert.deepEqual(r.floor_classes, ['money']); assert.equal(RF.exitCodeFor(r), 2);
 });

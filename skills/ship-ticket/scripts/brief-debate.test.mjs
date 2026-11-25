@@ -116,7 +116,7 @@ function round(bundle, n, o = {}) {
   if (o.dispatch_error) { rec.dispatch_error = o.dispatch_error; rec.files = {}; rec.sha256 = {}; delete rec.session_id; return rec; }
   const briefText = o.brief ?? [`request_id: ${request_id}`, `plan_version: ${plan_version}`, `plan_digest: ${plan_digest}`, '', 'Challenge the plan.'].join('\n');
   const findings = o.findings ?? (verdict === 'AGREE' ? (o.concede ?? ['P1']).map((id) => ({ id, status: 'confirmed' })) : [{ id: 'P1', status: 'new', severity: 'major' }]);
-  // F-7: a `rejected` round's relay completed with exit 0 but its answer fails the schema (default: the SCRUM-410 slip, a note over 2000 characters).
+  // F-7: a `rejected` round's relay completed with exit 0 but its answer fails the schema (default: the TICKET-C slip, a note over 2000 characters).
   const message = o.message ?? (status === 'completed' ? respond({ verdict, request_id: o.echo_request_id ?? request_id, plan_version, plan_digest: o.echo_digest ?? plan_digest, findings })
     : status === 'rejected' ? respond({ verdict: 'CHANGES_REQUESTED', request_id, plan_version, plan_digest, findings: [{ id: 'P1', status: 'maintained', note: 'n'.repeat(2001) }] }) : '');
   const put = (name, file, text) => { writeFileSync(join(dir, file), text); rec.files[name] = `r${n}/${file}`; rec.sha256[name] = sha(Buffer.from(text)); };

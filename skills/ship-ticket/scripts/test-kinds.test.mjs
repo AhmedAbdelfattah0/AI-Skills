@@ -518,7 +518,7 @@ test('[R4] RUN-STATE: a duplicated or damaged marker never hides the narrative; 
   assert.deepEqual(req(onlyInside).errors, ['run_state_invalid'], 'malformed RUN-STATE: the whole plan is scanned for opt-in');
   assert.equal(req(`# Plan\n\nnothing\n<!-- RUN-STATE:BEGIN -->\n<!-- RUN-STATE:BEGIN -->\n`).status, 'not_declared', 'no opt-in token anywhere: still not_declared');
   assert.deepEqual(req(`# Plan\n\nnothing\n<!-- RUN-STATE:BEGIN -->\n`, TK.validateDeclaration({ version: 1 })).errors, ['run_state_invalid'], 'a declaring repo opts in');
-  // a real START event names the marker in its text (StoreCraft SCRUM-73: "digest_scope":"file bytes before RUN-STATE:BEGIN")
+  // a real START event names the marker in its text (product, TICKET-I: "digest_scope":"file bytes before RUN-STATE:BEGIN")
   const event = '{"event":"START","run_id":"r1","digest_scope":"file bytes before RUN-STATE:BEGIN","note":"<!-- RUN-STATE:END -->"}';
   assert.deepEqual(req(swapOnce(FULL, '{"event":"START"}', event)), BASE, 'an event record may name the markers');
   // the region is cut at whole marker LINES: the exact BEGIN text inside an earlier line hides nothing

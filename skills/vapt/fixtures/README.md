@@ -48,7 +48,7 @@ Selector scoring against these labels runs in
   over-selecting catalog are not scored. There is no ADD_CONTROLS fixture.
 - Dev scenarios may be used to tune predicates. Sealed scenarios may not.
 - Results on this set are reported as implementation fidelity only. No claim of
-  security improvement or generalization is made until a non-StoreCraft,
+  security improvement or generalization is made until a non-product,
   independently sealed corpus is scored.
 
 ## Effectiveness measurement

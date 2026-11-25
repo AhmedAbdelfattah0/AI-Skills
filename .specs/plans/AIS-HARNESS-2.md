@@ -14,10 +14,10 @@ review_policy: the skill's existing rules, unchanged (fix in-scope minors; at mo
 
 ## Context
 
-Three StoreCraft tickets (SCRUM-140, 96, 393) shipped through the harness. Measured:
+Three product tickets (TICKET-F, TICKET-G, TICKET-H) shipped through the harness. Measured:
 - **The orchestrator drives cost:** about 226M cache-read tokens in the orchestrator session, against about 75M across all Sonnet workers ($36 list for three tickets). Every dispatch, log and gate step is an orchestrator turn that re-reads the whole context.
 - **The LLM drops mechanical bookkeeping:**
-  - the SCRUM-393 run log is still `open`;
+  - the TICKET-H run log is still `open`;
   - a directory `--exclude` silently changed the candidate ID;
   - ownership false alarms;
   - repair workers skipped writing tests first.

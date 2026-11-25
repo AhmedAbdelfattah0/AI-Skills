@@ -50,7 +50,7 @@ function repo(t) {
   put(dir, 'libs/money/new.test.ts', `test('${TITLE} [kind:negative]', () => {});\n`);
   return { dir, base };
 }
-/** The design's declared form (section 1, StoreCraft instance), and the args that RAN for it. */
+/** The design's declared form (section 1, the product instance), and the args that RAN for it. */
 const ENTRY = { name: 'unit', format: 'vitest-json', cmd: 'node_modules/.bin/vitest', args: ['run', '--pool=forks', '--reporter=json', '--outputFile={report}', '{files}'],
   covers: ['libs/**', 'apps/api/**'], config_paths: ['vitest.config.ts', 'package-lock.json'] };
 const ARGS = ['run', '--pool=forks', '--reporter=json', '--outputFile=/dev/fd/3', 'libs/money/new.test.ts'];

@@ -1,5 +1,5 @@
 // Advisory CI failure classifier (ASTF-39, S-05b), restart "validate first, classify second". Every snapshot here is SYNTHETIC
-// (invented ids, repo acme/widgets); the one real input is the committed SCRUM-202 jobs fixture, used only to replay the R2
+// (invented ids, repo acme/widgets); the one real input is the committed TICKET-B jobs fixture, used only to replay the R2
 // threshold over observed durations. Tests assert a positive signal (an exact classification, state or reason code).
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +15,7 @@ import { classify as classifyMutant, loadMutationSource, runMutant as runTreeMut
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const CLI = join(HERE, 'ci-classify.mjs');
 const cli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', input });
-const REAL_FIXTURE = join(HERE, 'fixtures', 'ci-snapshot', 'scrum202-abf4d7ea-actions-jobs.jsonl');
+const REAL_FIXTURE = join(HERE, 'fixtures', 'ci-snapshot', 'ticket-b-abf4d7ea-actions-jobs.jsonl');
 const REPLICA = join(HERE, 'fixtures', 'ci-classify', 'synthetic-linked-abf4d7ea');
 const REPO = 'acme/widgets', ORIGIN = 'https://api.github.com', SHA = 'abf4d7ea' + 'ab'.repeat(16);
 const BILL = BILLING_ANNOTATION_ALLOWLIST[0];
@@ -709,7 +709,7 @@ test('R2 boundary: 10 s is billing, 11 s is not; missing, malformed, impossible 
   for (const c of ['cancelled', 'timed_out', 'action_required', 'stale']) assert.equal(classifySnapshot(snap([{ id: 1, conclusion: c }])).classification, 'unavailable', c);
   assert.equal(classifySnapshot(snap([{ id: 1, conclusion: 'startup_failure' }])).classification, 'billing_blocked');
 });
-test('R2 replay over the corpus: every observed duration (real SCRUM-202 jobs, synthetic replica) is within the threshold with margin', () => {
+test('R2 replay over the corpus: every observed duration (real TICKET-B jobs, synthetic replica) is within the threshold with margin', () => {
   const real = readFileSync(REAL_FIXTURE, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const zeroStep = real.filter((j) => j.conclusion === 'failure' && Array.isArray(j.steps) && j.steps.length === 0 && j.runner_name === '');
   assert.equal(zeroStep.length, 6);

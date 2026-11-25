@@ -1280,7 +1280,7 @@ const RULE_ID_DEFINING_FILES = {
 // so only the head is checked. A comma-list member followed by a word is prose
 // ("BE-SEC-01, 20 lines later"): the lookahead gives it back, which also means a
 // member followed by a word (`TEST-01, 02 and 08`) is read as prose and not checked. A
-// wildcard has no digits and an unlisted prefix (SCRUM-108, CWE-22) is not in the
+// wildcard has no digits and an unlisted prefix (TICKET-E, CWE-22) is not in the
 // owner table, so neither matches.
 const NOT_BEFORE_WORD = '(?![ \\t]*[A-Za-z0-9])';
 const RULE_ID_RE = new RegExp(
