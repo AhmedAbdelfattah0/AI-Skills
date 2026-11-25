@@ -58,7 +58,7 @@ States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `wa
 | wave | tickets             | state      | PR   | reason                         | plan digests           |
 |------|---------------------|------------|------|--------------------------------|------------------------|
 | W1   | TICKET-P            | merged     | #201 | merge 4fd2a1c verified 11-24   | TICKET-P sha256:9c1e.. |
-| W2   | TICKET-Q, TICKET-R | running    |      |                                | TICKET-Q sha256:41ab.. |
+| W2   | TICKET-Q, TICKET-R   | running    |      |                                | TICKET-Q sha256:41ab.. |
 | W3?  | TICKET-D            | parked     |      | proposed W3; open question Q3  |                        |
 | W4   | TICKET-S            | waiting    |      | needs W2 merged; no plan yet   |                        |
 | -    | TICKET-T            | excluded   |      | needs_rescope (umbrella)       |                        |

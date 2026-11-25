@@ -36,6 +36,7 @@ const MIN_RATIONALE = 15;
 const PROVENANCE = ['provenance/fact_vocabulary.json', 'provenance/controls_public.json'];
 // The private product name is assembled from parts so the literal is not published in this public repository.
 const PRIVATE_PRODUCT_NAME = ['Store', 'Craft'].join('');
+const PRIVATE_PRODUCT_NAME_SHA256 = 'e3b3c9c84b50eea948190bbc52760ec0822c27dd6fbe492bb886b4050eceb815';
 const BANNED_NAMES = new RegExp(`${PRIVATE_PRODUCT_NAME}|paymob|supabase`, 'i');
 const isUnknown = (v) => v === null || v === 'unknown';
 const dupes = (a) => a.filter((x, i) => a.indexOf(x) !== i);
@@ -552,6 +553,9 @@ test('negative: fewer than 6 unknown-valued scenarios is rejected', () => {
   assert.ok(checkScenarios(mutated((d) => {
     for (const s of d.scenarios) for (const [k, v] of Object.entries(s.facts)) if (isUnknown(v)) s.facts[k] = false;
   })).length > 0);
+});
+test('the banned private product name constant is exactly the intended name (digest-pinned, so a mutated constant fails)', () => {
+  assert.equal(createHash('sha256').update(PRIVATE_PRODUCT_NAME.toLowerCase()).digest('hex'), PRIVATE_PRODUCT_NAME_SHA256);
 });
 test('negative: product or company names in a summary are rejected', () => {
   for (const name of [PRIVATE_PRODUCT_NAME, 'PAYMOB', 'Supabase'])

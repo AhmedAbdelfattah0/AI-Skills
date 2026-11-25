@@ -979,8 +979,9 @@ test('P4r delta: RED and proof outcomes are identical with and without the added
 
 // STAB-410 F-1: the Angular `@angular/build:unit-test` builder (`nx test <project> --reporters=json --outputFile=<tmp>`)
 // writes jest-shaped JSON that the `sh -c` wrapper in execution-harness.md prints alone. The raw run output of TICKET-C
-// was not retained; this fixture is RECONSTRUCTED to the documented parseJestLike shape using the real spec path and
-// test name recorded in the accepted `gate red` evidence (stab410-evidence/gate-red.out), which is the acceptance evidence.
+// was not retained; this fixture is RECONSTRUCTED to the documented parseJestLike shape from the spec path and test name
+// recorded in the accepted `gate red` evidence (stab410-evidence/gate-red.out). Only the class name was neutralised for
+// this public repository (the original product class name is not reproduced); the structure is unchanged.
 const NG_SPEC = 'apps/storefront/src/app/core/data/store-orders.service.spec.ts';
 const NG_NAME = 'OrdersService.track — bounded timeout (TICKET-C) > a stalled lookup resolves null after 30s and cancels the request';
 const NG_JSON = JSON.stringify({
