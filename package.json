@@ -15,6 +15,8 @@
     "scripts/autoupdate.mjs",
     "install.sh",
     "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "CLAUDE.md"
   ],
   "scripts": {

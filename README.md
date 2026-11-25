@@ -240,15 +240,8 @@ Add `skills/<name>/SKILL.md`, keep the folder name equal to the frontmatter `nam
 `node scripts/cli.mjs validate`. CI runs the same validator. The rules it enforces and why are in
 [AGENTS.md](AGENTS.md).
 
-Parts of `test-quality`, `docs-accuracy` and `code-quality` are adapted from
-[amElnagdy/guard-skills](https://github.com/amElnagdy/guard-skills) (MIT), with primary-source citations in
-their `references/` (`sources.md` in `test-quality` and `docs-accuracy`).
-
 ## Security and license
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md). License: MIT, see [LICENSE](LICENSE).
 
-Parts of `test-quality`, `docs-accuracy` and `code-quality` are adapted from the MIT-licensed
-[guard-skills](https://github.com/amElnagdy/guard-skills); the attribution and source citations are in
-those skills' `references/` (the upstream's full license text is not reproduced here), and vendored
-third-party code is listed in `skills/ship-ticket/THIRD_PARTY_NOTICES.md`.
+Parts of `test-quality`, `docs-accuracy` and `code-quality` are adapted from [amElnagdy/guard-skills](https://github.com/amElnagdy/guard-skills) (MIT); the required copyright and license notice is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); vendored third-party code is listed in [skills/ship-ticket/THIRD_PARTY_NOTICES.md](skills/ship-ticket/THIRD_PARTY_NOTICES.md).
