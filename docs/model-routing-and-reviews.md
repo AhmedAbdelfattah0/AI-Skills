@@ -7,7 +7,7 @@ maps to real model ids. REVIEW, any high-risk node (`security`, `auth`, `tenancy
 `migration`, `schema`, `shared-contract`, `concurrency`) and high-complexity nodes are always
 `strong`; a cheaper request cannot override that. Low-complexity nodes may use a cheaper tier;
 everything else inherits the host model. On the carrier, `strong` needs a verified model mapping or
-dispatch is refused. Source: `skills/ship-ticket/references/execution-harness.md`.
+dispatch is refused. Escalation is static, by label, decided before dispatch; a failed attempt is not retried on a stronger model. Tiers bind engine-dispatched writers; subagent model choice in the hand-run flow is an agent procedure. Source: `skills/ship-ticket/references/execution-harness.md`.
 
 ## Planning debate
 
@@ -24,7 +24,7 @@ explicit owner exception recorded in the plan.
 1. One independent primary review workflow checks acceptance criteria, behaviour, applicable rules
    and triggered parity or security outcomes. A material full-stack diff may be partitioned inside
    that one workflow; it is not several full reviews.
-2. One mandatory second opinion in a fresh session on every ticket.
+2. One mandatory second opinion on every ticket, run by the orchestrator in a fresh session. The gate requires its record and a distinct recorded identity.
 3. Accepted findings form at most one consolidated repair batch; only the affected surface gets one
    targeted confirmation.
 
@@ -34,7 +34,7 @@ CodeRabbit is optional extra coverage and never required.
 
 The preferred second opinion is Codex in a fresh session. When Codex is unavailable or out of
 quota, a fresh session of a different model from the same provider is used instead. That is a
-**same-provider** independent review and is recorded as such; it is never reported as cross-provider
+**same-provider** independent review and is recorded as such by the orchestrator (the `route` field is free text; the gate derives provider diversity only for risky unit reviews); it is never reported as cross-provider
 agreement. If neither can run, the run pauses rather than skipping the review.
 
 ## Why this shape

@@ -8,19 +8,19 @@ pull request. The source of truth for each phase is
 |---|---|
 | UNDERSTAND | Full tracker specification (including comments, parents, attachments), detected stack and commands, pinned UI design if any, and a preflight that the independent reviewers can run. |
 | PLAN | One complete, repository-grounded plan and Design Contract, debated with the counterpart model by default, then approved by a human. |
-| BUILD | Implementation and tests on the ticket branch, by workers with disjoint owned paths. |
+| BUILD | Implementation and tests on the ticket branch, by workers with disjoint owned paths; a write outside a worker's set fails that task. |
 | PROVE | The repository's own checks, the code-quality rule pass, `vapt` attacks where trust boundaries changed, truthful docs and UI evidence. |
 | REVIEW | One bounded primary review workflow plus one mandatory independent second opinion. |
-| SHIP | One commit, one push, one pull request, CI green, tracker item completed. |
+| SHIP | One commit, one push, one pull request, PR CI checked, then the tracker item completed (orchestrator steps). |
 
 ## Invariants worth knowing
 
 - The specification comes from the tracker; it is never reconstructed from code.
 - A human approves the plan before implementation. A model critique is advice, not approval.
 - Work happens on a ticket branch, never the default branch.
-- The approved Design Contract names every file that may change. Another path means re-approval.
-- Security-sensitive work (auth, multi-tenancy, money, secrets) is ELEVATED and starts with a failing
-  test that proves the secure behaviour.
+- The approved Design Contract names every file that may change. Another path needs re-approval; the engine detects an out-of-set write after the worker exits.
+- The planner classifies security-sensitive work (auth, multi-tenancy, money, secrets) as ELEVATED and
+  the person approves it; on engine runs its risk labels require a failing test first.
 - A feature must not ship switched off unless the human asked for that.
 - After REVIEW passes the candidate bytes do not change; the candidate id is recomputed before commit
   and on resume.

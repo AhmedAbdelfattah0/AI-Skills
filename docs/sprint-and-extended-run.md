@@ -1,7 +1,7 @@
 # Sprint and extended run
 
 Source of truth: [skills/ship-ticket/references/sprint.md](../skills/ship-ticket/references/sprint.md).
-This is a procedure above the single-ticket workflow. It adds no engine, scheduler or detached
+This is an experimental, supervised procedure above the single-ticket workflow. It adds no engine, scheduler or detached
 driver; every ticket still runs the normal phases, plan, review and gates.
 
 ## Flow
@@ -21,7 +21,7 @@ flowchart TB
   J --> H
   K --> L{"Merge opt-in?"}
   L -- "default no" --> M["Owner merges"]
-  L -- yes --> N["Factory merges after exact-head review PASS,<br/>second-opinion PASS, local gates, green CI"]
+  L -- yes --> N["Orchestrator merges after exact-head review PASS,<br/>second-opinion PASS, local gates, green CI"]
 ```
 
 ## Key rules
@@ -37,7 +37,7 @@ flowchart TB
 - **Queue file.** A markdown file under the repository Git common directory, never committed. It is a
   progress and resume record, never an execution authority: plan approvals, digests and engine state
   stay authoritative.
-- **Cap.** Counted separately in tickets, wall-clock hours and second-reviewer runs.
+- **Cap.** Counted separately in tickets, wall-clock hours and second-reviewer runs. The orchestrator keeps the count.
 - **Merge is always opt-in.** The default is that the owner merges, asked once per wave or sprint.
   Migrations, payments, row-level security and tickets with deploy preconditions always stay owner
   merge. Deploy is always a separate decision.

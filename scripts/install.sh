@@ -36,7 +36,7 @@
 # `.ai-skills-manifest.json` the updater uses to tell a stale copy from one you
 # edited yourself — deliberately, so there is only one implementation of that
 # hashing rather than two that can drift. A copy install made here therefore
-# reads as "unknown provenance" on its first update and needs `--force` once;
+# reads as "unknown provenance" on its first update and needs `--adopt` once;
 # symlink installs (the default) are unaffected, since the link is its own proof.
 
 set -euo pipefail

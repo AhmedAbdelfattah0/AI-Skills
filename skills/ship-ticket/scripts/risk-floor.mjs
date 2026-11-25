@@ -42,7 +42,8 @@
  * or actual) floors ELEVATED with `risk_declaration_changed`, while the floor itself keeps using the BASE declaration. A mode change, a
  * symlink, a gitlink or a directory in its place is `declaration_tampered` (exit 1). Duplicate JSON keys in the declaration are last-wins (a
  * known, deferred limit).
- * ADVISORY, NOT ENFORCED: no gate or engine step runs this yet (wiring is the driver slice, S-23/S-24).
+ * Wiring: advisory by default. On a run bound with the test-kinds policy, engine-gates.mjs calls `reassess` and refuses with
+ * `risk_floor_unavailable` when it cannot; elsewhere the orchestrator runs this CLI and records the `record_line` in the plan.
  */
 import { openSync, readSync, closeSync, realpathSync, lstatSync, fstatSync, constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';

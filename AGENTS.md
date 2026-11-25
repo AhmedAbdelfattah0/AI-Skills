@@ -87,9 +87,11 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
   `update`: source path, commit, mode, and a content hash per copied skill. That hash is the only thing
   that can tell a **stale** skill from one you **edited in place** — byte-level twins with opposite
   correct answers. It is a dotfile, not a directory, so no skill scanner (they look for
-  `<dir>/SKILL.md`) ever sees it. `install.sh` does **not** write one; a copy install made through the
-  bash script therefore reads as "unknown provenance" on first `update` and needs `--force` once. Use
-  the Node CLI if you care about that.
+  `<dir>/SKILL.md`) ever sees it. `scripts/install.sh` does **not** write one; a copy install made
+  through that bash script therefore reads as "unknown provenance" on first `update` and needs
+  `--adopt` once (`--force` is for a copy this library installed and you then edited). The one-line
+  `install.sh` at the repository root delegates to `node scripts/cli.mjs install --link`, which does
+  write the manifest. Use the Node CLI if you care about that.
 - **A bare `install` records `all: true`** and a later `update` then adopts skills added upstream;
   `install <a> <b>` tracks only those two. `--prune` (opt-in) removes skills deleted upstream.
 - **`.DS_Store`, `Thumbs.db`, `desktop.ini` and `.git` are excluded** from both the content hash and
