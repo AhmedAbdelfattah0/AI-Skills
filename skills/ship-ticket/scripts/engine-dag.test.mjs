@@ -13,7 +13,7 @@ import { dagReadWriteConflicts } from './engine-dag.mjs';
 const N = (id, o = {}) => ({ id, deps: [], reads: [], writes: [], ...o });
 const pairs = (nodes) => dagReadWriteConflicts(nodes).map((c) => `${c.reader}<-${c.writer}:${c.read}|${c.write}`);
 
-test('SCRUM-410 shape: `tests` reads the file its dependent `fix` writes: one conflict naming the pair and both paths', () => {
+test('TICKET-C shape: `tests` reads the file its dependent `fix` writes: one conflict naming the pair and both paths', () => {
   const nodes = [N('tests', { reads: ['apps/store/src/cart.ts'], writes: ['apps/store/src/cart.spec.ts'] }), N('fix', { deps: ['tests'], writes: ['apps/store/src/cart.ts'] })];
   assert.deepEqual(dagReadWriteConflicts(nodes), [{ reader: 'tests', writer: 'fix', read: 'apps/store/src/cart.ts', write: 'apps/store/src/cart.ts' }]);
 });

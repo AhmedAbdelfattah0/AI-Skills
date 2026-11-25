@@ -1,6 +1,6 @@
 # AIS-HARNESS-3: consolidated plan (Wave 0 follow-ups + adaptive units, incremental verification, measurement)
 
-PLAN only. No BUILD without explicit owner approval. Planner: Opus subagent; independent debate: Codex. Does not touch StoreCraft work or unrelated worktrees. PR #38 stays unmerged (owner decision).
+PLAN only. No BUILD without explicit owner approval. Planner: Opus subagent; independent debate: Codex. Does not touch the product work or unrelated worktrees. PR #38 stays unmerged (owner decision).
 
 ## Context
 A ~14k-line Returns & Refunds ticket needed 3-4 full review/repair rounds. The harness treats a large ticket as one execution/review unit. Goal: handle large tickets more efficiently without weakening gates. No run-engine telemetry exists for that ticket, so **no savings are claimed; the plan measures first.** Also carries the PR #38 follow-ups (Windows CI, CodeRabbit, duplicate-END, N1/N2/N7).
@@ -71,7 +71,7 @@ Full suite twice, `node cli.mjs validate`, golden no-change test, new tests per 
 
 ## Open questions for the owner (answer at approval)
 1. Numeric "large" threshold (e.g. >2k changed LOC or >2 contract seams)?
-2. Which new (not running) StoreCraft tickets are A/B candidates?
+2. Which new (not running) product tickets are A/B candidates?
 3. May the Returns&Refunds Claude session JSONL be read read-only to count rounds?
 4. Windows a target, or POSIX-only?
 5. Heavy CodeRabbit items (`launcher.mjs:61`, `engine-io.mjs:153`, `review.md:47`, `SKILL.md:425`) in Wave 0 or deferred?
@@ -81,8 +81,8 @@ Full suite twice, `node cli.mjs validate`, golden no-change test, new tests per 
 Decided: CodeRabbit in Wave 0 = fix `launcher.mjs:61` only; reject `engine-io.mjs:153` under the threat model; `review.md:47` and `SKILL.md:425` triaged as doc fixes. Windows = POSIX only (skips with reasons). Decided 2026-11-08: no numeric "large" threshold. The planning AI judges whether a ticket should be split, and must record in the plan a split/no-split rationale (independent boundaries, contracts, ACs, ownership, expected size/risk, overhead vs value) for the human to approve. Size and file counts are reported as signals, not triggers; Wave 1 data may later suggest a default. Still open: which waves to start (recommend Wave 0 only); defaults assumed unless the owner objects: A/B tickets chosen later, session logs read-only for round counts, no prove-repair producer in Wave 0, removal rule accepted.
 
 ## Wave 4 pool (owner decision 2026-11-08)
-- SCRUM-307 (API keys + read-only public API v1) is the first test ticket. Arm: **baseline = current harness, unit fields absent**, assigned before its PLAN. Run it in its own fresh Sonnet session after Wave 1 lands (so peak RSS/CPU and the new eval metrics are recorded) and before Wave 2 is enabled. Description size not yet verified; confirm it is large at PLAN time (planner's split rationale applies).
-- Remaining pool candidates (arms assigned later, before each PLAN): SCRUM-195, 192, 156, 158, 75. Never Returns & Refunds (SCRUM-74, 401-404) or any running ticket.
+- TICKET-A (API keys + read-only public API v1) is the first test ticket. Arm: **baseline = current harness, unit fields absent**, assigned before its PLAN. Run it in its own fresh Sonnet session after Wave 1 lands (so peak RSS/CPU and the new eval metrics are recorded) and before Wave 2 is enabled. Description size not yet verified; confirm it is large at PLAN time (planner's split rationale applies).
+- Remaining pool candidates (arms assigned later, before each PLAN): TICKET-J, TICKET-K, TICKET-L, TICKET-M, TICKET-N. Never Returns & Refunds (TICKET-O, TICKET-V to TICKET-Y) or any running ticket.
 
 ## CodeRabbit owner decisions (2026-11-08, "go with your leans")
 - I12 (RED/proof runners get the unstripped environment): leave as is; they run the repo's own test commands. Documented, no code change.

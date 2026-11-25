@@ -80,7 +80,7 @@ the five known IDs fail.
 | Risk / unknown | Why it matters | What I'll do |
 |---|---|---|
 | CLI tests could reach your real home, launchd or this checkout | `install` writes to `~/.claude/skills`; `update` runs `git pull`; `autoupdate --install` registers a job | Tests run a temp copy of `cli.mjs` and `autoupdate.mjs` with fixture skills, with `HOME`, `USERPROFILE`, `XDG_*`, `LOCALAPPDATA` and `GIT_CEILING_DIRECTORIES` pointed at a temp directory. They never call `autoupdate --install` or `--remove` |
-| False positives in the ID check | Ticket keys (`SCRUM-108`), `CWE-22`, wildcards (`BE-SEC-*`) and planted IDs in test files look like rule IDs | Only the five owner prefixes, Markdown only; each exclusion has a test |
+| False positives in the ID check | Ticket keys (`TICKET-E`), `CWE-22`, wildcards (`BE-SEC-*`) and planted IDs in test files look like rule IDs | Only the five owner prefixes, Markdown only; each exclusion has a test |
 | A typo inside the owning skill counts as its own definition | The check cannot tell a definition from a citation there | Recorded limit. A stricter "definition position" rule was tested and rejected: `NG-STD-09` is defined in a bold heading |
 | `ux-audit` rule families are not checked | They are cited only inside `ux-audit`; measured 0 undefined of 217 | Left out, recorded as a limit |
 | `AGENTS.md` says six invariants | The validator already enforces a seventh the list omits (one owner for the outcome vocabulary) | The list becomes eight: that one and the new ID check |

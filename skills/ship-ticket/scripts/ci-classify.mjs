@@ -34,7 +34,7 @@
  * R5 a failure that EXECUTED a step is a code failure, billing never consulted; R6 non-Actions checks are never billing.
  *
  * PROVISIONAL PARAMETER: BILLING_MAX_SECONDS = 10 is an ESTIMATE (cons:F 1.3 "proposed threshold"). It rests on ONE
- * incident (SCRUM-202: 1-2 s, n = 1). Too low gives `unavailable` (fail-closed, the owner waits); too high is guarded by
+ * incident (TICKET-B: 1-2 s, n = 1). Too low gives `unavailable` (fail-closed, the owner waits); too high is guarded by
  * R1, R3, R4 and R5, and a code failure always executes steps. Re-measure at the next real billing incident before
  * changing it; the test pins the value so a change is a deliberate edit.
  *

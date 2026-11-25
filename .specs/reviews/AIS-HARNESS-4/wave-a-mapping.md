@@ -1,4 +1,4 @@
-# Wave A — independent mapping of StoreCraft confirmed findings to existing VAPT classes
+# Wave A — independent mapping of the product repository's confirmed findings to existing VAPT classes
 
 Date 2026-11-09. Mapper: a fresh sonnet agent given only REPORT.md (F01-F24) and `skills/vapt/SKILL.md`, no sight of the orchestrator's hand-mapping. Basis limit: F19-F24 judged from table rows only.
 

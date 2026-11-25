@@ -581,7 +581,7 @@ export async function clearUnitCmd(ctx) {
 
 /**
  * Owner acceptance of hand edits made to done nodes' files between the last drive and the review
- * freeze (SCRUM-307). Re-binds the drifted done nodes' fingerprints to the work tree, and only when
+ * freeze (TICKET-A). Re-binds the drifted done nodes' fingerprints to the work tree, and only when
  * that tree is exactly the frozen candidate: the review then saw these bytes, so the fingerprints
  * were the only stale part. It never moves the freeze, and drift(), startsFromFreeze and the
  * ship-ready conjunction are untouched. The reason is the recorded authorization (like `mark`);
@@ -628,7 +628,7 @@ export async function rebind(ctx) {
 
 /**
  * Copy the run's durable records out of the work tree's own git dir, which `git worktree remove`
- * deletes (SCRUM-307 lost its state, engine log and usage ledger that way). Destination:
+ * deletes (TICKET-A lost its state, engine log and usage ledger that way). Destination:
  * <git common dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>/ with state.json,
  * engine.jsonl, usage.jsonl (when present) and manifest.json { ticket, run_id, archived_at,
  * files: name -> sha256 }. Takes the lock but neither observes nor commits (engine state and RUN-STATE

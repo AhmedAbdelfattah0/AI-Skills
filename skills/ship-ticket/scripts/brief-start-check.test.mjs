@@ -136,29 +136,29 @@ test('start-check: legacy sha256- digest is a WARN, not a refusal', () => {
   assert.deepEqual(r.warnings.map((w) => w.code), ['start_digest_legacy']);
 });
 
-// ---- SCRUM-422 replays: each refused with its own code ------------------------------------------------------------------
-test('SCRUM-422 replay 1: bare hex digest without the prefix', () => {
+// ---- TICKET-D replays: each refused with its own code ------------------------------------------------------------------
+test('TICKET-D replay 1: bare hex digest without the prefix', () => {
   const r = chk(withStart({ approved_plan_digest: planDigest(plan()).slice('sha256:'.length) }));
   assert.deepEqual(codes(r), ['start_digest_format']);
 });
-test('SCRUM-422 replay 1b: shasum-style 16 hex prefix has its own code, distinct from bare hex', () => {
+test('TICKET-D replay 1b: shasum-style 16 hex prefix has its own code, distinct from bare hex', () => {
   assert.deepEqual(codes(chk(withStart({ approved_plan_digest: hex(plan()).slice(0, 16) }))), ['start_digest_truncated']);
 });
-test('SCRUM-422 replay 2: whole-file hash (shasum of the file before START was appended) instead of the narrative digest', () => {
+test('TICKET-D replay 2: whole-file hash (shasum of the file before START was appended) instead of the narrative digest', () => {
   const before = plan([]); // the file a session hashed with shasum, then appended START to
   const text = plan([{ ...good(before), approved_plan_digest: `sha256:${hex(before)}` }]);
   assert.notEqual(`sha256:${hex(before)}`, planDigest(before)); // the template block holds comments, so the two differ
   assert.deepEqual(codes(chk(text)), ['start_digest_whole_file']);
 });
-test('SCRUM-422 replay 2b: a digest of some unrelated bytes is merely stale', () => {
+test('TICKET-D replay 2b: a digest of some unrelated bytes is merely stale', () => {
   assert.deepEqual(codes(chk(withStart({ approved_plan_digest: `sha256:${hex('other')}` }))), ['start_digest_stale']);
 });
-test('SCRUM-422 replay 3: narrative edited after hashing', () => {
+test('TICKET-D replay 3: narrative edited after hashing', () => {
   const stamped = withStart();
   const edited = stamped.replace('Do the thing.', 'Do a different thing.');
   assert.deepEqual(codes(chk(edited)), ['start_digest_stale']);
 });
-test('SCRUM-422 replay 4: `at` instead of approved_at and no approver', () => {
+test('TICKET-D replay 4: `at` instead of approved_at and no approver', () => {
   const r = chk(withStart({ approved_at: undefined, at: '2026-11-01T10:00:00Z', approved_by: undefined }));
   assert.deepEqual(codes(r), ['start_at_not_approved_at', 'start_approver_missing']);
 });

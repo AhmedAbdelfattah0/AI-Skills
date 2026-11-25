@@ -755,7 +755,7 @@ test('[I27] [I30] A2-6 the snapshot read: NUL-separated values, every scope, esc
 
 // ------------------------------------------------------------------ reassess with the flag on: S-12's ONE base check, by the snapshot
 
-test('[I28] A2-7 flag-on reassess, SCRUM-202 topology: a stale local main is base_moved_local before any security work, never the REAPPROVAL latch', { skip: WIN_SKIP }, (t) => {
+test('[I28] A2-7 flag-on reassess, TICKET-B topology: a stale local main is base_moved_local before any security work, never the REAPPROVAL latch', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = secFx(t, { feature: false });
   const oldMain = o.sha('main');
   const tip = o.upstream(26);

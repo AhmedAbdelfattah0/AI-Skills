@@ -57,12 +57,12 @@ States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `wa
 ```text
 | wave | tickets             | state      | PR   | reason                         | plan digests           |
 |------|---------------------|------------|------|--------------------------------|------------------------|
-| W1   | SCRUM-55            | merged     | #201 | merge 4fd2a1c verified 11-24   | SCRUM-55 sha256:9c1e.. |
-| W2   | SCRUM-124, SCRUM-341| running    |      |                                | SCRUM-124 sha256:41ab..|
-| W3?  | SCRUM-422           | parked     |      | proposed W3; open question Q3  |                        |
-| W4   | SCRUM-350           | waiting    |      | needs W2 merged; no plan yet   |                        |
-| -    | SCRUM-71            | excluded   |      | needs_rescope (umbrella)       |                        |
-| -    | SCRUM-90            | excluded   | #188 | done_in_code                   |                        |
+| W1   | TICKET-P            | merged     | #201 | merge 4fd2a1c verified 11-24   | TICKET-P sha256:9c1e.. |
+| W2   | TICKET-Q, TICKET-R   | running    |      |                                | TICKET-Q sha256:41ab.. |
+| W3?  | TICKET-D            | parked     |      | proposed W3; open question Q3  |                        |
+| W4   | TICKET-S            | waiting    |      | needs W2 merged; no plan yet   |                        |
+| -    | TICKET-T            | excluded   |      | needs_rescope (umbrella)       |                        |
+| -    | TICKET-U            | excluded   | #188 | done_in_code                   |                        |
 ```
 
 **Queue authority.** The queue is a progress and resume record, never an execution authority: plan approvals, digests, START records, engine state and engineering gates stay authoritative, and a queue entry never substitutes for acceptance evidence.

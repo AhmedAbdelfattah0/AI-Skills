@@ -1,5 +1,5 @@
 /**
- * AIS-HARNESS-3 Wave 4 finding (SCRUM-307): a hand edit to a done node's file between the last
+ * AIS-HARNESS-3 Wave 4 finding (TICKET-A): a hand edit to a done node's file between the last
  * `drive` and the review freeze is reported as post_freeze_drift, and the pending repair waits
  * behind it with no supported way forward (revert, or bypass the engine).
  *

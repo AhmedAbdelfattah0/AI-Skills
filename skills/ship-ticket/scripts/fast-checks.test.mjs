@@ -36,7 +36,7 @@ else {
 }
 `;
 
-// Real (tiny) checker for the SCRUM-202 patterns: a REPLICA of D9 (JWT-shaped literal) and D15 (`let` never reassigned,
+// Real (tiny) checker for the TICKET-B patterns: a REPLICA of D9 (JWT-shaped literal) and D15 (`let` never reassigned,
 // the word "any" in a comment). It is NOT nn-guard or eslint; it only proves the runner catches such findings.
 const REPLICA = `
 import { readFileSync } from 'node:fs';

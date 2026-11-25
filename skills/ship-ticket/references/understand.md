@@ -125,7 +125,7 @@ A parity check against a *moving* reference passes vacuously.
 - **The reference must already be committed.** Uncommitted working-tree files, or
   files not in the repo at all → `WAIT_FOR_USER`. There is no SHA to diff against, and a
   screen closed against an uncommitted reference is unverifiable. (This is the
-  SCRUM-108 failure: the ticket closed 46 minutes *before* its own reference was
+  TICKET-E failure: the ticket closed 46 minutes *before* its own reference was
   committed. Nothing could have diffed it.)
 - **Record the SHA.** `git rev-parse HEAD` gives the commit; **verify separately
   that the reference path exists at it** — `git cat-file -e HEAD:<path>`. Do not
