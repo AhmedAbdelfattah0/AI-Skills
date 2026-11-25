@@ -463,7 +463,7 @@ test('init: an engine whose semantics lack version 3 refuses a format-3 run (pol
 
 test('[STAB-410 F-9] preflight on a complete format-3 plan: a read a dependent writes is refused (dag_read_write_dependency); independent and read-after-predecessor DAGs pass; init keeps binding the legacy shape', { skip: WIN_SKIP }, async (t) => {
   const pf = (fx) => preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile });
-  // SCRUM-410: the tests node reads the source file its dependent fix node rewrites
+  // TICKET-C: the tests node reads the source file its dependent fix node rewrites
   const bad = obFx(t, { nodes: [{ id: 'tests', deps: ['impl'], reads: ['src/orders.ts'] }, { id: 'patch', deps: ['tests'], writes: ['src/orders.ts'] }] });
   await assert.rejects(() => pf(bad), (e) => e.code === 'dag_read_write_dependency' && e.message.includes('tests') && e.message.includes('patch') && e.message.includes('src/orders.ts'));
   const dir = obFx(t, { nodes: [{ id: 'tests', deps: ['impl'], reads: ['src'] }, { id: 'patch', deps: ['tests'], writes: ['src/orders.ts'] }] });

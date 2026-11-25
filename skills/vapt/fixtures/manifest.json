@@ -118,7 +118,7 @@
   "rules": [
     "No catalog tuning against sealed results. Dev scenarios may be used to tune predicates; sealed scenarios may not.",
     "Any change to controls.json after seal makes the digest test fail. Re-record catalog_digest_at_seal and mark all prior sealed results stale.",
-    "Results on this set are reported as implementation fidelity only. No claim of security improvement or generalization is made until a non-StoreCraft, independently sealed corpus is scored. The sealed set here stays only weakly independent.",
+    "Results on this set are reported as implementation fidelity only. No claim of security improvement or generalization is made until a non-product, independently sealed corpus is scored. The sealed set here stays only weakly independent.",
     "The sealed set was seen by the reviewers and the orchestrator at reseal; this is recorded here and weakens its blindness for later selector work."
   ],
   "limits": [

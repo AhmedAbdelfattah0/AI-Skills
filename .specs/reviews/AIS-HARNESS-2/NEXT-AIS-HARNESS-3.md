@@ -1,9 +1,9 @@
 # AIS-HARNESS-3 brief (new ticket, fresh session; do NOT edit the AIS-HARNESS-2 plan)
 
-**Start only after PR #38 (AIS-HARNESS-2) is shipped.** Session: `/model sonnet`; PLAN via native Plan Mode, one ExitPlanMode approval; planning/primary review as `opus` subagents; Claude/Codex cross-model debate preserved. **STOP after PLAN; do not BUILD without explicit owner approval.** Do not touch the StoreCraft Returns & Refunds ticket or any running StoreCraft work; do not delete unrelated worktrees.
+**Start only after PR #38 (AIS-HARNESS-2) is shipped.** Session: `/model sonnet`; PLAN via native Plan Mode, one ExitPlanMode approval; planning/primary review as `opus` subagents; Claude/Codex cross-model debate preserved. **STOP after PLAN; do not BUILD without explicit owner approval.** Do not touch the product Returns & Refunds ticket or any running the product work; do not delete unrelated worktrees.
 
 ## Origin
-A ~14,000-line StoreCraft Returns & Refunds ticket needed 3-4 full review/repair rounds. The harness treats a large feature as one execution/review unit. Goal: handle large tickets more efficiently without weakening quality. Use historical telemetry only if available; never claim unmeasured improvements.
+A ~14,000-line product Returns & Refunds ticket needed 3-4 full review/repair rounds. The harness treats a large feature as one execution/review unit. Goal: handle large tickets more efficiently without weakening quality. Use historical telemetry only if available; never claim unmeasured improvements.
 
 ## Requirements (the owner's pasted extension; full text is in the chat that created this file)
 1. **Adaptive hierarchical decomposition** (adaptive, not mandatory): parent ticket -> execution units -> worker tasks; explicit dependency DAG; contract-first planning; file/module ownership; bounded parallelism; deterministic assembly; every unit traceable to the approved parent plan and acceptance criteria; workers never expand scope. Small or tightly coupled tickets stay single units.
@@ -18,7 +18,7 @@ A ~14,000-line StoreCraft Returns & Refunds ticket needed 3-4 full review/repair
 10. **Validation:** benchmark on representative tickets; Returns & Refunds as a historical baseline only (no rerun); disclose comparison limits. Failure scenarios: worker crash, crash during assembly, stale review evidence, shared-contract change, concurrent edits to shared files, integration failure, dependency invalidation, repeated repair loops, resource exhaustion, resume after partial completion.
 
 ## Non-negotiable
-Preserve PLAN + human approval; the Claude/Codex planning debate; mandatory independent reviews; exact candidate integrity; no silent paid API billing; no weakened gates; no interference with running StoreCraft tickets; no deletion of unrelated worktrees; no unmeasured claims; avoid overengineering.
+Preserve PLAN + human approval; the Claude/Codex planning debate; mandatory independent reviews; exact candidate integrity; no silent paid API billing; no weakened gates; no interference with running product tickets; no deletion of unrelated worktrees; no unmeasured claims; avoid overengineering.
 
 ## What exists to reuse (from AIS-HARNESS-2, once merged)
 `run-engine.mjs` (durable state, attempts, quiescence, staleness fingerprints), `gate.mjs` (RED/review/ship-ready, review chain, candidate binding), `candidate-id.mjs`, `harness.mjs` scheduler/resources, `usage.mjs` + `eval.mjs` (cost attribution and metrics). Known follow-ups carried over: `mark` cannot clear some judgments (N1), RED evidence dropped after build (N2), Windows quiescence unknown (N7), worktree isolation deferred, real-ticket savings unmeasured.

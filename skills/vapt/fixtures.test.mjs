@@ -34,7 +34,9 @@ const REASSESS = ['UNCHANGED', 'ADD_CONTROLS', 'REAPPROVAL'];
 const CONFIDENCE = ['high', 'medium', 'low'];
 const MIN_RATIONALE = 15;
 const PROVENANCE = ['provenance/fact_vocabulary.json', 'provenance/controls_public.json'];
-const BANNED_NAMES = /storecraft|paymob|supabase/i;
+// The private product name is assembled from parts so the literal is not published in this public repository.
+const PRIVATE_PRODUCT_NAME = ['Store', 'Craft'].join('');
+const BANNED_NAMES = new RegExp(`${PRIVATE_PRODUCT_NAME}|paymob|supabase`, 'i');
 const isUnknown = (v) => v === null || v === 'unknown';
 const dupes = (a) => a.filter((x, i) => a.indexOf(x) !== i);
 const union = (surfaces) => [...new Set((surfaces ?? []).flatMap((s) => s.boundaries ?? []))].sort();
@@ -552,7 +554,7 @@ test('negative: fewer than 6 unknown-valued scenarios is rejected', () => {
   })).length > 0);
 });
 test('negative: product or company names in a summary are rejected', () => {
-  for (const name of ['StoreCraft', 'PAYMOB', 'Supabase'])
+  for (const name of [PRIVATE_PRODUCT_NAME, 'PAYMOB', 'Supabase'])
     assert.ok(checkScenarios(mutated((d) => { d.scenarios[0].summary += ` using ${name} internally`; })).length > 0, name);
 });
 test('negative: scope-exceeds scenarios must carry planned and actual data', () => {

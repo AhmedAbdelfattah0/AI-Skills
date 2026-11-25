@@ -20,7 +20,7 @@ The owner said (2026-11-10): "don't let any leftovers, I need to cover everythin
 |---|---|---|
 | 1 | I fix the CodeRabbit points in #47, re-check, then squash-merge #46 and #47 myself | **Answered: yes, merge both** |
 | 2 | Loose gate rule (a written reason can close a route/login/migration alert inside a file the plan already lists) | **Answered: keep it, pin with tests, document as intended** |
-| 3 | Re-run the StoreCraft part of the measurement on tighter inputs now, or record and hand over | **Answered: no re-run; record it as the first requirement of the next enhancement** |
+| 3 | Re-run the product part of the measurement on tighter inputs now, or record and hand over | **Answered: no re-run; record it as the first requirement of the next enhancement** |
 | 4 | Testing the business-logic checks on another product | **Answered: no old reports exist. The owner has the Cloudflare audit skill (`skills/security-audit`) that produces such reports.** The closing record names it as the way to settle this: run that skill on another product, then score its findings with the tools in `skills/vapt/fixtures/effectiveness/`. Not run in this pass (a full audit of another product is a large job of its own) |
 | 5 | Refuse backslashes in surface and changed-file paths (today they are silently converted) | default: yes (stricter only) |
 | 6 | Small-fix plans: shrink the security section from 35 lines to 1 line plus 2 machine lines (AC8 promised "at most 1 line") and record one timing of the helper | default: yes |
@@ -91,9 +91,9 @@ Risks: golden byte-identity test (item 11), intentional test flips (`:367`), Win
 | 30 | backdated START; auto-update makes in-flight runs stale | intended: Wave B plan open risks, `security-risk.md:157-159` |
 | 31 | agent blindness and local-only inputs not verifiable | recorded limit: `effectiveness/REPORT.md` Limits |
 | 32 | directory-level surface gives no file status | documented in Ticket 3 (U4) |
-| M1 | selector picks 22–25 of 25 controls on StoreCraft | handed to the next enhancement as its first requirement (decision 3) |
+| M1 | selector picks 22–25 of 25 controls on the product | handed to the next enhancement as its first requirement (decision 3) |
 | M2 | catalog gaps from the measurement, finding F21 | handed to the next enhancement (decision 8) |
-| M3 | business-logic checks untested outside StoreCraft | handed to the next enhancement: audit another product with the Cloudflare audit skill, then score (decision 4) |
+| M3 | business-logic checks untested outside the product | handed to the next enhancement: audit another product with the Cloudflare audit skill, then score (decision 4) |
 
 ## Verification
 Per PR: failing-first evidence for each fix; `cd skills/ship-ticket/scripts && node --test` (rerun a failing file alone before calling it a regression); `ENGINE_SECURITY_MUTATION=1 node --test engine-security-mutation.test.mjs`; `node --test skills/vapt/controls.test.mjs skills/vapt/fixtures.test.mjs skills/vapt/effectiveness.test.mjs`; `node scripts/cli.mjs validate`; frozen: `skills/vapt/controls.json`, `skills/vapt/controls.mjs`, `skills/security-audit`; CI green on all 9 jobs; Opus review + second opinion.

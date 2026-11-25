@@ -40,7 +40,7 @@ every gateway configurable.
 
 ## Blockers & dependencies
 
-- **Depends on market-registry** — the `@storecraft/markets` registry; this reads
+- **Depends on market-registry** — the `@acme/markets` registry; this reads
   market → available providers from it, not a hardcoded list.
 - **Depends on crypto-service** — the `CryptoService` from the PII-encryption ticket;
   gateway secrets reuse it, no second crypto path.
@@ -65,7 +65,7 @@ every gateway configurable.
   `refund`, `testConnection`, plus a generic `subMethods` shape (proven by a
   fake-provider test — must model sub-methods generically even though flat
   providers don't use them).
-- Market-keyed registry: `market → providers[]`, read from `@storecraft/markets`.
+- Market-keyed registry: `market → providers[]`, read from `@acme/markets`.
 - Credential storage: encrypted at rest via `CryptoService`, tenant-scoped.
 
 ### Database
@@ -117,7 +117,7 @@ create table tenant_payment_credentials (
 ## Acceptance criteria
 
 - [ ] `PaymentProvider` interface + registry live; `subMethods` modelled generically (fake-provider test proves it)
-- [ ] Registry reads providers from `@storecraft/markets`, not a hardcoded list
+- [ ] Registry reads providers from `@acme/markets`, not a hardcoded list
 - [ ] `tenant_payment_credentials` table created, RLS tenant-scoped, encrypted via `CryptoService`
 - [ ] Missing encryption key → writes fail closed (tested)
 - [ ] Admin GatewaysPage renders per reference; credentials masked on read; raw key never returned by any endpoint

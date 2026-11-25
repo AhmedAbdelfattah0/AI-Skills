@@ -3,7 +3,7 @@
  * `origin` and a fake provider CLI). Tests tagged [B#] are the ones engine-base-mutation.test.mjs expects to fail when
  * guard B# is patched out.
  *
- * The SCRUM-202 latch replica: local `main` 26 commits behind origin, the branch made from origin/main, config.base 'main'.
+ * The TICKET-B latch replica: local `main` 26 commits behind origin, the branch made from origin/main, config.base 'main'.
  * Flag off (today's engine) the 26 upstream files enter the candidate and the first `gate reassess` latches
  * `security_reapproval` (R0, the proof that the replica bites). With config.pinnedBase the same topology gives the non-latching
  * `base_moved_local` with the expected (pinned) and observed (local) merge bases (R1): the differential pair R0/R1 is the one
@@ -47,7 +47,7 @@ function baseFx(t, { config = {} } = {}) {
   return { fx, o: withOrigin(fx) };
 }
 
-/** The SCRUM-202 topology: origin advances by 26 out-of-plan commits, local main stays, the branch is made from origin/main. */
+/** The TICKET-B topology: origin advances by 26 out-of-plan commits, local main stays, the branch is made from origin/main. */
 function staleLocalMain(o) {
   const tip = o.upstream(26);
   o.fetch();
@@ -57,7 +57,7 @@ function staleLocalMain(o) {
   return tip;
 }
 
-test('R0 SCRUM-202 replica, flag off (today\'s engine): a local main 26 behind origin latches security_reapproval', { skip: WIN_SKIP }, (t) => {
+test('R0 TICKET-B replica, flag off (today\'s engine): a local main 26 behind origin latches security_reapproval', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t);
   staleLocalMain(o);
   ok(fx.cli('init', { dag: fx.dagFile }), 'init');
@@ -76,7 +76,7 @@ const PIN = { pinnedBase: { remote: 'origin' } };
 const noState = (fx) => assert.equal(existsSync(fx.stateFile()), false, 'a refused init writes no state');
 const initFails = (r, code) => { assert.equal(r.status, 1, r.stdout + r.stderr); assert.match(r.stderr, new RegExp(`run-engine: ${code}:`), r.stderr); };
 
-test('[B2] [B4] R1 SCRUM-202 replica, flag on: base_moved_local with both SHAs, no latch; a reset local main then reassesses', { skip: WIN_SKIP }, (t) => {
+test('[B2] [B4] R1 TICKET-B replica, flag on: base_moved_local with both SHAs, no latch; a reset local main then reassesses', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
   const oldMain = o.sha('main');
   const tip = staleLocalMain(o);

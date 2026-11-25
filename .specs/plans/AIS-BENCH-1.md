@@ -180,7 +180,7 @@ D2, D3 and D5 are open. Each wave commits its own plan beside this one, starting
 
 | Item | Where it is recorded |
 |---|---|
-| The unit-arm run on a real ticket; no unit-versus-baseline claim is possible yet | `.specs/reviews/AIS-HARNESS-3/wave4-baseline-scrum307.md`, "Next" |
+| The unit-arm run on a real ticket; no unit-versus-baseline claim is possible yet | `.specs/reviews/AIS-HARNESS-3/wave4-baseline-ticket-a.md`, "Next" |
 | A final-review FAIL repair does not clear `post_freeze_drift`; the repair stays blocked behind it | `skills/ship-ticket/references/execution-harness.md:619-620` |
 | `rebind` refuses directory-declared nodes, units and changed RED specs | `execution-harness.md:635-644` |
 | Over-review cost: a re-checked upstream unit makes every dependent unit's evidence and review stale | `execution-harness.md:581-587` |
@@ -253,7 +253,7 @@ stops, and defects found within 14 days. First-pass completion means the final r
 its first execution with no repair. Run `archive` before removing a worktree. With one or two
 runs per arm these are observations, not proof of a difference.
 
-**Existing baseline.** SCRUM-307, one ticket, one arm, not a clean engine-gated run: about 183M
+**Existing baseline.** TICKET-A, one ticket, one arm, not a clean engine-gated run: about 183M
 tokens, orchestrator 93.4M, 3 h 42 min to ship-ready, two review executions.
 
 **Rejection rule.** A change that lowers cost and lets any scenario's mandatory gate pass where

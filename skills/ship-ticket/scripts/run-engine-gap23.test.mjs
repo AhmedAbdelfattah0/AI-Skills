@@ -1,5 +1,5 @@
 /**
- * AIS-HARNESS-3 Wave 4 findings from SCRUM-307.
+ * AIS-HARNESS-3 Wave 4 findings from TICKET-A.
  * Gap 2: a node whose writes/othersOwned sit under .specs/.spec was accepted at init and only
  *   refused at dispatch by the carrier (node_failed, two marks). validateEngineDag now rejects it at
  *   init (dag_invalid); the carrier rule is unchanged.

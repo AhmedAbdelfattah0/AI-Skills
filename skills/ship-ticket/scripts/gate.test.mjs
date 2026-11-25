@@ -978,17 +978,17 @@ test('P4r delta: RED and proof outcomes are identical with and without the added
 });
 
 // STAB-410 F-1: the Angular `@angular/build:unit-test` builder (`nx test <project> --reporters=json --outputFile=<tmp>`)
-// writes jest-shaped JSON that the `sh -c` wrapper in execution-harness.md prints alone. The raw run output of SCRUM-410
+// writes jest-shaped JSON that the `sh -c` wrapper in execution-harness.md prints alone. The raw run output of TICKET-C
 // was not retained; this fixture is RECONSTRUCTED to the documented parseJestLike shape using the real spec path and
 // test name recorded in the accepted `gate red` evidence (stab410-evidence/gate-red.out), which is the acceptance evidence.
 const NG_SPEC = 'apps/storefront/src/app/core/data/store-orders.service.spec.ts';
-const NG_NAME = 'StoreOrdersService.track — bounded timeout (SCRUM-410) > a stalled lookup resolves null after 30s and cancels the request';
+const NG_NAME = 'OrdersService.track — bounded timeout (TICKET-C) > a stalled lookup resolves null after 30s and cancels the request';
 const NG_JSON = JSON.stringify({
   numTotalTests: 1, numFailedTests: 1, numPassedTests: 0,
   testResults: [{
     name: `/workspace/${NG_SPEC}`, status: 'failed',
     assertionResults: [{
-      ancestorTitles: ['StoreOrdersService.track — bounded timeout (SCRUM-410)'],
+      ancestorTitles: ['OrdersService.track — bounded timeout (TICKET-C)'],
       title: 'a stalled lookup resolves null after 30s and cancels the request',
       status: 'failed',
       failureMessages: ['AssertionError: expected undefined to be null'],

@@ -74,7 +74,7 @@ test('pressure_warn is a boolean signal: true for a level-2 latest sample, false
   assert.ok(!HOST_HOLD_REASONS.includes('pressure_warn'));
 });
 
-test('SCRUM-410-shaped host (level 2, swap flat, load fine, no provider errors) admits LIGHT and HEAVY', () => {
+test('TICKET-C-shaped host (level 2, swap flat, load fine, no provider errors) admits LIGHT and HEAVY', () => {
   const s = () => snap({ samples: [S({ pressure_level: 2 }), S({ t_ms: T0 + 20000, pressure_level: 2 })] });
   const l = LIGHT(s(), R(0));
   assert.equal(l.admit, true); assert.equal(l.reason, 'admitted'); assert.equal(l.signals.pressure_warn, true);

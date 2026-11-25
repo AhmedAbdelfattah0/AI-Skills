@@ -1,4 +1,4 @@
-// Linked CI snapshot contract (ASTF-39, S-05a). Real input: the committed SCRUM-202 jobs fixture (reduced, unlinked,
+// Linked CI snapshot contract (ASTF-39, S-05a). Real input: the committed TICKET-B jobs fixture (reduced, unlinked,
 // no total_count: it can prove job input statuses, NOT binding or completeness). Everything linked is a SYNTHETIC
 // replica built here. Tests assert a positive signal (an exact status/reason), never the absence of an error.
 import test from 'node:test';
@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { buildSnapshot, readSnapshot, classifyJob, idStr, checkRunRef, PREDICATES, SITES, NOT_ATTESTED, CONCLUSIONS, SHAPES, shapeProblem } from './ci-snapshot.mjs';
 
 const CLI = fileURLToPath(new URL('./ci-snapshot.mjs', import.meta.url));
-const FIXTURE = fileURLToPath(new URL('./fixtures/ci-snapshot/scrum202-abf4d7ea-actions-jobs.jsonl', import.meta.url));
+const FIXTURE = fileURLToPath(new URL('./fixtures/ci-snapshot/ticket-b-abf4d7ea-actions-jobs.jsonl', import.meta.url));
 const REPO = 'acme/widgets';
 const ORIGIN = 'https://api.github.com';
 const SHA = 'abf4d7ea1e2257c1dcc42052f156307e81e81d34';
@@ -50,7 +50,7 @@ test('AC1: a failure-class job with missing or null steps or runner_name is unkn
   assert.equal(row(build(s), 1).input_status, 'unknown');
 });
 
-test('AC5 + fixture: the real SCRUM-202 jobs: six zero-step failures are ok, preview (skipped, null runner) is outside_r3; no total_count so the set is incomplete', () => {
+test('AC5 + fixture: the real TICKET-B jobs: six zero-step failures are ok, preview (skipped, null runner) is outside_r3; no total_count so the set is incomplete', () => {
   const real = readFileSync(FIXTURE, 'utf8').trim().split('\n');
   const perRun = {}; for (const l of real) (perRun[`run${JSON.parse(l).run_id}.jsonl`] ??= []).push(l);
   const s = buildSnapshot({ texts: { checkRuns: nl([]), jobs: Object.fromEntries(Object.entries(perRun).map(([k, v]) => [k, v.join('\n')])), annotations: {}, problems: [] }, repo: REPO, sha: SHA, origin: ORIGIN });
