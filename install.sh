@@ -73,7 +73,7 @@ if [ -d "$HOME_DIR/.git" ]; then
   if [ "$GOT" != "$(normalize_url "$REPO")" ] && [ "$GOT" != "$(normalize_url "$FORMER_REPO")" ]; then
     echo "❌ $HOME_DIR is a git repository, but its origin is not this project." >&2
     echo "   found:    ${EXISTING:-<no origin remote>}" >&2
-    echo "   expected: $REPO" >&2
+    echo "   expected: $REPO (or its former name $FORMER_REPO)" >&2
     echo "   Refusing to fetch or run code from it. Move it aside, or set" >&2
     echo "   AI_SKILLS_HOME=<another dir> and re-run." >&2
     exit 1

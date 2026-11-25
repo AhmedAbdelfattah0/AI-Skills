@@ -1284,11 +1284,6 @@ function updateAcross(t, installedAs, nowAt) {
   const i = w.run(['install', '--copy', 'alpha']);
   assert.equal(i.status, 0, i.out);
   gitIn(w.lib, ['remote', 'set-url', 'origin', nowAt]);
-  // A manifest written before the rename records the old name verbatim, which a post-rename install
-  // would not; reproduce that, since the comparison is exactly what is under test.
-  const mp = join(w.claudeDir(), MANIFEST);
-  const m = readManifest(w.claudeDir());
-  if (/ai-skills$/i.test(installedAs.replace(/\.git$/, ''))) { m.origin = 'https://github.com/ahmedabdelfattah0/ai-skills'; writeFileSync(mp, JSON.stringify(m)); }
   const before = readFileSync(join(w.claudeDir(), MANIFEST), 'utf8');
   const r = w.run(['update', '--no-pull']);
   return { w, r, before };
@@ -1300,18 +1295,44 @@ for (const [label, was, now] of [
   ['old manifest, old clone (scp)', OLD_SCP, OLD_HTTPS],
   ['new manifest, new clone (scp)', NEW_SCP, NEW_HTTPS],
 ]) {
-  test(`update treats the two repository names as one library (${label})`, unixOnly, (t) => {
+  test(`update treats the two repository names as one library (${label})`, (t) => {
     const { r, w } = updateAcross(t, was, now);
+    assert.equal(r.status, 0, r.out);
     assert.doesNotMatch(r.out, /installed by a different library/, r.out);
-    assert.match(readManifest(w.claudeDir()).origin, /^https:\/\/github\.com\/ahmedabdelfattah0\/(ai-skills|agentic-software-factory)$/);
+    // Positive signal: the record was trusted, so the unchanged copy is reported as current.
+    assert.match(r.out, /1 already current/, r.out);
+    assert.ok(readManifest(w.claudeDir()).skills.alpha, 'record kept');
   });
 }
 
-test('update still treats a different library as foreign, and rewrites no recorded origin', unixOnly, (t) => {
-  const { r, w, before } = updateAcross(t, NEW_HTTPS, 'https://github.com/someone-else/AI-Skills.git');
-  assert.match(r.out, /installed by a different library/);
-  assert.equal(readFileSync(join(w.claudeDir(), MANIFEST), 'utf8'), before, 'manifest untouched');
-});
+// A recorded origin is never rewritten by the alias: older code reads it back and must still agree.
+for (const [label, origin, recorded] of [
+  ['old-origin clone', OLD_HTTPS, 'https://github.com/ahmedabdelfattah0/ai-skills'],
+  ['new-origin clone', NEW_HTTPS, 'https://github.com/ahmedabdelfattah0/agentic-software-factory'],
+]) {
+  test(`install and a changing update record the clone's own origin (${label})`, (t) => {
+    const w = world(t);
+    gitIn(w.lib, ['init', '-q']);
+    gitIn(w.lib, ['remote', 'add', 'origin', origin]);
+    const i = w.run(['install', '--copy', 'alpha']);
+    assert.equal(i.status, 0, i.out);
+    assert.equal(readManifest(w.claudeDir()).origin, recorded, 'recorded by install');
+    const hashBefore = readManifest(w.claudeDir()).skills.alpha.hash;
+    w.writeSkill('alpha', ['Alpha body, revised.']);
+    const u = w.run(['update', '--no-pull']);
+    assert.equal(u.status, 0, u.out);
+    assert.notEqual(readManifest(w.claudeDir()).skills.alpha.hash, hashBefore, 'the update really changed the copy');
+    assert.equal(readManifest(w.claudeDir()).origin, recorded, 'recorded by update');
+  });
+}
+
+for (const other of ['https://github.com/AhmedAbdelfattah0/other-repo.git', 'https://github.com/someone-else/AI-Skills.git']) {
+  test(`update keeps a different repository foreign (${other})`, (t) => {
+    const { r, w, before } = updateAcross(t, NEW_HTTPS, other);
+    assert.match(r.out, /installed by a different library/);
+    assert.equal(readFileSync(join(w.claudeDir(), MANIFEST), 'utf8'), before, 'manifest untouched');
+  });
+}
 
 // install.sh over an EXISTING clone: the identity check runs before any fetch. A git shim fails the
 // fetch with a marker, so reaching the marker proves the check passed without touching the network.
