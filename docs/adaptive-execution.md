@@ -19,7 +19,7 @@ the same scripts step by step.
 | Capability | Owner | What it does |
 |---|---|---|
 | Ticket classification (size, complexity, scope, risk, STANDARD or ELEVATED) | Agent procedure, person-approved | The planner writes `review_profile`, per-node `risk[]` and `complexity`; the person approves them with the plan. The engine checks the vocabulary of the labels and enforces their consequences; it does not classify a ticket. |
-| Structural risk floor (`risk-floor.mjs`) | Engine-enforced, opt-in per repository | A repository may declare path globs in `.ship-ticket/risk-paths.json`. A match can only raise the review profile to ELEVATED, never lower it. Advisory unless the run is bound with the test-kinds policy. |
+| Structural risk floor (`risk-floor.mjs`) | Opt-in per repository; engine-reassessed on test-kinds runs, advisory otherwise | A repository may declare path globs in `.ship-ticket/risk-paths.json`. A match can only raise the review profile to ELEVATED, never lower it. Advisory unless the run is bound with the test-kinds policy. |
 | Planning debate | Agent procedure, engine-checked record | The counterpart model challenges the plan. `CONVERGED` needs a schema-valid agreement on the exact final plan digest (`brief.mjs debate-check`); anything else is `UNRESOLVED` and goes to the person. |
 | Human plan approval | Person-approved | Approval happens in the host's plan mode. |
 | Approval digest binding | Engine-enforced | The START event carries `approved_plan_digest` and the task-graph digest is bound; a change is refused (`approval_mismatch`, `dag_mismatch`). |
@@ -32,7 +32,7 @@ the same scripts step by step.
 |---|---|---|
 | Risk label to required evidence | Engine-enforced | `gate ship-ready` refuses with `missing_risk_evidence` unless each label's evidence kinds exist. |
 | RED gate | Engine-enforced | Where labels or `redSpecs` are declared, the engine runs the spec and accepts RED only when an assertion fails. |
-| Model tiers | Engine-enforced label, host-mapped | `routeModel` returns `strong` for REVIEW, any risk label or high complexity; `economy` for low complexity; otherwise `inherit`. Tiers are labels the host maps to real models. |
+| Model tiers | Engine-enforced label, host-mapped | `routeModel` returns `strong` for a REVIEW phase label, any risk label or high complexity (the engine never dispatches REVIEW; the orchestrator runs reviews); `economy` for low complexity; otherwise `inherit`. Tiers are labels the host maps to real models. |
 | Strong-tier mapping | Engine-enforced | On a verified adapter, `strong` without a `modelMap.strong` entry is refused, not downgraded. `inherit` without a mapping runs the CLI default and is flagged `provider-default`. |
 | Escalation | Engine-enforced, static | A repair inherits the risk labels of the nodes it overlaps. Escalation is by label, before dispatch; a failed attempt is not retried on a stronger model. |
 | Worker assignment | Agent procedure, person-approved | The plan assigns work and owned paths to each node; the engine dispatches each node's prompt to the configured provider CLI. |
@@ -48,7 +48,7 @@ the same scripts step by step.
 |---|---|---|
 | In-engine admission | Engine-enforced, estimate-based | Before a second or later concurrent node starts, the engine checks width, the memory budget and `admit` (estimated memory against the sum of node estimates, members at most the CPU count). A refusal is logged as `ADMISSION_REFUSED`. `admit` measures; it does not reserve. |
 | Host admission | Agent procedure (orchestrator) | Before heavy work the orchestrator runs `host-admit.mjs`: macOS memory pressure, swap growth, load trend, hysteresis and heavy slots. Elsewhere it prints `platform_unsupported`, which is not an allow. The engine does not call it. |
-| Heavy-suite serialization | Agent procedure | The orchestrator supplies `--running N` and runs one heavy suite at a time. |
+| Heavy-suite serialization | Agent procedure | One heavy slot under pressure; a second slot only when the host is healthy (`heavy_slots_healthy: 2`, `harness.mjs`). Beyond that, serialization is the orchestrator's rule: it supplies `--running N` to `host-admit.mjs`. |
 | Exclusive resources | Engine-enforced | `port:`, `db:`, `cache:`, `docker:`, `fixture:`, `generator:` and `lock:` names never run together; locks survive a crash. No cross-run locks. |
 | Isolation of duplicable resources | Agent procedure | The skill tells the orchestrator to give each node its own instance; `docker-lifecycle.mjs` labels and cleans run-scoped containers. |
 | File ownership | Engine-enforced, detect-after | The engine snapshots before and after each worker; a write outside the declared set fails the node (`ownership_violation`, `repair_outside_findings`). Plan roots cannot be owned. Workers share one tree, so the write is not sandboxed or reverted. |

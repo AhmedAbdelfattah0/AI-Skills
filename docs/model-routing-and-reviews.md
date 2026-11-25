@@ -3,7 +3,7 @@
 ## Tiers
 
 The harness uses four labels, `economy`, `balanced`, `strong` and `inherit`. They are labels the host
-maps to real model ids. REVIEW, any high-risk node (`security`, `auth`, `tenancy`, `payments`,
+maps to real model ids. REVIEW (a label; the orchestrator runs reviews), any high-risk node (`security`, `auth`, `tenancy`, `payments`,
 `migration`, `schema`, `shared-contract`, `concurrency`) and high-complexity nodes are always
 `strong`; a cheaper request cannot override that. Low-complexity nodes may use a cheaper tier;
 everything else inherits the host model. On the carrier, `strong` needs a verified model mapping or

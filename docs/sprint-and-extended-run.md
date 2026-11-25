@@ -52,4 +52,4 @@ flowchart TB
 
 Intake and the wave queue have been exercised as a dry run and a cold-resume test, not as a live
 multi-wave run. The Azure DevOps path and any unattended driver are not exercised. See the table in
-the [README](../README.md#verified-and-not-yet-exercised).
+the [README](../README.md#verified-vs-not-yet-exercised).

@@ -8,7 +8,7 @@
 | RED | On engine runs, where the plan's risk labels or `redSpecs` require it, the engine runs the spec and accepts only an assertion failure before production code. In the hand-run flow the RED line is recorded by the orchestrator. | `gate.mjs` |
 | PROVE | The repository's own commands, applicable static rules, runtime attacks, docs and UI evidence. | `references/prove.md` |
 | Review | Primary review plus second opinion on an identified candidate. The gate validates the review records it is given (structure, freshness, distinct recorded identities); the reviews themselves are run by the orchestrator. | `gate.mjs`, `candidate-id.mjs` |
-| Ship-ready | Candidate id unchanged since review, risk evidence present and the plan's test commands re-run by the engine before the commit. CI is checked after the pull request exists (orchestrator step). | `gate.mjs` (`gate ship-ready`); `ship-ready-check.mjs` cross-checks recorded ship-ready lines; `check-pr-scope.mjs` checks scope |
+| Ship-ready | Candidate id unchanged since review, risk evidence present and the plan's test commands re-run by the engine before the commit. PR CI must pass after the pull request exists, before the tracker item is closed (orchestrator step). | `gate.mjs` (`gate ship-ready`); `ship-ready-check.mjs` cross-checks recorded ship-ready lines; `check-pr-scope.mjs` checks scope |
 
 Outcomes use one vocabulary (`PASS`, `FAIL`, `NOT_TRIGGERED`, `NOT_APPLICABLE`, `DEGRADED`), defined
 in exactly one file so a failure is always recordable.
@@ -27,8 +27,8 @@ The business-abuse class has no static mirror, so a committed runtime test is it
 ## Approval boundary
 
 Implementation does not begin until a person approves the plan, through the host's plan mode. The
-approval is bound to the plan by digest, so a later change is detected: `brief.mjs plan-digest` hashes the plan with the run-state body removed, and the digest is
-recorded in the START event. For security work the plan also records the `vapt` catalog digest it was
+approval is bound to the plan by digest, so a later change is detected: `brief.mjs plan-digest`
+hashes the plan with the run-state body removed, and the digest is recorded in the START event. For security work the plan also records the `vapt` catalog digest it was
 approved against, and each selected boundary and control pair needs a named spec.
 
 ## Digest binding

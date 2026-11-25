@@ -46,7 +46,7 @@ give the same answer every time are code.
 | Capability | What it means here |
 |---|---|
 | Adaptive planning and risk/complexity classification | The planner labels each task's risk and complexity; the person approves the labels with the plan; the engine enforces the consequences. |
-| Risk-based model routing | Tasks carry a tier label (`economy`, `balanced`, `strong`, `inherit`) that the host maps to real models. Review, risky and complex work is always `strong`, and an unmapped `strong` tier is refused rather than downgraded. |
+| Risk-based model routing | Tasks carry a tier label (`economy`, `balanced`, `strong`, `inherit`) that the host maps to real models. For engine-dispatched writers, risky and complex work is always `strong`, and an unmapped `strong` tier is refused rather than downgraded. Review is run by the orchestrator, which uses a strong model by policy. |
 | Dependency-aware parallel execution | Independent tasks run in parallel; conflicting writes, reads and named resources (a port, a database) are serialized. |
 | Resource-aware execution | The engine holds extra parallel work when the plan's memory estimates exceed an estimated budget. Before heavy work the orchestrator runs a macOS host check that holds under memory pressure, swap growth or high load. |
 | File ownership detection | The plan names the files each worker may change. After a worker exits, the engine detects any write outside that list and fails the task. |
@@ -67,7 +67,7 @@ Precise boundaries for each row: [docs/adaptive-execution.md](docs/adaptive-exec
    Plans are challenged by a second model by default; disagreement is shown to the person, never
    turned into consensus.
 2. **The person approves.** The approval covers the plan and its digest.
-3. **The engine enforces.** Strong tier for risky, complex and review work; required evidence per
+3. **The engine enforces.** Strong tier for risky and complex writer tasks; required evidence per
    risk label; failing test first where the labels require it; conflict-aware parallelism; one repair
    and one confirmation.
 
@@ -104,7 +104,7 @@ flowchart LR
   H --> B["BUILD<br/>ticket branch,<br/>parallel workers"]
   B --> V["PROVE<br/>repo checks, rule pass,<br/>vapt attacks, docs, UI"]
   V --> R["REVIEW<br/>primary review +<br/>second opinion"]
-  R --> S["SHIP<br/>one commit, one PR,<br/>PR CI checked,<br/>then tracker close"]
+  R --> S["SHIP<br/>one commit, one PR,<br/>PR CI must pass,<br/>then tracker close"]
   R -. "one repair batch,<br/>one targeted confirmation" .-> B
 ```
 
@@ -121,8 +121,9 @@ flowchart TB
     RUN --> ADM["estimate-based<br/>admission"]
     ADM --> CAR["carrier: dispatch workers;<br/>writes outside owned paths<br/>fail the task"]
   end
-  CAR --> G1{"RED gate:<br/>failing test first where<br/>risk labels require it"}
-  G1 --> G2{"PROVE evidence<br/>checks, rules, attacks"}
+  RUN --> G1{"RED gate:<br/>failing test first where<br/>risk labels require it"}
+  G1 --> ADM
+  CAR --> G2{"PROVE evidence<br/>checks, rules, attacks"}
   G2 --> CID["candidate-id:<br/>hash of the reviewed bytes"]
   CID --> PR1["Primary independent review"]
   CID --> PR2["Second opinion:<br/>Codex, else fresh same-provider session"]
@@ -130,7 +131,7 @@ flowchart TB
   PR2 --> G3
   G3 --> G4{"Ship-ready gate:<br/>candidate id unchanged,<br/>plan's local checks re-run"}
   G4 --> PRN["Pull request"]
-  PRN --> CI["PR CI checked before<br/>tracker close"]
+  PRN --> CI["PR CI must pass before<br/>tracker close"]
 ```
 
 The second opinion prefers Codex. When Codex is unavailable or out of quota, a fresh session of a
@@ -246,3 +247,8 @@ their `references/` (`sources.md` in `test-quality` and `docs-accuracy`).
 ## Security and license
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md). License: MIT, see [LICENSE](LICENSE).
+
+Parts of `test-quality`, `docs-accuracy` and `code-quality` are adapted from the MIT-licensed
+[guard-skills](https://github.com/amElnagdy/guard-skills); the attribution and source citations are in
+those skills' `references/` (the upstream's full license text is not reproduced here), and vendored
+third-party code is listed in `skills/ship-ticket/THIRD_PARTY_NOTICES.md`.

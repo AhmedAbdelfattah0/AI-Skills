@@ -11,7 +11,7 @@ pull request. The source of truth for each phase is
 | BUILD | Implementation and tests on the ticket branch, by workers with disjoint owned paths; a write outside a worker's set fails that task. |
 | PROVE | The repository's own checks, the code-quality rule pass, `vapt` attacks where trust boundaries changed, truthful docs and UI evidence. |
 | REVIEW | One bounded primary review workflow plus one mandatory independent second opinion. |
-| SHIP | One commit, one push, one pull request, PR CI checked, then the tracker item completed (orchestrator steps). |
+| SHIP | One commit, one push, one pull request, PR CI must pass before the tracker item is completed (orchestrator steps). |
 
 ## Invariants worth knowing
 

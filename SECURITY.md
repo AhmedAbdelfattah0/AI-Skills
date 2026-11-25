@@ -6,8 +6,9 @@ Only the `main` branch is supported. There are no tagged releases.
 
 ## Reporting a vulnerability
 
-Use GitHub private vulnerability reporting: open the repository's **Security** tab and choose
-**Report a vulnerability**. Please do not open a public issue for a suspected vulnerability.
+Report through the repository's **Security** tab (**Report a vulnerability**) when it is available.
+Otherwise open a GitHub issue titled "security contact request" without any details, and the
+maintainer will reply with a private channel. Please do not put vulnerability details in a public issue.
 
 ## Scope
 
