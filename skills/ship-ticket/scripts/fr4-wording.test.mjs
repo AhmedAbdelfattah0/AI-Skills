@@ -32,9 +32,11 @@ test('a qualifying Major or Blocker after cycle 2 stops automatic repair and ope
   assert.ok(section.includes('Root-Cause / Architecture Assessment'));
 });
 
-test('no third automatic cycle; the owner approves before work resumes with a revised plan', () => {
-  assert.ok(section.includes('There is no third automatic repair cycle'));
-  assert.ok(section.includes('Owner approval is required before resuming with a revised plan'));
+test('no third repair cycle in one review execution; the Factory resumes on progress and the owner decides when none is made', () => {
+  assert.ok(section.includes('There is no third repair cycle inside one review execution'));
+  assert.ok(section.includes('the Factory resumes on its own'));
+  assert.ok(section.includes('Owner approval is required when two consecutive rounds show no progress'));
+  assert.ok(section.includes('a revised plan returns to the owner'));
 });
 
 test('the limit never waives a gate, downgrades a severity or approves shipping', () => {
@@ -60,7 +62,7 @@ test('cycle 2 is the targeted confirmation, not a new full review or any number 
 
 test('an implementation attempt is never reset by a commit or new head', () => {
   assert.ok(section.includes('An implementation attempt is never reset by a commit or a new head'));
-  assert.ok(section.includes('A new attempt starts only through owner authority'));
+  assert.ok(section.includes('A new attempt starts through a RUN-STATE `RETRY` for ticket runs'));
   assert.ok(section.includes('RUN-STATE `RETRY`'));
 });
 

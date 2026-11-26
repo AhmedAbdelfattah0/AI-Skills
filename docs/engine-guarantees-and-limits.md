@@ -24,7 +24,7 @@ orchestrator is the party that runs reviews; the engine never dispatches REVIEW.
 | `missing_second_opinion` | No second-opinion record. |
 | `reviewers_not_distinct`, `reviewer_is_builder` | Recorded identities collide with each other or with a builder. |
 | `stale_candidate` | A review names a candidate other than the frozen one. |
-| `confirmation_spent`, `round_limit` | A second confirmation, or a third PROVE repair batch, was requested. |
+| `confirmation_spent`, `round_limit` | A second confirmation or second review repair was requested, or a `prove`-kind repair item exceeded the engine backstop (no production path enqueues one; routine PROVE correction follows the progress rule in the spine). |
 | `ownership_violation`, `repair_outside_findings` | A worker wrote outside its declared set. |
 | `post_freeze_drift` | The tree changed after the review freeze beyond covered drift. |
 | `budget_stop` | A configured token ceiling is spent. |

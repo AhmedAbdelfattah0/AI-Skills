@@ -64,7 +64,7 @@ complete plan to the native plan file and presents it with `ExitPlanMode`. If
 you notice you drafted without entering Plan Mode, enter it now, present the plan
 through `ExitPlanMode`, and record the miss in the run state. The PLAN debate runs
 only through the read-only relay ([cross-model.md](cross-model.md)); the relay's own
-out-dir under the host session scratchpad is the one write besides the plan file.
+out-dir and the staged per-ticket drafts, both under the host session scratchpad, are the only writes besides the plan file.
 
 **Only `ExitPlanMode` approves.** Chat text, an `AskUserQuestion` answer and a
 typed "approve" are not plan approval; never ask the user to type one.
@@ -78,23 +78,43 @@ routing. No stub, "TBD", "to be decided" or placeholder remains; an open product
 question is either resolved first or stated in Outstanding decisions with a
 recommendation.
 
-**Waves.** For several tickets handed over together, enter Plan Mode once,
-draft every ticket's plan there (one section per ticket, each with its own
-scope, contract and risks), and present them in a single `ExitPlanMode` call.
-On approval, persist each ticket's plan to its own `.specs/plans/<KEY>.md` with
-its own START event and digest. Each ticket's debate runs inside the same Plan Mode
-before that one `ExitPlanMode`. A ticket whose plan cannot be completed yet (an
-unmerged dependency) is left out of this approval and becomes its own later wave;
-never start BUILD on a wave ticket whose plan was not in an approved
-`ExitPlanMode`.
+**One unified plan, one approval.** For several tickets handed over together
+(a batch, a sprint or an extended run), the owner approves ONE unified plan
+through ONE `ExitPlanMode`. A wave is an execution strategy, never an approval
+boundary: there is no per-wave approval and no per-ticket approval.
 
-For N tickets, analyse all of them first and write ONE unified plan that records
-the dependencies and file/resource conflicts between tickets, each ticket's
-security risks and its gates. The one approval covers the whole plan, then
-independent tickets run in parallel; each ticket keeps its own tests,
-independent review and gates. The single approval never waives a security
-check or a per-ticket review. No wave driver exists: `scripts/wave.mjs verify|status --wave <manifest>` and `scripts/host-admit.mjs`
-are optional helpers only. For a sprint or an extended run, present one plan per wave and obtain all approvals in one sitting before the run ([sprint.md](sprint.md)). A wave whose plans depend on unmerged code is left out of that sitting and gets its own approval after the dependency merges.
+1. Analyse every ticket first. Draft each ticket's complete plan, run
+   `run-engine.mjs preflight` on it and hold its Planning Debate against its own
+   staged draft file. Stage the drafts in the session scratchpad (outside the
+   repository). Use one debate per ticket, as for a single ticket.
+2. A dependent ticket is planned against its dependency's approved plan
+   (interfaces, contract, migration ids). It is left out of the batch only when
+   its requirements cannot be stated before the dependency is delivered.
+3. Write ONE unified plan file. It holds: the batch header (tickets, dependencies
+   and file or resource conflicts between them, the proposed execution order,
+   merge mode, the cap, the `config.budget` ceiling per ticket, and the model
+   routing for builders, primary reviewer and second opinion); a table of each
+   ticket's narrative digest, attestation hash and DAG digest; each ticket's
+   staged plan embedded verbatim, byte for byte; and the "After approval"
+   statement: "For each ticket below, the Factory will copy its plan file,
+   retain its debate bundle and record its START with these digests and run ids."
+   The ExitPlanMode text quotes each ticket's scope-contract block.
+4. After the one approval the Factory, without asking again, does the following per
+   ticket: create the worktree and branch, byte-copy the staged plan to
+   `.specs/plans/<KEY>.md`, check that its digest equals the table, run
+   `debate-retain`, append START (below) and run `start-check`. Then it executes
+   in dependency order with work-conserving parallelism; the ticket plan files,
+   digests and STARTs are internal Factory artifacts, never owner approval
+   surfaces. A refinement of a dependent ticket after its dependency ships that
+   leaves its Design Contract, acceptance criteria and security block
+   byte-identical to the approved section is Factory-owned (new digest, new START
+   recording `supersedes`, normal review). Any change to those three blocks
+   needs the owner.
+
+The single approval never waives a security check or a per-ticket review; each
+ticket keeps its own tests, independent review and gates. No wave driver exists:
+`scripts/wave.mjs verify|status --wave <manifest>` and `scripts/host-admit.mjs` are
+optional helpers only. See [sprint.md](sprint.md) for the sprint queue.
 
 Remain in Plan Mode while drafting and throughout the host/counterpart debate.
 Reconcile its result there. For a policy-2 plan with an execution DAG, run
@@ -136,6 +156,11 @@ the plan metadata.
 ## The template
 
 Use it exactly — same headings, same order, so every plan reads the same way.
+
+A plan restricts workers and scope; it does not restrict the Factory's own
+corrective authority beyond the Factory's rules. Do not write self-imposed
+clauses such as "the orchestrator writes no candidate bytes": a routine in-scope
+fix is the Factory's to make, and the review chain still covers it.
 
 ````markdown
 # Plan — <TICKET>: <ticket title>
@@ -291,6 +316,7 @@ disposition row is pending and blocks START.
 | parity | <reference-backed screen paths, or not triggered> | primary workflow's frontend partition performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
 | attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial per shared environment, while already-isolated environments may overlap |
 | rule coverage | <frontend/backend/shared families and stack references selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
+| builder, primary reviewer, second opinion | name the model for each side by side; the three must differ (builder != primary reviewer != second opinion), checked at plan time, because the review gate refuses a reviewer equal to a builder (`reviewer_is_builder`) | state the routing here and in the unified plan header |
 | second opinion (mandatory) | every ticket | Codex in a fresh session when available and within quota, else a fresh Fable session (same-provider independent review); CodeRabbit optional extra coverage; concurrent with the primary workflow when resources allow |
 
 **Ship threshold:** <which residual findings (found by the confirmation, or outside the Design Contract) ship with a recorded follow-up tracker item instead of another round. Default: display-only stale-state, cosmetic or test-hygiene issues of medium severity or lower, with server data correct, ship with a follow-up; anything touching data integrity, security, tenancy or money blocks. In-scope findings found while the repair batch is unspent are fixed. Reconciliation applies this without asking the human.>
@@ -299,8 +325,8 @@ disposition row is pending and blocks START.
 <!-- Append one compact JSON object per execution event; never edit or reorder
      an existing entry. The event vocabulary is defined in ship.md. -->
 <!-- After approval, append START with the workflow run_id,
-     approved_plan_digest, approved_at (ISO-8601), approved_by (the human
-     approver, required) and, optionally, approval_surface (terminal|desktop|plannotator). Every later event carries the same run_id. -->
+     approved_plan_digest, approved_at (ISO-8601, from `date -u`) and, optionally,
+     approved_by and approval_surface (terminal|desktop|plannotator). Every later event carries the same run_id. -->
 <!-- RUN-STATE:END -->
 ````
 
@@ -313,9 +339,9 @@ Write the START only after the narrative is final. Compute `approved_plan_digest
 with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
 `sha256:<64 hex>`: the digest of the plan with the RUN-STATE body removed), never
 with `shasum` and never over the whole file. A START carries `approved_plan_digest`,
-`approved_at` (not `at`) and `approved_by` (descriptive metadata only: it is presence-checked, not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding). It may also carry `approval_surface` (OPTIONAL audit field, one of `terminal`, `desktop`, `plannotator`: where the owner gave the decision); it is recorded only and is never evidence of approval. Absent is always accepted; a present value that is not exactly one of the three is refused (`start_approval_surface_invalid`). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
+`approved_at` (not `at`; stamp it from the system clock, `date -u +%Y-%m-%dT%H:%M:%SZ`, never a guess) and, optionally, `approved_by` (descriptive metadata only: never checked, and the Factory records no approver claim by default; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding). The Factory writes the START after the one approval without asking the owner again. If the host's own safety control still blocks that write, work with it: never bypass it, never add an allow rule for `.specs/plans/**` and never change the permission mode; the owner's one explicit sentence in the same sitting ("Record START for these run ids and digests as approved") answers it. It may also carry `approval_surface` (OPTIONAL audit field, one of `terminal`, `desktop`, `plannotator`: where the owner gave the decision); it is recorded only and is never evidence of approval. Absent is always accepted; a present value that is not exactly one of the three is refused (`start_approval_surface_invalid`). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
 before dispatching any worker (`--run-id` is required); it refuses a malformed
-RUN-STATE block, a stale or malformed digest, a missing approval time, a missing `approved_by` or an invalid `approval_surface` (`start_approval_surface_invalid`).
+RUN-STATE block, a stale or malformed digest, a missing approval time or an invalid `approval_surface` (`start_approval_surface_invalid`).
 On a `debate_policy: 2` plan the START also carries `debate_attestation_sha256` (the
 attestation line's hash stated at `ExitPlanMode`); pass `--repo <repo>` so start-check
 verifies the retained debate bundle (`debate_attestation_missing`,

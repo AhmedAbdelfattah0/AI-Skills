@@ -142,8 +142,8 @@ Host Plan Mode restrictions also apply to the carrier. Temporary files do not
 make a forbidden shell write permissible. The one supported PLAN debate route is
 the read-only relay (`codex_relay` on a Claude host, `claude_relay` on a Codex host;
 Fable only as the declared substitute, through the same relay with `--model`, kind `claude_relay`). The
-relay's own out-dir under the host session scratchpad is the single write besides
-the plan file, and the orchestrator writes nothing else (no host-side scratch file).
+relay's own out-dir under the host session scratchpad is the one write besides
+the plan file and the staged per-ticket drafts (also under the host session scratchpad, never in the repository); the orchestrator writes nothing else (no host-side scratch file).
 Dispatch goes through the host's normal permission flow: a permission prompt is the
 owner's approval, a refusal is reported with its class and the degradation policy
 below applies, and the relay's out-dir writes are disclosed next to the approval
@@ -247,6 +247,8 @@ occur during debate.
 ### Responses, outcomes and the attestation
 
 The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object; otherwise record the round `rejected` with its evidence kept (see the rounds below) and re-ask with a new `request_id`. A schema-valid answer bound to the wrong `request_id`, `plan_version` or `plan_digest` can be recorded neither `rejected` nor `completed`: re-asking then means leaving that round out of the attestation, and the verifier fails closed on any record of it. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
+
+In the confirmation prompt (and every later round) tell the counterpart to list only still-open finding ids: a finding already closed must not be listed again, because the checker refuses a response that confirms an id that is not open (`debate_response_invalid`).
 
 The brief starts with the three lines `request_id: <id>`, `plan_version: <v>` and
 `plan_digest: <digest>`, each exactly once, and states the schema:

@@ -20,7 +20,7 @@ const has = (doc, sentence) => assert.ok(doc.includes(flat(sentence)), `missing:
 test('sprint.md has the section headings in order', () => {
   const raw = read('../references/sprint.md');
   const heads = ['## Sprint intake and extended run are separate', '## Intake', '## Code reality check', '## Dependency and parallelism analysis',
-    '## Wave split rules', '## One consolidated question list', '## Queue file', '## Per-wave plan', '## Merge mode',
+    '## Wave split rules', '## One consolidated question list', '## Queue file', '## Unified plan and one approval', '## Merge mode',
     '## Execution rules', '## Extended-run preflight', '## Cold resume', '## Final report'];
   let at = -1;
   for (const h of heads) {
@@ -68,20 +68,23 @@ test('code reality check classifies tickets before the split', () => {
   assert.ok(raw.indexOf('## Code reality check') > raw.indexOf('\n## Intake') && raw.indexOf('## Code reality check') < raw.indexOf('## Wave split rules'));
 });
 
-test('M1: a wave that depends on unmerged code is not approved up front', () => {
-  has(sprint, 'A wave whose plans depend on UNMERGED code is not approved in that sitting: it stays `waiting` with no plan digest and gets its own native approval after the dependency merges, so an extended run does not start it.');
-  has(plan, 'A wave whose plans depend on unmerged code is left out of that sitting and gets its own approval after the dependency merges.');
+test('M1: a ticket whose requirements need unmerged code is left out of the one approval', () => {
+  has(sprint, 'A ticket whose requirements cannot be stated before an unmerged dependency is delivered stays `waiting` with no plan digest and is left out of the batch.');
+  has(plan, 'It is left out of the batch only when its requirements cannot be stated before the dependency is delivered.');
   const row = read('../references/sprint.md').split('\n').find((l) => l.includes('| waiting ') );
   assert.ok(row && !/sha256/.test(row), 'the waiting example row carries no plan digest');
 });
 
-test('M2: owner-class stops park, never resolved by the Factory; state mapping', () => {
-  has(sprint, 'In an extended run any WAIT_FOR_USER, owner-class stop (security, approval, ownership, spent budget, RETRY authority) or MAJOR after the second review cycle parks that ticket and its genuine dependents, and the Factory never resolves it (no "apply the recommended default"); independent permitted work continues. "Blocked" means exactly that set.');
-  has(sprint, 'A spine WAIT_FOR_USER, or a `waiting_owner` or `failed` state from `scripts/wave.mjs`, maps to `parked` (an owner action is needed); a dependency, merge or external prerequisite maps to `waiting`.');
+test('M2: only genuine owner stops and capability blockers park; routine failures are the Factory\'s; state mapping', () => {
+  has(sprint, 'Park a ticket (and its genuine dependents) only for a genuine owner stop or a capability blocker: a security, approval, ownership or spent-budget class, a `RETRY` for drift, security or a moved base, a judgment code the table in [execution-harness.md](execution-harness.md) sends to the owner, or no progress for two consecutive correction rounds.');
+  has(sprint, 'Everything else is resolved by the Factory inside the approved scope and recorded');
+  has(sprint, 'A routine gate or test failure is never parked: the Factory corrects it under the corrective-iteration rule');
+  has(sprint, 'A dependency, merge or external prerequisite maps to `waiting`.');
 });
 
 test('drift, CI, budget and second-reviewer details', () => {
-  has(sprint, 'Any `base-drift.mjs` overlap (exit 1) is always material (WAIT_FOR_USER, see brief.md). Run the base-drift check after each merge.');
+  has(sprint, 'routine rebasing and base synchronization are Factory-owned: rebase, re-run the affected gates and continue.');
+  has(sprint, 'Only a material scope, security or contract conflict, or an overlap with work outside the batch (see brief.md), parks the ticket. Run the base-drift check after each merge.');
   has(sprint, 'the local gates exit 0, and every CI gate is green.');
   has(sprint, 'Check the remaining budget in all three cap units (tickets, hours, second-reviewer runs) before starting more work. An exhausted second-reviewer budget counts as second reviewer unavailable and parks the ticket.');
   has(sprint, 'recorded as pass, fail or not run (not run before the preflight), the route (Codex or the Fable exception) and an integer expected-run count.');
@@ -89,8 +92,9 @@ test('drift, CI, budget and second-reviewer details', () => {
   has(sprint, 'every GUESS (numbered Qg1, Qg2 and so on, so each answer is recorded in the header)');
 });
 
-test('each wave approval is its own native approval; no ship_ready or merged without evidence', () => {
-  has(sprint, 'each through its own native approval');
+test('one native approval for the whole batch, no per-wave approval; no ship_ready or merged without evidence', () => {
+  has(sprint, 'obtain ONE native approval');
+  has(sprint, 'there is no per-wave approval');
   has(sprint, 'never mark a ticket `merged` or `ship_ready` without the evidence the normal phases require');
 });
 
@@ -105,7 +109,7 @@ test('final micro-commit rules', () => {
   has(sprint, 'It may apply to an ELEVATED pair only when that semantic independence is verified in the plans.');
   has(sprint, 'After the owner answers, re-run the wave split rules: an answer can change a ticket\'s tier or dependencies (an ELEVATED upgrade may force a re-split).');
   has(sprint, 'A ticket that might add a migration reserves an identifier too, released if unused. If the ticket it must follow is parked, it may run alone; the later ticket rebases on whatever merges first and the reserved identifiers are re-assigned.');
-  has(sprint, 'one independent second opinion per ticket plus one targeted confirmation per ticket that needs a repair; repairs beyond that are counted when they happen.');
+  has(sprint, 'one independent second opinion per ticket plus one targeted confirmation per ticket that needs a repair; repairs beyond that, and every Factory `RETRY` (each spends one second-reviewer run), are counted when they happen.');
   const row = read('../references/sprint.md').split('\n').find((l) => l.includes('| parked '));
   assert.ok(row && /proposed/.test(row), 'the parked example row shows a proposed wave label');
 });
@@ -117,7 +121,8 @@ test('more than one open sprint: ask which one', () => {
 test('queue states, header reconciliation, cap units, verification evidence', () => {
   has(sprint, 'States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `waiting`, `excluded`, `parked`.');
   has(sprint, '`excluded` means not part of the run, with a kind: `done_in_code`, `owner_parked`, `open_pr`, `needs_rescope` or `merged_elsewhere`.');
-  has(sprint, '`parked` is only for a blocked ticket, an unavailable reviewer, material drift or an open question.');
+  has(sprint, '`parked` is only for a genuine owner stop');
+  has(sprint, 'a capability blocker (no reviewer, no tracker access, no credentials), material drift or an open question.');
   has(sprint, 'Header: sprint or run id and name, source ids, mode (`attended|extended`), merge mode and scope, ticket counts (read, in the queue, excluded by kind) that reconcile, the queue file path, the cap, the second-reviewer check, the permissions state (yes or no, plus the list), owner answers.');
   has(sprint, 'Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs)');
     has(sprint, 'A `merged` or `ship_ready` entry records the PR number, the merge commit and the date it was verified.');
@@ -137,27 +142,27 @@ test('queue authority: a progress record, never an execution authority', () => {
   has(sprint, 'The queue is a progress and resume record, never an execution authority: plan approvals, digests, START records, engine state and engineering gates stay authoritative, and a queue entry never substitutes for acceptance evidence.');
 });
 
-test('per-wave plan keeps each ticket plan, digest and START; all approvals in one sitting', () => {
-  has(sprint, 'Each ticket keeps its own plan file, digest and START event; the existing `wave:` plan line and the wave manifest (`scripts/wave.mjs`) apply unchanged.');
-  has(sprint, 'obtain every wave\'s approval in one sitting before the run starts');
+test('unified plan: ONE approval; ticket plan files, digests and STARTs are internal Factory artifacts', () => {
+  has(sprint, 'Each ticket keeps its own plan file, digest and START as internal Factory artifacts, derived from the unified plan after the approval');
+  has(sprint, 'Waves are the proposed execution order, not an approval boundary');
 });
 
 test('merge mode: opt-in, once, scope, permanent owner-merge exceptions, deploy separate, gates', () => {
-  has(sprint, 'Merge is always opt-in and is asked once per wave or sprint. The default is that the owner merges.');
+  has(sprint, 'Merge is always opt-in and is asked once, in the unified plan. The default is that the owner merges.');
   has(sprint, 'state the scope: `all` or `STANDARD-only`.');
   has(sprint, 'Migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge. Deploy is always a separate decision.');
   has(sprint, 'The Factory merges only after an exact-head primary review and an independent second-opinion PASS, the local gates exit 0, and every CI gate is green.');
 });
 
-test('execution rules: next-wave trigger, blocked tickets, base drift, extended-run limits', () => {
-  has(sprint, "The next wave starts when the previous wave's tickets are at PR open or SHIP_READY, or merged when the Factory merges and a later ticket depends on merged code.");
+test('execution rules: dependency trigger, blocked tickets, base drift, extended-run limits', () => {
+  has(sprint, 'A ticket starts as soon as its dependencies hold (`dep_mode`): at PR open or SHIP_READY, or merged when the Factory merges and a later ticket depends on merged code.');
   has(sprint, 'Park the ticket and only the tickets that genuinely depend on it; continue independent tickets and waves whose prerequisites hold; never stop the whole sprint for one ticket.');
-  has(sprint, 'Before execution, revalidate each affected ticket against the current base; non-material changes are handled inside the approved scope; a material change needing re-approval parks the ticket during an unattended run.');
+  has(sprint, 'Before execution, revalidate each affected ticket against the current base; routine rebasing and base synchronization are Factory-owned');
   has(sprint, 'If the second reviewer becomes unavailable mid-run, preserve progress and park the affected tickets, never bypass review, and continue independent permitted work within the limits.');
 });
 
 test('extended-run preflight and cold resume', () => {
-  has(sprint, 'Before the first wave, verify that a second reviewer can run (Codex; else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted.');
+  has(sprint, 'Before the first ticket starts, verify that a second reviewer can run (Codex; else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted.');
   has(sprint, 'If either check fails, do not start.');
   has(sprint, 'Before acting it RE-CHECKS the live tracker status, the PR states and the freshly fetched base; the artifacts win over the queue when they disagree.');
   has(sprint, 'A fresh session with no conversation context reads the queue file and the existing artifacts (plan files, run logs, engine state, PR state), reconstructs progress, and names the next permitted action.');
@@ -165,13 +170,13 @@ test('extended-run preflight and cold resume', () => {
 
 test('SKILL.md additions', () => {
   has(skill, 'For a sprint or board link, or an explicit ticket list for an extended run, also load [references/sprint.md](references/sprint.md).');
-  has(skill, 'For a sprint or an extended run, ask once per wave or sprint, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision');
-  has(skill, 'Before the first wave of an extended run, verify that a second reviewer can run (Codex, else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted; otherwise do not start.');
+  has(skill, 'For a sprint or an extended run, ask once, in the unified plan, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision');
+  has(skill, 'Before the first ticket of an extended run starts, verify that a second reviewer can run (Codex, else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted; otherwise do not start.');
   has(skill, 'Sprint or extended run: read the queue file under `<git-common-dir>/ai-skills/ship-ticket/sprints/` and the existing artifacts, then name the next permitted action');
 });
 
 test('plan.md, understand.md and cross-model.md additions', () => {
-  has(plan, 'For a sprint or an extended run, present one plan per wave and obtain all approvals in one sitting before the run');
+  has(plan, 'the owner approves ONE unified plan through ONE `ExitPlanMode`. A wave is an execution strategy, never an approval boundary: there is no per-wave approval and no per-ticket approval.');
   has(understand, 'A sprint, board or iteration link, or an explicit ticket list for an extended run, is read through [sprint.md](sprint.md) (intake), not as one ticket.');
   has(cross, 'Before an extended run, check this availability for the whole run; if neither route can run, do not start');
 });
