@@ -639,8 +639,14 @@ unless the work tree is exactly the frozen candidate (`rebind_not_frozen_tree`: 
 these bytes; an edit after the freeze must be reverted or sent to a new review with a RETRY),
 and also with no freeze (`rebind_no_freeze`: before the freeze a drifted node re-runs as stale),
 a drifted path the candidate does not cover (`rebind_uncovered`: e.g. an excluded file such as `session-log.md`, which no review saw), nothing drifted (`rebind_nothing_drifted`) or live attempts (`rebind_attempts_live`). It never moves the freeze or relaxes the drift
-check. A changed RED spec still needs `gate red`. Known limit: a node that declares a directory (not files) whose contents changed is refused as `rebind_uncovered`, because coverage is exact path equality and the candidate lists files; this fails closed. Declare files, not directories, for nodes the owner may need to rebind. If a crash follows the commit, the next command delivers the `REBIND` event once, and a repeated `rebind` then answers `rebind_nothing_drifted`: the first call already took effect. Hand edits remain the owner's responsibility:
-the review already covers them because the frozen candidate includes them.
+check. A changed RED spec still needs `gate red`. Known limit: a node that declares a directory (not files) whose contents changed is refused as `rebind_uncovered`, because coverage is exact path equality and the candidate lists files; this fails closed. Declare files, not directories, for nodes the owner may need to rebind. If a crash follows the commit, the next command delivers the `REBIND` event once, and a repeated `rebind` then answers `rebind_nothing_drifted`: the first call already took effect. **Routine in-scope correction before the freeze is the Factory's.** When a gate refuses a completed
+node's output for a fixable reason inside the approved scope (for example a test name that does not equal
+the bound `<boundary>:<control>`), the Factory fixes it itself: edit only inside that node's owned paths, put
+the correction into the node's brief too (a drifted done node re-runs as stale, and the worker could otherwise
+reproduce the defect), and re-run the gate. No owner round trip, no weakened assertion, no waived gate. The
+orchestrator's model must differ from the primary and second-opinion reviewers, and the normal review chain
+covers the edit. Anything larger is re-dispatched as a worker. After the freeze, a deliberate hand edit is
+accepted only through `rebind` as above, and the review covers it because the frozen candidate includes it.
 The authorized exception is one REPAIR opened by a `gate review` FAIL: the gate
 enqueues `repair-<review_execution>` with the finding-bound write set (the paths its
 findings name plus the declared repair ownership) and the brief named by
@@ -661,13 +667,38 @@ unwritable log only degrades telemetry. A repair goes through the RED barrier (i
 inherits the prerequisites of every node whose writes it overlaps) and budget
 admission like a node.
 
-**Round counters** follow `SKILL.md`: at most two consolidated PROVE repair
-batches per ticket in total; one REVIEW repair and one confirmation per
-authorized review execution (`rounds.review_repairs[<review_execution>]`).
-Beyond them, or after a terminal failure, is `round_limit`: it needs an
-explicitly authorized retry. A counter moves only when the dispatch is actually
+**Round counters.** PROVE correction follows the corrective-iteration rule in `SKILL.md` "Bounded repair"
+(instructions, not engine checks): strictly fewer failures or a failure set not seen before counts as progress,
+two consecutive rounds without progress or a backstop of 6 corrective rounds per ticket stop it, and the
+ticket's `config.budget` is mandatory for any run that uses this path. The Factory makes routine corrections
+as an edit plus a gate re-run. Before EACH correction round (an orchestrator direct edit or a gate re-run included) the orchestrator imports the usage so far with the existing usage tooling (`usage.mjs import-session` / `import-codex`) and checks the `config.budget` headroom; no headroom, or usage that is unknown or cannot be imported, stops to the owner, never a proceed-on-unknown. `config.budget` is set in the plan template's Budget line BEFORE approval, for every plan (single tickets included), so no later plan edit or re-approval is needed to get a correction budget; a plan without one has no Factory-owned correction, and the ticket returns to the owner at the first failure. The engine keeps a backstop counter `rounds.prove_repair_batches` (cap 2) for a
+`prove`-kind repair item; no production path enqueues one today, so it never limits routine correction. REVIEW
+keeps one repair and one confirmation per review execution (`rounds.review_repairs[<review_execution>]`).
+Beyond them, or after a terminal failure, is `round_limit`: a new original review needs a RUN-STATE `RETRY`,
+which the Factory writes under the same progress rule (`authorized_by` `factory:bounded-retry`, never the
+owner's name) when the cause is a review FAIL that stays inside the approved scope. Each new original review
+spends one second-reviewer run of the cap. A counter moves only when the dispatch is actually
 launched, never on a refused one; an automatic infra retry of a review repair re-dispatches
 within the round it already holds. Counters are never reset.
+
+**Who takes a judgment point.** One table, so no code is guessed. "Factory" means the orchestrator resolves
+it inside the approved scope under the corrective-iteration rule in `SKILL.md` "Bounded repair"; "Owner"
+means the ticket parks (only it and its genuine dependents) and the owner decides. The table governs: several
+engine messages and `status` stop kinds (`candidate_moved`, `confirmation_fail`, `review_fail_no_repair`,
+`review_terminal`, `rebind_*`) still say "owner RETRY" because they predate this change. A code the table does
+not list goes to the OWNER (fail closed).
+
+| Judgment code | Goes to | Why |
+|---|---|---|
+| `crash_with_writes`, `quiescence_unknown`, `ownership_unavailable`, `candidate_unavailable`, `repair_failed`, `red_required`, `red_invalidated`, `dispatched_before_red`, unsupported RED runner output | Factory | a routine execution or gate failure; fix or re-dispatch inside the approved paths and re-run |
+| `ownership_violation`, `repair_outside_findings` | Owner | both come from the same outside-the-approved-write-set check; any write outside the approved set is owner-reserved (`SKILL.md` "When execution may yield"), and the owner decides whether it is accepted or reverted |
+| `confirmation_fail`, `review_fail_no_repair`, `candidate_moved`, `round_limit` | Factory | a bounded new review: write the root-cause assessment, then a `RETRY` recorded `factory:bounded-retry` under the progress rule. The owner when the FAIL carries a security finding on any ticket tier, when the candidate moved because of post-freeze drift or a moved base, or when the plan must change. A failed security review stays with the owner regardless of the ELEVATED tier |
+| `review_terminal` (an overflow FAIL) | Owner | matches the engine's own classification |
+| `stale_candidate` and `post_freeze_drift`, `repair_unauthorized` | Owner | the frozen candidate and its authorization are a gate-safety boundary |
+| `run_mismatch`, `approval_mismatch`, `dag_mismatch` | Owner | the approved plan or DAG changed, which is a material change |
+| `budget_stop` | Owner | the approved budget is spent |
+| unit codes `unit_review_terminal`, `parent_ceiling`, `unit_check_failed`, `unit_invalidation_storm` | Owner | units are opt-in; a unit's RETRY and its clear (`UNIT_CLEAR`) stay with the owner ([units.md](units.md)) |
+| any security refusal or waiver ([security-risk.md](security-risk.md)) | Owner | security exceptions are never Factory-owned |
 
 **`mark`** accepts only `failed->pending` (counts as a retry, capped at 1) and
 `pending->cancelled`, with a reason. It cannot mark nodes done, create gate
@@ -685,7 +716,7 @@ can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
 `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
 `red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review
-repair that failed; it is terminal for its review execution, and an owner RETRY of that review
+repair that failed; it is terminal for its review execution, and a RETRY of that review (see the table below for whose)
 cancels it as `superseded by retry`). The gate adds
 unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
 (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2).

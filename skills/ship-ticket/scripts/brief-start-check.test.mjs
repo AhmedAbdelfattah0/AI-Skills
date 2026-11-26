@@ -101,9 +101,11 @@ test('start-check CLI: typed JSON on stdout, exit 0 ok, exit 1 refusal, plan wit
     assert.equal(ok.status, 0);
     assert.equal(JSON.parse(ok.stdout).ok, true);
     writeFileSync(f, withStart({ approved_by: undefined }));
+    assert.equal(run('start-check', '--plan', f, '--run-id', 'r1').status, 0, 'approved_by is optional');
+    writeFileSync(f, withStart({ approved_plan_digest: undefined }));
     const bad = run('start-check', '--plan', f, '--run-id', 'r1');
     assert.equal(bad.status, 1);
-    assert.deepEqual(JSON.parse(bad.stdout).errors.map((e) => e.code), ['start_approver_missing']);
+    assert.deepEqual(JSON.parse(bad.stdout).errors.map((e) => e.code), ['start_digest_missing']);
     writeFileSync(f, withStart());
     assert.equal(run('start-check', '--plan', f, '--run-id', 'other').status, 1);
     assert.equal(readFileSync(f, 'utf8'), before);
@@ -158,9 +160,9 @@ test('TICKET-D replay 3: narrative edited after hashing', () => {
   const edited = stamped.replace('Do the thing.', 'Do a different thing.');
   assert.deepEqual(codes(chk(edited)), ['start_digest_stale']);
 });
-test('TICKET-D replay 4: `at` instead of approved_at and no approver', () => {
+test('TICKET-D replay 4: `at` instead of approved_at', () => {
   const r = chk(withStart({ approved_at: undefined, at: '2026-11-01T10:00:00Z', approved_by: undefined }));
-  assert.deepEqual(codes(r), ['start_at_not_approved_at', 'start_approver_missing']);
+  assert.deepEqual(codes(r), ['start_at_not_approved_at']);
 });
 
 // ---- the remaining field checks ---------------------------------------------------------------------------------------------
@@ -170,8 +172,8 @@ test('start-check: approved_at missing, not ISO-8601, in the future', () => {
   assert.deepEqual(codes(chk(withStart({ approved_at: '2999-01-01T00:00:00Z' }))), ['start_approved_at_future']);
 });
 const NAMES = ['Claude', 'agent', 'TBD', 'Ahmed', '-'];
-test('start-check: approved_by presence is checked (missing, empty, whitespace, non-string refused); content is not', () => {
-  for (const by of [undefined, '', '   ', 42, null, ['Ahmed']]) assert.deepEqual(codes(chk(withStart({ approved_by: by }))), ['start_approver_missing'], String(by));
+test('start-check: approved_by is optional (missing, empty, whitespace or any value is accepted)', () => {
+  for (const by of [undefined, '', '   ', 42, null, ['name']]) assert.equal(chk(withStart({ approved_by: by })).ok, true, String(by));
 });
 test('approved_by is descriptive: changing the name cannot change ok-ness or the digest', () => {
   const base = chk(withStart());
@@ -322,7 +324,7 @@ test('differential: start-check ok implies the engine accepts; they differ only 
     stale: good1.replace('Do the thing.', 'Do other.'),
     'no run_id': S({ run_id: undefined }),
     'other run only': S({ run_id: 'r9' }),
-    'bad approver': S({ approved_by: undefined }),
+    'no approver': S({ approved_by: undefined }),
     'timestamp only': S({ approved_at: undefined, timestamp: '2026-11-01T10:00:00Z' }),
     'non-JSON brace line': `${NARRATIVE}${B}\n${JSON.stringify(good())}\n{nope\n${E}\n`,
     'bare CR': `${NARRATIVE}${B}\n${JSON.stringify(good())}\r{"event":"X"}\n${E}\n`,
@@ -341,7 +343,7 @@ test('differential: start-check ok implies the engine accepts; they differ only 
     if (mine) assert.equal(eng, true, `start-check accepted what the engine refuses: ${name}`);
     if (eng && !mine) stricter += 1;
   }
-  assert.ok(stricter >= 2, 'start-check is expected to be stricter on approver and future time');
+  assert.ok(stricter >= 1, 'start-check is expected to be stricter on a future approval time');
 });
 
 // ---- approval_surface (Change B, 2026-11-24): descriptive metadata, recorded only, NEVER evidence of approval ----
@@ -377,10 +379,9 @@ test('approval_surface: OPTIONAL: absent is accepted at any approved_at, with no
   // the existing codes keep their one exact code
   assert.deepEqual(codes(chk(withStart({ approved_at: 'garbage' }))), ['start_approved_at_invalid']);
 });
-test('approval_surface: self-reported surface is never evidence: it cannot rescue a stale digest or a missing approver', () => {
+test('approval_surface: self-reported surface is never evidence: it cannot rescue a stale digest', () => {
   for (const s of SURFACES) {
     assert.deepEqual(codes(chk(withStart({ approval_surface: s, approved_plan_digest: `sha256:${hex('other')}` }))), ['start_digest_stale'], s);
-    assert.deepEqual(codes(chk(withStart({ approval_surface: s, approved_by: undefined }))), ['start_approver_missing'], s);
     assert.deepEqual(codes(chk(withStart({ approval_surface: s, approved_plan_digest: undefined }))), ['start_digest_missing'], s);
     // no surface value changes ok-ness or the digest
     assert.equal(chk(withStart({ approval_surface: s })).digest, chk(withStart()).digest, s);

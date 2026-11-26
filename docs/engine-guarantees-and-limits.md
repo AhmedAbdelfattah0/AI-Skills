@@ -24,7 +24,7 @@ orchestrator is the party that runs reviews; the engine never dispatches REVIEW.
 | `missing_second_opinion` | No second-opinion record. |
 | `reviewers_not_distinct`, `reviewer_is_builder` | Recorded identities collide with each other or with a builder. |
 | `stale_candidate` | A review names a candidate other than the frozen one. |
-| `confirmation_spent`, `round_limit` | A second confirmation, or a third PROVE repair batch, was requested. |
+| `confirmation_spent`, `round_limit` | A second confirmation or second review repair was requested, or a `prove`-kind repair item exceeded the engine backstop (no production path enqueues one; routine PROVE correction follows the progress rule in the spine). |
 | `ownership_violation`, `repair_outside_findings` | A worker wrote outside its declared set. |
 | `post_freeze_drift` | The tree changed after the review freeze beyond covered drift. |
 | `budget_stop` | A configured token ceiling is spent. |
@@ -63,6 +63,18 @@ is exercised on a recorded real ticket.
 Review identities and the second-opinion `route` are recorded strings; the gate checks presence and
 distinctness. Cross-provider diversity is derived by code only for risky unit reviews. The two-cycle
 root-cause assessment after a failed confirmation is an agent and owner procedure.
+
+## Explicit limitations of the one-approval model
+
+- Any edit to the approved plan bytes changes its digest and therefore needs re-approval. There is no delegated plan refinement.
+- A ticket whose plan genuinely cannot be written before its dependency exists is not plannable in the batch and needs its own plan approval later.
+
+## Known friction
+
+- Plan Mode has one writable file, so per-ticket drafts are staged outside it (or one Plan Mode cycle runs per ticket).
+- The host may need one owner sentence before the Factory writes a START.
+- A base move after the review freeze needs an owner `RETRY`; the engine refuses the old review.
+- Several engine messages still say "owner RETRY"; the judgment-code table in `execution-harness.md` governs.
 
 ## Telemetry
 

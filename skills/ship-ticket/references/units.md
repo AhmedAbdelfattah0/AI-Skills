@@ -230,7 +230,7 @@ When the approved DAG splits the ticket into units and sets `config.unitReview: 
 per-unit independent review is the main code inspection. **Unit reviews do not
 replace the final review.** The final review in [review.md](review.md) is still mandatory on
 the exact assembled candidate, with the same Opus primary, the mandatory second
-opinion and the same repair, confirmation and RETRY policy. Only its scope
+opinion and the same repair and confirmation policy; a RETRY of the final review follows the judgment table in [execution-harness.md](execution-harness.md), and a unit's own RETRY stays with the owner (unit RETRY = owner). Only its scope
 changes: it is risk-focused and consumes the verified unit evidence (Final review
 on unit evidence, below). The engine never dispatches a
 reviewer: the orchestrator relays each unit review, and the engine validates and
@@ -334,7 +334,7 @@ When unit reviews exist (`config.unitReview`), the final review in [review.md](r
 mandatory and runs on the exact assembled candidate, with the same Opus primary,
 the mandatory second opinion (Codex; a fresh Fable session if it is unavailable
 or out of quota; if neither can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and
-owner-RETRY policy. Unit reviews do not replace it, and aggregated unit PASSes are
+RETRY policy: an owner RETRY applies to UNIT reviews and owner-reserved causes, while the final assembled review follows the Factory bounded-retry rule in the judgment table ([execution-harness.md](execution-harness.md)). Unit reviews do not replace it, and aggregated unit PASSes are
 never accepted in its place.
 
 **Brief.** Give the final reviewers:

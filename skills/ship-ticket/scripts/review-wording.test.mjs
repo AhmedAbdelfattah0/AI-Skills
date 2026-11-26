@@ -75,7 +75,8 @@ test('ship.md states the ship-ready check; brief.md holds the base-drift placeme
   assert.ok(b.includes('leave `config.base` as is'));
   assert.ok(b.includes('base-drift.mjs check --repo <R> --base <SHA>'));
   assert.ok(!b.includes('or `rebind`'));
-  assert.match(b, /Exit 1 \(overlap\): `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA/);
+  assert.match(b, /Exit 1 \(overlap\): when the overlapping change is an earlier ticket of the same approved batch, in the approved merge order, rebase, re-run the affected gates and re-record the base SHA/);
+  assert.match(b, /is `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA/);
   assert.match(b, /Exit 3 \(git or input failure\): fix the input and rerun; not a user decision/);
 });
 
@@ -176,7 +177,7 @@ test('RC-1 headline rules are pinned: native Plan Mode approval, section 3b, the
   assert.ok(flat(ref('ship.md')).includes('`SECURITY_WAIVER` event with `boundary: "plan-3b"`'));
   assert.ok(skill.includes('This list is the single owner of the stop points, by category'));
   assert.ok(skill.includes('Never force-push without explicit owner authority'));
-  assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure, never relabelled as harness degradation)'));
+  assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure and forgery detection, never relabelled as harness degradation and never a bounded-repair case)'));
 });
 
 test('RC-1 release and stop rules are pinned where they are executed: ship.md block list, the spine stop list, Resume', () => {

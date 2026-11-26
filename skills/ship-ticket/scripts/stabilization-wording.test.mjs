@@ -30,11 +30,11 @@ test('F-2/F-13 positive: the Fable PLAN route is claude_relay and native_session
 test('F-2/F-13: one supported PLAN debate route (the read-only relay); native_session is unsupported for PLAN', () => {
   const t = doc('cross-model.md');
   assert.ok(t.includes('The one supported PLAN debate route is the read-only relay (`codex_relay` on a Claude host, `claude_relay` on a Codex host;'));
-  assert.ok(t.includes("The relay's own out-dir under the host session scratchpad is the single write besides the plan file, and the orchestrator writes nothing else (no host-side scratch file)."));
+  assert.ok(t.includes("The relay's own out-dir under the host session scratchpad is the one write besides the plan file and the staged per-ticket drafts (also under the host session scratchpad, never in the repository); the orchestrator writes nothing else (no host-side scratch file)."));
   assert.ok(t.includes("a permission prompt is the owner's approval, a refusal is reported with its class and the degradation policy below applies, and the relay's out-dir writes are disclosed next to the approval request."));
   assert.ok(t.includes('The `native_session` carrier kind is unsupported for PLAN on a host without a defined evidence writer (the verifier code stays; nothing is deleted).'));
   assert.ok(!t.includes('(a subagent runs inside Plan Mode)'), 'the Fable substitute no longer runs as a Plan Mode subagent');
-  assert.ok(doc('plan.md').includes("The PLAN debate runs only through the read-only relay ([cross-model.md](cross-model.md)); the relay's own out-dir under the host session scratchpad is the one write besides the plan file."));
+  assert.ok(doc('plan.md').includes("The PLAN debate runs only through the read-only relay ([cross-model.md](cross-model.md)); the relay's own out-dir and the staged per-ticket drafts, both under the host session scratchpad, are the only writes besides the plan file."));
 });
 
 test('F-3: the plan template states a Recording paths line outside the contract block', () => {

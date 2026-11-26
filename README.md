@@ -34,7 +34,7 @@ Four complementary layers work as one system:
 | Layer | What it does |
 |---|---|
 | **Agentic intelligence** | Understands the ticket and the codebase, writes a repository-grounded plan, labels each task's risk, complexity and owned paths, builds on a ticket branch and runs the proof steps. Judgement lives here. |
-| **Human governance** | A person approves the plan once before any implementation, and holds every owner-class decision: scope changes, waivers, security exceptions, destructive actions and merge. |
+| **Human governance** | A person approves the plan once before any implementation (one unified plan and one approval for a whole batch of tickets), and holds every owner-class decision: scope changes, waivers, security exceptions, destructive actions and merge. |
 | **Deterministic controls** | Node scripts that compute and refuse at the process boundary: plan and task-graph digests, required evidence per risk label, the failing-test-first gate, parallel scheduling, ownership detection, durable state, candidate hashing and the ship-ready gate. |
 | **Independent review** | A primary review plus a separately recorded second opinion on a hashed candidate. The gate checks that both records are complete, fresh and from distinct reviewers. |
 
@@ -56,7 +56,7 @@ give the same answer every time are code.
 | Risk-driven verification and security testing | Risk labels decide which evidence the ship-ready gate demands. Where the plan requires it, the engine runs the failing test itself before production code is accepted. `vapt` attacks a local instance and commits the abuse cases as tests. |
 | Candidate integrity and digest binding | The approved plan, the task graph and the reviewed bytes are each pinned by a digest. A later change is refused or detected. |
 | Independent reviews and second opinions | A second reviewer is recorded and must differ from the builders and the primary reviewer. Review allows one repair batch and one targeted confirmation. |
-| Supervised sprint and extended execution | A supervised procedure for running several tickets in waves. It is not a scheduler and there is no unattended driver. |
+| Supervised sprint and extended execution | A supervised procedure for running several tickets from one unified plan and one approval, in waves as an execution order. It is not a scheduler and there is no unattended driver. |
 
 Precise boundaries for each row: [docs/adaptive-execution.md](docs/adaptive-execution.md) and
 [docs/engine-guarantees-and-limits.md](docs/engine-guarantees-and-limits.md).

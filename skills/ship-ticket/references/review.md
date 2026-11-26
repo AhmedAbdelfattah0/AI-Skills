@@ -126,7 +126,7 @@ phase, reviewer, repair and confirmation events to it. Record the candidate,
 configured ceilings, enforcement capability, host/counterpart and skill
 revision/content hash as described in [observability.md](observability.md).
 Recovery and schema correction remain in this execution and its original budget.
-A user-authorized retry gets a new ID with its predecessor under the same workflow
+A `RETRY` gets a new ID with its predecessor under the same workflow
 run; a new ID is not permission to retry or reset limits.
 
 Time the round with `run-log.mjs` as [observability.md](observability.md) lists: a
@@ -434,16 +434,26 @@ are one cycle. There are at most two cycles per implementation attempt:
   new full review, and it does not allow any number of repair batches.
 
 An implementation attempt is never reset by a commit or a new head: "new head = new attempt" is not a way round
-the cap. A new attempt starts only through owner authority: a RUN-STATE `RETRY` for ticket runs; for Factory-dev
-PRs, a recorded owner-approved revised plan or strategy.
+the cap. A new attempt starts through a RUN-STATE `RETRY` for ticket runs (see below for who writes it); for
+Factory-dev PRs, a recorded owner-approved revised plan or strategy.
 
 A failed confirmation is the terminal `FAIL` above. When cycle 2 still returns a qualifying Major or Blocker,
 STOP automatic repair and write a structured Root-Cause / Architecture Assessment. The same applies when the
 confirmation fails on the same defect class as a primary finding, whatever its severity (including a Minor) and
 including a failed check: any confirmation that fails on the same defect class requires re-assessment, never
-another patch. There is no third automatic repair cycle, and no second repair batch clears it. Owner approval is
-required before resuming with a revised plan or an explicitly justified corrective strategy; a revised plan
-returns to the one native approval, and a change beyond the approved scope needs the owner. Never waive a failing
+another patch. There is no third repair cycle inside one review execution, and no second repair batch clears it. For
+a ticket run the Factory resumes on its own, by writing the assessment and then a `RETRY` (`authorized_by`
+`factory:bounded-retry`, never the owner's name), while the correction stays inside the approved scope and each round
+makes progress: strictly fewer findings, or a finding set not seen in an earlier round (an oscillation is not
+progress). A Factory retry is allowed after the first no-progress round; stop after two CONSECUTIVE no-progress rounds. Each new original review spends one second-reviewer run of the cap and counts against the ticket's
+`config.budget` token ceiling, which is mandatory for any run that uses this path, a single ticket included. A
+backstop ceiling of 6 corrective rounds per ticket applies. Owner approval is required when two consecutive rounds
+show no progress, when the budget or the second-reviewer cap is spent, when the fix would change requirements,
+scope, security guarantees or an owner-reserved decision (a revised plan returns to the owner), for any security
+review, a stale or disputed security review or any FAIL carrying a security finding, on any ticket tier, for an
+overflow FAIL (`review_terminal`), and for a `RETRY` that serves post-freeze drift or a moved base. For Factory-dev
+PRs, owner approval is required before resuming with a revised plan or an explicitly justified corrective strategy.
+Never waive a failing
 mandatory gate, never downgrade a severity to meet the limit, and never treat the escalation as approval to
 ship. Preserve the unresolved findings, the primary review and the confirmation in the record. Challenge a
 finding that is wrong with evidence (`reject — factually wrong`) rather than patching to it.
@@ -465,9 +475,10 @@ or re-scope a brief to pass a provider safeguard, and never resubmit an altered 
 
 **Manual versus engine today.** The engine enforces only: one repair per review execution (`round_limit`), one
 confirmation per review execution (`confirmation_spent`), and that a new original review needs a RUN-STATE
-`RETRY` (`retry_unauthorized`). Until FR-4c, writing the assessment, binding it to the record and obtaining the
-owner's approval to resume are orchestrator duties, and nothing checks that the assessment file exists. The
-agents reason about the cause and pick the approach; the owner approves the resumption.
+`RETRY` (`retry_unauthorized`). The engine cannot tell who wrote a `RETRY` line. Until FR-4c, writing the
+assessment and binding it to the record are orchestrator duties, and nothing checks that the assessment file
+exists. The agents reason about the cause and pick the approach; the owner approves the resumption only in the
+owner cases above.
 
 ## Packets and instances
 
@@ -497,7 +508,7 @@ as every model of that provider: a reviewer of that provider is `reviewer_is_bui
 finding-bound repair, records it, and the confirmation reviews the repaired candidate.
 Any other accepted FAIL (an overflow FAIL, or one with no finding to fix) opens no
 repair. A new original review after a FAIL needs
-the owner's RUN-STATE `RETRY` event naming its predecessor execution, appended while nothing
+a RUN-STATE `RETRY` event (the Factory's under the progress rule above; the owner's for drift, security or a moved base) naming its predecessor execution, appended while nothing
 dispatched is live (a line that appears while a worker or runner could run is never honoured). Without the engine, the manual
 record above is the fallback. Details: [execution-harness.md](execution-harness.md).
 

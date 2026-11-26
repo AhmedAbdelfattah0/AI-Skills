@@ -51,7 +51,7 @@ recoverable timeout or optional companion failure invokes its fallback and
 continues; reporting the degradation is not a pause.
 
 **The approved plan is scoped authorization.** It authorizes that ticket's (or
-that wave's) approved scope only, never later tickets and never permanently.
+that batch's) approved scope only, never later tickets and never permanently.
 After the native approval, run implementation, tests, review, repair,
 verification and PR preparation without routine questions. For a routine
 decision inside the approved scope, apply the recommended default and record it
@@ -308,7 +308,7 @@ If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
 begins. Missing Codex falls back to a fresh Fable session; if neither can run, use
 **WAIT_FOR_USER** — the second opinion is mandatory. Missing concurrency only
-serializes the two reviews. Before the first wave of an extended run, verify that a second reviewer can run (Codex, else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted; otherwise do not start.
+serializes the two reviews. Before the first ticket of an extended run starts, verify that a second reviewer can run (Codex, else the owner-authorized Fable exception, counted in the cap) and that permissions are pre-granted; otherwise do not start.
 
 ## Security sensitivity
 
@@ -349,20 +349,43 @@ human approver.
 
 PROVE and REVIEW have separate limits:
 
-- PROVE may apply at most two consolidated repair batches. Each batch fixes all
-  currently known deterministic/static/runtime failures, then reruns affected
-  evidence. A third batch requirement is **FAIL**.
+- **Corrective iteration (PROVE and any gate failure).** The Factory owns routine
+  correction inside the approved scope. It collects ALL failures from the full
+  proof chain first, fixes them in one consolidated batch, reruns the chain, and
+  keeps correcting while each round makes progress. Progress means strictly FEWER
+  failures, or a failure set not seen in an earlier round; an oscillation
+  (A, then B, then A again) is not progress. It stops and returns to the owner when
+  two consecutive rounds show no progress, or the approved budget is spent (the
+  ticket's `config.budget` token ceiling, mandatory for any run that uses this
+  path, a single ticket included; orchestrator edit rounds and gate re-runs count
+  against it; and the second-reviewer cap), or the fix would change requirements,
+  scope, security guarantees or an owner-reserved decision. Before EACH correction
+  round (an orchestrator direct edit or a gate re-run included) the orchestrator
+  imports the usage so far with the existing usage tooling and checks the
+  `config.budget` headroom; no headroom, or usage that is unknown or cannot be
+  imported, stops to the owner. `config.budget` is set in the plan template's
+  Budget line before approval, for every plan; a plan without one has no
+  Factory-owned correction and the ticket returns to the owner at the first
+  failure. A backstop ceiling of 6 corrective rounds per ticket is a safety net,
+  not a target. No signature
+  bookkeeping, no notes file and no per-class caps apply; these are instructions,
+  not engine checks.
 - REVIEW may apply at most one consolidated candidate repair batch followed by
-  one targeted confirmation. A confirmation finding never opens another repair
-  cycle.
+  one targeted confirmation per review execution (engine-enforced). A
+  confirmation finding never opens another repair cycle inside that execution. A
+  new original review after a review FAIL that stays inside the approved scope is
+  a Factory `RETRY` under the corrective-iteration rule, with the root-cause
+  assessment written first ([references/review.md](references/review.md)). Any
+  security review, a stale or disputed security review, any FAIL carrying a
+  security finding on any ticket tier, an overflow FAIL (`review_terminal`), and
+  a `RETRY` for post-freeze drift or a moved base stay with the owner.
 
 Read-only checks and execution-record appends do not spend either limit. A Design
 Contract expansion is never counted as a repair; it is **WAIT_FOR_USER** for the
 re-approval through `ExitPlanMode` (Resume, changed plan).
 
 These limits apply per ticket and REVIEW execution, including multi-ticket
-orchestration. An explicitly authorized retry follows Resume; it is never started
-automatically. The finite sequence is:
+orchestration. A `RETRY` follows Resume. The finite sequence is:
 
 | Check | Runs | Re-runs only when |
 |---|---|---|
@@ -433,10 +456,10 @@ from UNDERSTAND.
 **Before planning, settle two things with the owner.** Read the repository's
 CLAUDE.md (or AGENTS.md) for the base branch (for example `main` or `qa`); if it
 is unclear, ASK the owner before planning, never guess. At the START of the
-ticket or wave, ask ONCE whether auto-merge is allowed after the reviews and CI
+ticket (for a batch, once in the unified plan, never again at a wave start), ask ONCE whether auto-merge is allowed after the reviews and CI
 are green: yes means merge after every gate has passed; no means prepare the PR
 and wait for the owner's "merge". Deploy is a separate decision and is never
-implied. Merge stays manual unless the owner opted in. For a sprint or an extended run, ask once per wave or sprint, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision ([references/sprint.md](references/sprint.md)).
+implied. Merge stays manual unless the owner opted in. For a sprint or an extended run, ask once, in the unified plan, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision ([references/sprint.md](references/sprint.md)).
 
 In an interactive session the orchestrator owns the Plan Mode lifecycle; follow
 the host-specific procedure in the plan reference. On Claude, `EnterPlanMode` and
@@ -455,7 +478,7 @@ reconciliation.
 The orchestrator writes the complete plan (every template section filled, no
 stubs or placeholders) to the native plan file and presents it through the host's
 native approval handoff: `ExitPlanMode` on Claude, the host-prescribed final plan
-format on Codex. A wave uses one `ExitPlanMode`. Hold `WAIT_FOR_USER` until
+format on Codex. A batch (several tickets handed over together) uses one unified plan and one `ExitPlanMode`; a wave is an execution strategy, never an approval boundary. Hold `WAIT_FOR_USER` until
 answered. Chat text, an `AskUserQuestion` answer and a typed "approve" are not
 plan approval; `AskUserQuestion` may only resolve planning questions before
 `ExitPlanMode`. Every counterpart answer is exactly one counterpart-response-v1 JSON
@@ -492,7 +515,7 @@ After approval:
 - create or reuse the ticket branch from an up-to-date base;
 - save the approved plan under .specs/plans/<TICKET>.md;
 - copy the debate bundle to the retained locator with `brief.mjs debate-retain --plan <plan> --bundle <bundle root> --repo <repo>` before START (a failed copy is **WAIT_FOR_USER**, never a START without the retained evidence);
-- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`; `approval_surface` (terminal, desktop or plannotator) is an OPTIONAL audit field, never evidence of approval.
+- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`; `approval_surface` (terminal, desktop or plannotator) is an OPTIONAL audit field, never evidence of approval. Stamp `approved_at` from `date -u`; `approved_by` is optional metadata. For a batch, do this for every ticket right after the one approval, without asking the owner again ([references/plan.md](references/plan.md) "One unified plan, one approval"). For a dependent ticket write the START with the others but DEFER `init` (base pinning) until its dependency has MERGED (not merely reached SHIP_READY) and its branch is synchronized to the new base; an `init` before a rebase triggers `base_moved_local` (an owner `RETRY`, known friction);
 - invoke the routed quality skill and write one Design Contract derived from the
   approved execution DAG;
 - for full-stack work, materialize or generate the approved Integration Contract,
@@ -614,9 +637,11 @@ out of the bounded code review.
 The orchestrator runs the independent reviewers itself: it opens a shell, calls
 the Codex CLI (else Fable) and a separate subagent with the standard brief, triages findings
 by evidence, fixes, then runs the targeted confirmation. If the confirmation
-fails: STOP, write the root-cause assessment and re-plan; resuming needs the
-owner's approval (review.md "Two-cycle limit"); there is no third
-cycle (see
+fails: STOP automatic repair and write the root-cause assessment. An in-scope,
+non-security confirmation FAIL gets a Factory `RETRY` (`factory:bounded-retry`, bounded by the progress rule and the 6-round backstop)
+under the corrective-iteration rule; a security finding, drift, a moved base,
+units, an ownership conflict or an overflow FAIL stays with the owner. There is
+no third repair cycle inside one review execution (see
 [references/review.md](references/review.md) "Two-cycle limit").
 
 Reconcile once. A clean primary PASS continues directly to SHIP. Accepted
@@ -768,9 +793,11 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   security-plan refusal of `plan_block_missing` or `plan_block_invalid`
   ([references/security-risk.md](references/security-risk.md));
 - **engine and gate safety refusals:** a nonzero `ship-ready-check` (a gate
-  failure, never relabelled as harness degradation), a REPAIR the ledger does not
-  authorize, an engine judgment point whose message names the user (the others
-  return to the orchestrator and are resolved in scope), or an unresolved
+  failure and forgery detection, never relabelled as harness degradation and never
+  a bounded-repair case), a REPAIR the ledger does not
+  authorize, an engine judgment point the judgment-code table sends to the owner (the
+  table governs; a code it does not list goes to the owner; the listed Factory
+  codes are resolved in scope), or an unresolved
   `strong` model ([references/execution-harness.md](references/execution-harness.md));
 - **destructive or shared-state actions:** squashing, resetting or deleting work
   you did not create (unknown WIP history), a force-push, deleting a remote
@@ -784,17 +811,20 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   invalid security catalog;
 - **explicit owner authority:** missing acceptance criteria or unresolved
   product behavior, a live blocker or ownership conflict (including another
-  actor changing the worktree or a base move that overlaps owned paths), an
+  actor changing the worktree or a base move that overlaps owned paths and is not an earlier ticket of the approved batch in the approved merge order, or that introduces a material scope, security or contract conflict), an
   unproven subscription-billing route, or credentials, permissions and external
   authority only the user can provide.
 
 **When the engine refuses a step**, read the refusal and the code, then decide
 whether the cause is the work, the run data or the gate. Fix the work or the run
-data inside the approved plan and retry, at most 2 re-issues of the same refusal
-for the same candidate. Never bypass or waive a gate. STOP and return to the
+data inside the approved plan and retry under the corrective-iteration rule in
+"Bounded repair" (all failures first, one consolidated batch, continue while each
+round makes progress). Never bypass or waive a gate. STOP and return to the
 owner for an owner-reserved class (security, approval, ownership, spent budget,
-RETRY authority), for any category listed above, when the cause is the gate
-itself, or when the same problem repeats.
+a drift, security or base `RETRY`, any security review or finding), for any category listed above, when the cause
+is the gate itself, a nonzero `ship-ready-check`, or when two consecutive rounds show no progress (or the backstop ceiling of 6 corrective rounds is reached). The
+judgment-code table in [references/execution-harness.md](references/execution-harness.md)
+says which codes go to the owner.
 
 Everything else inside the approved scope takes the recommended default and is
 recorded: for example, a fixable input refusal is corrected and rerun, a Codex
@@ -803,8 +833,9 @@ with SHIP's manual confirmations in the SHIP_READY event and the PR body.
 
 Use **FAIL** for:
 
-- a PROVE third repair batch would be required;
-- REVIEW confirmation fails or requests another candidate change (a residual
+- two consecutive correction rounds show no progress, or the approved budget is spent;
+- REVIEW confirmation fails or requests another candidate change and the
+  corrective-iteration rule does not allow a Factory `RETRY` (a residual
   within the plan's recorded ship threshold is a follow-up, not a failure);
 - a reviewer result overflows with blockers or majors;
 - candidate identity changes unexpectedly during REVIEW or before commit;
@@ -835,7 +866,7 @@ message look like completion.
   reconsider the approach. A revised plan goes back through the one native
   approval (changed plan, below); a change beyond the approved scope needs the
   owner. This adds no repair batch or review round.
-- Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
+- Failed REVIEW: preserve its event. A `RETRY` (the Factory's under the corrective-iteration rule, the owner's for drift, security or a moved base) reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
   bounded REVIEW execution with a new `review_execution` ID and predecessor under
   the same workflow run. The ID itself never authorizes retry. It does not replay
@@ -889,8 +920,8 @@ the first:
    - **During REVIEW**: its disposition is `fix`, and it joins the unspent repair
      batch, with the same proof and confirmation coverage as the rest.
    - **Batch already spent, or found by the confirmation**: the execution keeps
-     its terminal FAIL. The gap ships only through an explicitly authorized retry
-     (Resume) or as a queued ticket.
+     its terminal FAIL. The gap ships only through a `RETRY`
+     under the same rule (Resume) or as a queued ticket.
 
    Folding a gap in never opens an extra repair batch.
 2. **Queue it as its own ticket in this run.** Open the tracker item now and add

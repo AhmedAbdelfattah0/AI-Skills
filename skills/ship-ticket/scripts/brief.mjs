@@ -146,10 +146,8 @@ export function startCheck(planText, { runId, now = Date.now(), bundleDir = null
       start.at !== undefined ? 'START uses `at`; the field is `approved_at`' : 'START has no approved_at');
   } else if (typeof at !== 'string' || !realInstant(at)) add('start_approved_at_invalid', 'approved_at must be a real ISO-8601 timestamp with a time zone');
   else if (Date.parse(at) > now + SKEW_MS) add('start_approved_at_future', 'approved_at is in the future (more than 5 minutes of clock skew)');
-  // approved_by: descriptive metadata, presence-checked only. Its content is never inspected and never evidence of
-  // authorization; authority is native Plan Mode approval plus the approved-plan digest binding (checked above).
-  const by = start.approved_by;
-  if (typeof by !== 'string' || !by.trim()) add('start_approver_missing', 'START has no approved_by (descriptive metadata: who approved the plan)');
+  // approved_by: OPTIONAL descriptive metadata. It is never checked, never evidence of authorization; authority is native
+  // Plan Mode approval plus the approved-plan digest binding (checked above).
   // approval_surface: OPTIONAL audit metadata (where the owner gave the decision), recorded only. It is NEVER evidence of
   // approval and never changes any other check: authority is the native ExitPlanMode approval plus the digest binding
   // above. Absent is always accepted; a present value must be exactly one of APPROVAL_SURFACES.
@@ -1475,7 +1473,7 @@ export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon 
   if (f.redSpecs.length) {
     tests.push('RED specs (write each, run it, and see it fail first):', '');
     for (const s of f.redSpecs) tests.push(`- ${code(displayPath(s.file))}${s.name ? ` "${oneLine(s.name)}"` : ''}`);
-    tests.push('');
+    tests.push('', 'Each test\'s result name (the TAP name) must equal the quoted name above exactly: no `describe` wrapper, no prefix.', '');
   }
   if (f.checks.length) tests.push(`Checks (named test commands): ${f.checks.map(code).join(', ')}`, '');
   if (risk.length) tests.push(`Risk labels: ${risk.join(', ')}. Evidence kinds these labels require: ${evidenceKinds.length ? evidenceKinds.map(code).join(', ') : 'none'}.`, '');

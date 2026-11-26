@@ -310,9 +310,9 @@ const BPLAN = ['# Plan', '', '| ID | Owner | Step | Files touched | Depends on |
 const BDAG = { nodes: [{ id: 'api', deps: [], writes: ['src/api.js'], risk: ['auth', 'concurrency'], redSpecs: [{ file: 'src/api.test.js', name: 'x' }], acceptance: ['AC1'] }] };
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const brief = (o = {}) => buildBrief({ dag: BDAG, nodeId: 'api', planText: BPLAN, ...o });
-test('AC8: with nothing declared the brief is byte-identical to the pre-S-01b output (goldens captured before the change)', () => {
-  assert.equal(sha(brief()), '3458c15c783ad5468d01ff8efeb8b0268c65773eba58394f9397e7cf81a1b374');
-  assert.equal(sha(brief({ t0: { checks: [{ name: 'lint' }] } })), '87b4498f487d1bc330ededad897541d1cb3f8a6f1c680d28280425be67a0e475');
+test('AC8: with nothing declared the brief is stable and byte-identical to its goldens (pre-S-01b output plus the one TAP-name sentence added in the stabilization)', () => {
+  assert.equal(sha(brief()), '9c65b957fe6ea49f3e5cf1cd4131ed19289c0e9b2991d01364db49c610ea5d2a');
+  assert.equal(sha(brief({ t0: { checks: [{ name: 'lint' }] } })), '99e5a76333b451dff9f9018669423c8f2f7d88ca12a922b11e26e83d38c93895');
   assert.equal(brief({ testKinds: req(plan('x')) }), brief(), 'a not_declared requirement adds nothing');
   assert.equal(brief({ testKinds: null }), brief());
 });

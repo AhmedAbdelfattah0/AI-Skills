@@ -117,6 +117,7 @@ test('the report block example parses with parseWorkerReport', () => {
 test('redSpecs, a risk label and othersOwned reach the brief', () => {
   const text = build();
   assert.match(sectionBody(text, 'Required tests'), /`src\/api\.test\.js` "rejects an anonymous caller"/);
+  assert.match(sectionBody(text, 'Required tests'), /result name \(the TAP name\) must equal the quoted name above exactly/);
   assert.match(sectionBody(text, 'Required tests'), /Risk labels: auth, concurrency/);
   assert.match(sectionBody(text, 'Required tests'), /`authorization-spec`.*`interleaving-spec`.*`negative-spec`/);
   assert.match(sectionBody(text, 'Forbidden paths'), /`src\/ui\.js` \(owned by another worker\)/);

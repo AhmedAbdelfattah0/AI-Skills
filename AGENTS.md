@@ -413,7 +413,7 @@ same turn. Only `WAIT_FOR_USER`, `FAIL` and final `COMPLETE` end the assistant t
 A phase announcement, finding, tool result, timeout fallback or degradation report
 is not a stopping condition. Required capability is preflighted before REVIEW;
 Codex loss falls back to Fable and concurrency loss serializes, neither ends the run.
-The approved plan is scoped authorization for that ticket or wave: routine
+The approved plan is scoped authorization for that ticket or batch (one unified plan, one native approval; a wave is an execution strategy, not an approval boundary): routine
 decisions inside it take the recommended default and are recorded, and the spine's
 "When execution may yield" list is the single owner of the stop points.
 
@@ -461,7 +461,7 @@ cancellation support, or use an existing read-only relay watchdog with the full
 primary coverage packet. Without either, request an explicit advisory-only
 exception rather than silently weakening enforcement. A missing Codex second opinion falls back to Fable.
 
-PROVE may use two consolidated repair batches. REVIEW may use one repair batch and
+In PROVE (with a backstop of 6 corrective rounds per ticket), the Factory collects all failures first, fixes them in one consolidated batch inside the approved scope and re-runs the chain, continuing while each round makes progress; it returns to the owner only after two rounds with no progress, when the approved budget is spent, or when a fix would change requirements, scope, security guarantees or an owner-reserved decision. REVIEW may use one repair batch and
 one targeted confirmation. Read-only checks and compact append-only execution
 events spend neither limit. A Design Contract expansion always returns to human
 approval (re-entering Plan Mode and presenting the revised plan with `ExitPlanMode`,
