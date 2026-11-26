@@ -462,7 +462,7 @@ Before each authorized REVIEW execution, allocate `review_execution=review-<opaq
 and attach it to its phase, reviewer, repair and confirmation events. The prefix
 prevents numeric metric coercion. Record candidate ID, host/counterpart, skill
 revision or content hash, configured primary/recovery/optional/confirmation
-ceilings and whether deadlines are enforced. A user-authorized retry keeps the
+ceilings and whether deadlines are enforced. A `RETRY` (the Factory's or the owner's, per the judgment-code table) keeps the
 workflow run ID but gets a new execution ID and predecessor; generating an ID
 never authorizes a retry. Legacy unlabelled events remain unknown execution scope.
 

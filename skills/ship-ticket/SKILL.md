@@ -785,8 +785,9 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   ([references/security-risk.md](references/security-risk.md));
 - **engine and gate safety refusals:** a nonzero `ship-ready-check` (a gate
   failure, never relabelled as harness degradation), a REPAIR the ledger does not
-  authorize, an engine judgment point whose message names the user (the others
-  return to the orchestrator and are resolved in scope), or an unresolved
+  authorize, an engine judgment point the judgment-code table sends to the owner (the
+  table governs; a code it does not list goes to the owner; the listed Factory
+  codes are resolved in scope), or an unresolved
   `strong` model ([references/execution-harness.md](references/execution-harness.md));
 - **destructive or shared-state actions:** squashing, resetting or deleting work
   you did not create (unknown WIP history), a force-push, deleting a remote
