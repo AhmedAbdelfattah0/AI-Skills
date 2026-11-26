@@ -450,7 +450,7 @@ progress). A Factory retry is allowed after the first no-progress round; stop af
 backstop ceiling of 6 corrective rounds per ticket applies. Owner approval is required when two consecutive rounds
 show no progress, when the budget or the second-reviewer cap is spent, when the fix would change requirements,
 scope, security guarantees or an owner-reserved decision (a revised plan returns to the owner), for any security
-review, a stale or disputed security review or any FAIL carrying a security finding on an ELEVATED ticket, for an
+review, a stale or disputed security review or any FAIL carrying a security finding, on any ticket tier, for an
 overflow FAIL (`review_terminal`), and for a `RETRY` that serves post-freeze drift or a moved base. For Factory-dev
 PRs, owner approval is required before resuming with a revised plan or an explicitly justified corrective strategy.
 Never waive a failing

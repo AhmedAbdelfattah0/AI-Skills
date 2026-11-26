@@ -377,7 +377,7 @@ PROVE and REVIEW have separate limits:
   a Factory `RETRY` under the corrective-iteration rule, with the root-cause
   assessment written first ([references/review.md](references/review.md)). Any
   security review, a stale or disputed security review, any FAIL carrying a
-  security finding on an ELEVATED ticket, an overflow FAIL (`review_terminal`), and
+  security finding on any ticket tier, an overflow FAIL (`review_terminal`), and
   a `RETRY` for post-freeze drift or a moved base stay with the owner.
 
 Read-only checks and execution-record appends do not spend either limit. A Design
@@ -638,7 +638,7 @@ The orchestrator runs the independent reviewers itself: it opens a shell, calls
 the Codex CLI (else Fable) and a separate subagent with the standard brief, triages findings
 by evidence, fixes, then runs the targeted confirmation. If the confirmation
 fails: STOP automatic repair and write the root-cause assessment. An in-scope,
-non-security confirmation FAIL gets ONE Factory `RETRY` (`factory:bounded-retry`)
+non-security confirmation FAIL gets a Factory `RETRY` (`factory:bounded-retry`, bounded by the progress rule and the 6-round backstop)
 under the corrective-iteration rule; a security finding, drift, a moved base,
 units, an ownership conflict or an overflow FAIL stays with the owner. There is
 no third repair cycle inside one review execution (see

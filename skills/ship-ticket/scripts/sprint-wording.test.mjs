@@ -82,7 +82,7 @@ test('M1: a dependent ticket is planned up front and approved once; waiting is a
 test('M2: only genuine owner stops and capability blockers park; routine failures are the Factory\'s; state mapping', () => {
   has(sprint, 'In an extended run any spine WAIT_FOR_USER (destructive or shared-state actions, missing acceptance criteria or unresolved product behaviour, an unproven billing route, a non-security blocker after bounded recovery, SKILL.md "When execution may yield") parks that ticket and its genuine dependents, and the Factory never answers it with a default.');
   has(sprint, 'Only routine engineering inside the approved scope (a failing test, a gate refusal, a fixable review FAIL, a rebase) is Factory-resolved and recorded.');
-  has(sprint, 'any security review (a stale or disputed one, or any FAIL carrying a security finding on an ELEVATED ticket)');
+  has(sprint, 'any security review (a stale or disputed one, or any FAIL carrying a security finding, on any ticket tier)');
   has(sprint, 'Any spine WAIT_FOR_USER (destructive or shared-state actions, missing acceptance criteria or unresolved product behaviour, an unproven billing route');
   has(sprint, 'and the Factory never answers it with a default.');
   has(sprint, 'A routine gate or test failure is never parked: the Factory corrects it under the corrective-iteration rule');

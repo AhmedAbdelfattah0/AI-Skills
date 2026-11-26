@@ -334,7 +334,7 @@ When unit reviews exist (`config.unitReview`), the final review in [review.md](r
 mandatory and runs on the exact assembled candidate, with the same Opus primary,
 the mandatory second opinion (Codex; a fresh Fable session if it is unavailable
 or out of quota; if neither can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and
-owner-RETRY policy. Unit reviews do not replace it, and aggregated unit PASSes are
+RETRY policy: an owner RETRY applies to UNIT reviews and owner-reserved causes, while the final assembled review follows the Factory bounded-retry rule in the judgment table ([execution-harness.md](execution-harness.md)). Unit reviews do not replace it, and aggregated unit PASSes are
 never accepted in its place.
 
 **Brief.** Give the final reviewers:
