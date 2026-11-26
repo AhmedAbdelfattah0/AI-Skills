@@ -89,10 +89,19 @@ boundary: there is no per-wave approval and no per-ticket approval.
    repository) if the host allows that inside Plan Mode; if the host refuses it,
    fall back to one Plan Mode cycle per ticket and say so in the plan. Use one
    debate per ticket, as for a single ticket.
-2. A ticket whose plan depends on UNMERGED code is left out of the batch: it stays
-   `waiting` with no plan digest and gets its own native approval after the
-   dependency merges. Never start BUILD on a ticket whose plan was not in an
-   approved `ExitPlanMode`.
+2. A dependent ticket is planned UP FRONT, in the same unified plan and the same
+   single approval, with its START written like the others. Write its plan at the
+   level of the dependency's CONTRACT (interfaces, tables and files the contract
+   names); workers read the merged dependency's actual code at BUILD time, so no
+   plan edit is needed. Its queue state is `waiting` until the dependency has
+   merged, then it runs automatically with the approved plan as is: `waiting` is an
+   execution state, not an approval state. If, after the dependency merges, the
+   approved plan can no longer be executed as written (a material change to
+   requirements, scope, contract or security), the ticket returns to the owner
+   for reapproval of the changed plan. A ticket whose plan genuinely cannot be
+   written before its dependency exists is not plannable in the batch and needs
+   its own plan approval later. Never start BUILD on a ticket whose plan was not
+   in an approved `ExitPlanMode`.
 3. Write ONE unified plan file. It holds: the batch header (tickets, dependencies
    and file or resource conflicts between them, the proposed execution order,
    merge mode, the cap, and the model routing for builders, primary reviewer,

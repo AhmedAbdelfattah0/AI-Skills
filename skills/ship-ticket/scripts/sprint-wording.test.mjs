@@ -68,11 +68,15 @@ test('code reality check classifies tickets before the split', () => {
   assert.ok(raw.indexOf('## Code reality check') > raw.indexOf('\n## Intake') && raw.indexOf('## Code reality check') < raw.indexOf('## Wave split rules'));
 });
 
-test('M1: a ticket whose requirements need unmerged code is left out of the one approval', () => {
-  has(sprint, 'A ticket whose plan depends on UNMERGED code stays `waiting` with no plan digest and gets its own native approval after the dependency merges, so an extended run does not start it');
-  has(plan, 'A ticket whose plan depends on UNMERGED code is left out of the batch: it stays `waiting` with no plan digest and gets its own native approval after the dependency merges.');
+test('M1: a dependent ticket is planned up front and approved once; waiting is an execution state, not an approval state', () => {
+  has(sprint, 'A dependent ticket is planned up front in the same unified plan and approved in the same single approval, with its START written like the others.');
+  has(sprint, 'Its queue state is `waiting` until its dependency has merged; it then runs automatically with the approved plan as is (`waiting` is an execution state, not an approval state).');
+  has(sprint, 'the ticket returns to the owner for reapproval.');
+  has(sprint, 'A ticket whose plan cannot be written before its dependency exists is not plannable in the batch and needs its own plan approval later.');
+  has(plan, 'A dependent ticket is planned UP FRONT, in the same unified plan and the same single approval, with its START written like the others.');
+  has(plan, '`waiting` is an execution state, not an approval state.');
   const row = read('../references/sprint.md').split('\n').find((l) => l.includes('| waiting ') );
-  assert.ok(row && !/sha256/.test(row), 'the waiting example row carries no plan digest');
+  assert.ok(row && /sha256/.test(row), 'the waiting example row carries its approved plan digest');
 });
 
 test('M2: only genuine owner stops and capability blockers park; routine failures are the Factory\'s; state mapping', () => {

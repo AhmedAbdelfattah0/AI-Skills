@@ -64,6 +64,11 @@ Review identities and the second-opinion `route` are recorded strings; the gate 
 distinctness. Cross-provider diversity is derived by code only for risky unit reviews. The two-cycle
 root-cause assessment after a failed confirmation is an agent and owner procedure.
 
+## Explicit limitations of the one-approval model
+
+- Any edit to the approved plan bytes changes its digest and therefore needs re-approval. There is no delegated plan refinement.
+- A ticket whose plan genuinely cannot be written before its dependency exists is not plannable in the batch and needs its own plan approval later.
+
 ## Known friction
 
 - Plan Mode has one writable file, so per-ticket drafts are staged outside it (or one Plan Mode cycle runs per ticket).

@@ -60,7 +60,7 @@ States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `wa
 | W1   | TICKET-P            | merged     | #201 | merge 4fd2a1c verified 11-24   | TICKET-P sha256:9c1e.. |
 | W2   | TICKET-Q, TICKET-R   | running    |      |                                | TICKET-Q sha256:41ab.. |
 | W3?  | TICKET-D            | parked     |      | proposed W3; open question Q3  |                        |
-| W4   | TICKET-S            | waiting    |      | needs W2 merged; no plan yet   |                        |
+| W4   | TICKET-S            | waiting    |      | needs W2 merged; plan approved | TICKET-S sha256:7d03.. |
 | -    | TICKET-T            | excluded   |      | needs_rescope (umbrella)       |                        |
 | -    | TICKET-U            | excluded   | #188 | done_in_code                   |                        |
 ```
@@ -69,7 +69,7 @@ States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `wa
 
 ## Unified plan and one approval
 
-Present ONE unified plan for the whole batch and obtain ONE native approval, as in [plan.md](plan.md) "One unified plan, one approval". Waves are the proposed execution order, not an approval boundary: there is no per-wave approval. Each ticket keeps its own plan file, digest and START as internal Factory artifacts, derived from the unified plan after the approval; the existing `wave:` plan line and the wave manifest (`scripts/wave.mjs`) are optional helpers only. A ticket whose plan depends on UNMERGED code stays `waiting` with no plan digest and gets its own native approval after the dependency merges, so an extended run does not start it; this deliberately keeps one approval per dependency boundary. Record the approved unified file's path and digest in the queue header.
+Present ONE unified plan for the whole batch and obtain ONE native approval, as in [plan.md](plan.md) "One unified plan, one approval". Waves are the proposed execution order, not an approval boundary: there is no per-wave approval. Each ticket keeps its own plan file, digest and START as internal Factory artifacts, derived from the unified plan after the approval; the existing `wave:` plan line and the wave manifest (`scripts/wave.mjs`) are optional helpers only. A dependent ticket is planned up front in the same unified plan and approved in the same single approval, with its START written like the others. Its queue state is `waiting` until its dependency has merged; it then runs automatically with the approved plan as is (`waiting` is an execution state, not an approval state). The plan is written at the level of the dependency's contract, and workers read the merged code at BUILD time. If the approved plan can no longer be executed as written after the merge (a material change to requirements, scope, contract or security), the ticket returns to the owner for reapproval. A ticket whose plan cannot be written before its dependency exists is not plannable in the batch and needs its own plan approval later. Record the approved unified file's path and digest in the queue header.
 
 ## Merge mode
 
