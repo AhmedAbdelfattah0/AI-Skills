@@ -102,9 +102,12 @@ limitation rather than inventing one. A REVIEW repair touching a boundary reruns
 its mapped tests; a newly introduced boundary receives its applicable attack
 coverage before targeted confirmation.
 
-PROVE may apply at most two consolidated repair batches. Each batch fixes every
-currently known failure, then rederives affected inventories and reruns affected
-commands. Needing a third candidate-changing batch is `FAIL`. PROVE prepares
+PROVE correction collects every failure from the full proof chain first, fixes them in
+one consolidated batch, rederives affected inventories and reruns affected commands,
+and continues while each round makes progress (strictly fewer failures, or a failure
+set not seen before). It returns to the owner after two consecutive rounds without
+progress, at the 6-round backstop, or when the budget is spent
+(`SKILL.md` "Bounded repair"). PROVE prepares
 screen classifications and pinned inputs; the complete screen comparison belongs
 to REVIEW's independent primary workflow.
 

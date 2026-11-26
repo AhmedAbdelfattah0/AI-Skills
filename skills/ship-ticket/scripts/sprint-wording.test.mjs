@@ -69,15 +69,18 @@ test('code reality check classifies tickets before the split', () => {
 });
 
 test('M1: a ticket whose requirements need unmerged code is left out of the one approval', () => {
-  has(sprint, 'A ticket whose requirements cannot be stated before an unmerged dependency is delivered stays `waiting` with no plan digest and is left out of the batch.');
-  has(plan, 'It is left out of the batch only when its requirements cannot be stated before the dependency is delivered.');
+  has(sprint, 'A ticket whose plan depends on UNMERGED code stays `waiting` with no plan digest and gets its own native approval after the dependency merges, so an extended run does not start it');
+  has(plan, 'A ticket whose plan depends on UNMERGED code is left out of the batch: it stays `waiting` with no plan digest and gets its own native approval after the dependency merges.');
   const row = read('../references/sprint.md').split('\n').find((l) => l.includes('| waiting ') );
   assert.ok(row && !/sha256/.test(row), 'the waiting example row carries no plan digest');
 });
 
 test('M2: only genuine owner stops and capability blockers park; routine failures are the Factory\'s; state mapping', () => {
-  has(sprint, 'Park a ticket (and its genuine dependents) only for a genuine owner stop or a capability blocker: a security, approval, ownership or spent-budget class, a `RETRY` for drift, security or a moved base, a judgment code the table in [execution-harness.md](execution-harness.md) sends to the owner, or no progress for two consecutive correction rounds.');
-  has(sprint, 'Everything else is resolved by the Factory inside the approved scope and recorded');
+  has(sprint, 'In an extended run any spine WAIT_FOR_USER (destructive or shared-state actions, missing acceptance criteria or unresolved product behaviour, an unproven billing route, a non-security blocker after bounded recovery, SKILL.md "When execution may yield") parks that ticket and its genuine dependents, and the Factory never answers it with a default.');
+  has(sprint, 'Only routine engineering inside the approved scope (a failing test, a gate refusal, a fixable review FAIL, a rebase) is Factory-resolved and recorded.');
+  has(sprint, 'any security review (a stale or disputed one, or any FAIL carrying a security finding on an ELEVATED ticket)');
+  has(sprint, 'Any spine WAIT_FOR_USER (destructive or shared-state actions, missing acceptance criteria or unresolved product behaviour, an unproven billing route');
+  has(sprint, 'and the Factory never answers it with a default.');
   has(sprint, 'A routine gate or test failure is never parked: the Factory corrects it under the corrective-iteration rule');
   has(sprint, 'A dependency, merge or external prerequisite maps to `waiting`.');
 });
@@ -121,8 +124,7 @@ test('more than one open sprint: ask which one', () => {
 test('queue states, header reconciliation, cap units, verification evidence', () => {
   has(sprint, 'States: `pending`, `planned`, `approved`, `running`, `ship_ready`, `merged`, `waiting`, `excluded`, `parked`.');
   has(sprint, '`excluded` means not part of the run, with a kind: `done_in_code`, `owner_parked`, `open_pr`, `needs_rescope` or `merged_elsewhere`.');
-  has(sprint, '`parked` is only for a genuine owner stop');
-  has(sprint, 'a capability blocker (no reviewer, no tracker access, no credentials), material drift or an open question.');
+  has(sprint, 'a capability blocker (no reviewer, no tracker access, no credentials), material drift or an open question parks too.');
   has(sprint, 'Header: sprint or run id and name, source ids, mode (`attended|extended`), merge mode and scope, ticket counts (read, in the queue, excluded by kind) that reconcile, the queue file path, the cap, the second-reviewer check, the permissions state (yes or no, plus the list), owner answers.');
   has(sprint, 'Three units, counted separately: tickets, wall-clock hours, second-reviewer runs (the Fable exception budget is counted in runs)');
     has(sprint, 'A `merged` or `ship_ready` entry records the PR number, the merge commit and the date it was verified.');

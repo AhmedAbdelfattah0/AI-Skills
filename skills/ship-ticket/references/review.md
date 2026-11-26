@@ -126,7 +126,7 @@ phase, reviewer, repair and confirmation events to it. Record the candidate,
 configured ceilings, enforcement capability, host/counterpart and skill
 revision/content hash as described in [observability.md](observability.md).
 Recovery and schema correction remain in this execution and its original budget.
-A user-authorized retry gets a new ID with its predecessor under the same workflow
+A `RETRY` gets a new ID with its predecessor under the same workflow
 run; a new ID is not permission to retry or reset limits.
 
 Time the round with `run-log.mjs` as [observability.md](observability.md) lists: a
@@ -442,14 +442,18 @@ STOP automatic repair and write a structured Root-Cause / Architecture Assessmen
 confirmation fails on the same defect class as a primary finding, whatever its severity (including a Minor) and
 including a failed check: any confirmation that fails on the same defect class requires re-assessment, never
 another patch. There is no third repair cycle inside one review execution, and no second repair batch clears it. For
-a ticket run the Factory resumes on its own, by writing the assessment and then a `RETRY` (`authorized_by` names the
-Factory, for example `factory:bounded-retry`), while the correction stays inside the approved scope and each round
-makes progress: the set of findings shrinks or changes. Each new original review spends one second-reviewer run of
-the cap. Owner approval is required when two consecutive rounds show no progress, when the approved budget (the
-`config.budget` token ceiling and the second-reviewer cap) is spent, when the fix would change requirements, scope,
-security guarantees or an owner-reserved decision (a revised plan returns to the owner), and for a `RETRY` that
-serves post-freeze drift, a stale or disputed security review or a moved base. For Factory-dev PRs, owner approval
-is required before resuming with a revised plan or an explicitly justified corrective strategy. Never waive a failing
+a ticket run the Factory resumes on its own, by writing the assessment and then a `RETRY` (`authorized_by`
+`factory:bounded-retry`, never the owner's name), while the correction stays inside the approved scope and each round
+makes progress: strictly fewer findings, or a finding set not seen in an earlier round (an oscillation is not
+progress). Each new original review spends one second-reviewer run of the cap and counts against the ticket's
+`config.budget` token ceiling, which is mandatory for any run that uses this path, a single ticket included. A
+backstop ceiling of 6 corrective rounds per ticket applies. Owner approval is required when two consecutive rounds
+show no progress, when the budget or the second-reviewer cap is spent, when the fix would change requirements,
+scope, security guarantees or an owner-reserved decision (a revised plan returns to the owner), for any security
+review, a stale or disputed security review or any FAIL carrying a security finding on an ELEVATED ticket, for an
+overflow FAIL (`review_terminal`), and for a `RETRY` that serves post-freeze drift or a moved base. For Factory-dev
+PRs, owner approval is required before resuming with a revised plan or an explicitly justified corrective strategy.
+Never waive a failing
 mandatory gate, never downgrade a severity to meet the limit, and never treat the escalation as approval to
 ship. Preserve the unresolved findings, the primary review and the confirmation in the record. Challenge a
 finding that is wrong with evidence (`reject — factually wrong`) rather than patching to it.

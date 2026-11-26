@@ -64,6 +64,13 @@ Review identities and the second-opinion `route` are recorded strings; the gate 
 distinctness. Cross-provider diversity is derived by code only for risky unit reviews. The two-cycle
 root-cause assessment after a failed confirmation is an agent and owner procedure.
 
+## Known friction
+
+- Plan Mode has one writable file, so per-ticket drafts are staged outside it (or one Plan Mode cycle runs per ticket).
+- The host may need one owner sentence before the Factory writes a START.
+- A base move after the review freeze needs an owner `RETRY`; the engine refuses the old review.
+- Several engine messages still say "owner RETRY"; the judgment-code table in `execution-harness.md` governs.
+
 ## Telemetry
 
 Run logs and summaries are best effort and are not audit evidence.

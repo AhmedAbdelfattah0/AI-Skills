@@ -1473,7 +1473,7 @@ export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon 
   if (f.redSpecs.length) {
     tests.push('RED specs (write each, run it, and see it fail first):', '');
     for (const s of f.redSpecs) tests.push(`- ${code(displayPath(s.file))}${s.name ? ` "${oneLine(s.name)}"` : ''}`);
-    tests.push('', 'Each test result name (the TAP name) must equal the bound `<boundary>:<control>` exactly: no `describe` wrapper, no prefix.', '');
+    tests.push('', 'Each test\'s result name (the TAP name) must equal the quoted name above exactly: no `describe` wrapper, no prefix.', '');
   }
   if (f.checks.length) tests.push(`Checks (named test commands): ${f.checks.map(code).join(', ')}`, '');
   if (risk.length) tests.push(`Risk labels: ${risk.join(', ')}. Evidence kinds these labels require: ${evidenceKinds.length ? evidenceKinds.map(code).join(', ') : 'none'}.`, '');

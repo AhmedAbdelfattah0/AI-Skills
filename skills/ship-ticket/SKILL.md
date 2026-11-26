@@ -352,20 +352,26 @@ PROVE and REVIEW have separate limits:
 - **Corrective iteration (PROVE and any gate failure).** The Factory owns routine
   correction inside the approved scope. It collects ALL failures from the full
   proof chain first, fixes them in one consolidated batch, reruns the chain, and
-  keeps correcting while each round makes meaningful progress (the set of failures
-  shrinks or changes). It stops and returns to the owner only when two
-  consecutive rounds show no progress, or the approved budget (the `config.budget`
-  token ceiling and the second-reviewer cap) is spent, or the fix would change
-  requirements, scope, security guarantees or an owner-reserved decision. No
-  fixed batch count applies.
+  keeps correcting while each round makes progress. Progress means strictly FEWER
+  failures, or a failure set not seen in an earlier round; an oscillation
+  (A, then B, then A again) is not progress. It stops and returns to the owner when
+  two consecutive rounds show no progress, or the approved budget is spent (the
+  ticket's `config.budget` token ceiling, mandatory for any run that uses this
+  path, a single ticket included; orchestrator edit rounds and gate re-runs count
+  against it; and the second-reviewer cap), or the fix would change requirements,
+  scope, security guarantees or an owner-reserved decision. A backstop ceiling of 6
+  corrective rounds per ticket is a safety net, not a target. No signature
+  bookkeeping, no notes file and no per-class caps apply; these are instructions,
+  not engine checks.
 - REVIEW may apply at most one consolidated candidate repair batch followed by
   one targeted confirmation per review execution (engine-enforced). A
   confirmation finding never opens another repair cycle inside that execution. A
   new original review after a review FAIL that stays inside the approved scope is
   a Factory `RETRY` under the corrective-iteration rule, with the root-cause
-  assessment written first ([references/review.md](references/review.md)); a
-  `RETRY` for post-freeze drift, a security review or a moved base stays with the
-  owner.
+  assessment written first ([references/review.md](references/review.md)). Any
+  security review, a stale or disputed security review, any FAIL carrying a
+  security finding on an ELEVATED ticket, an overflow FAIL (`review_terminal`), and
+  a `RETRY` for post-freeze drift or a moved base stay with the owner.
 
 Read-only checks and execution-record appends do not spend either limit. A Design
 Contract expansion is never counted as a repair; it is **WAIT_FOR_USER** for the
@@ -804,8 +810,8 @@ data inside the approved plan and retry under the corrective-iteration rule in
 "Bounded repair" (all failures first, one consolidated batch, continue while each
 round makes progress). Never bypass or waive a gate. STOP and return to the
 owner for an owner-reserved class (security, approval, ownership, spent budget,
-a drift, security or base `RETRY`), for any category listed above, when the cause
-is the gate itself, or when two consecutive rounds show no progress. The
+a drift, security or base `RETRY`, any security review or finding), for any category listed above, when the cause
+is the gate itself, or when two consecutive rounds show no progress (or the backstop ceiling of 6 corrective rounds is reached). The
 judgment-code table in [references/execution-harness.md](references/execution-harness.md)
 says which codes go to the owner.
 
@@ -849,7 +855,7 @@ message look like completion.
   reconsider the approach. A revised plan goes back through the one native
   approval (changed plan, below); a change beyond the approved scope needs the
   owner. This adds no repair batch or review round.
-- Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
+- Failed REVIEW: preserve its event. A `RETRY` (the Factory's under the corrective-iteration rule, the owner's for drift, security or a moved base) reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
   bounded REVIEW execution with a new `review_execution` ID and predecessor under
   the same workflow run. The ID itself never authorizes retry. It does not replay
@@ -903,8 +909,8 @@ the first:
    - **During REVIEW**: its disposition is `fix`, and it joins the unspent repair
      batch, with the same proof and confirmation coverage as the rest.
    - **Batch already spent, or found by the confirmation**: the execution keeps
-     its terminal FAIL. The gap ships only through an explicitly authorized retry
-     (Resume) or as a queued ticket.
+     its terminal FAIL. The gap ships only through a `RETRY`
+     under the same rule (Resume) or as a queued ticket.
 
    Folding a gap in never opens an extra repair batch.
 2. **Queue it as its own ticket in this run.** Open the tracker item now and add
