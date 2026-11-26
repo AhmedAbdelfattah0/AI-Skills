@@ -248,7 +248,7 @@ occur during debate.
 
 The brief carries a fresh `request_id` and the exact `plan_version` and `plan_digest` (computed with `brief.mjs plan-digest` over the frozen plan file), and instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object; otherwise record the round `rejected` with its evidence kept (see the rounds below) and re-ask with a new `request_id`. A schema-valid answer bound to the wrong `request_id`, `plan_version` or `plan_digest` can be recorded neither `rejected` nor `completed`: re-asking then means leaving that round out of the attestation, and the verifier fails closed on any record of it. Free text is never approval evidence. The final object must be `AGREE` for the exact `request_id`, `plan_version` and `plan_digest`.
 
-In the confirmation prompt (and every later round) tell the counterpart to list only still-open finding ids: a finding already closed must not be listed again, because the checker refuses a response that confirms an id that is not open (`debate_response_invalid`).
+In the confirmation prompt (and every later round) tell the counterpart to list only still-open finding ids when it refers to EXISTING findings, and to report any NEW defect with a NEW id: a finding already closed must not be listed again, because the checker refuses a response that confirms an id that is not open (`debate_response_invalid`).
 
 The brief starts with the three lines `request_id: <id>`, `plan_version: <v>` and
 `plan_digest: <digest>`, each exactly once, and states the schema:

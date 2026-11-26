@@ -671,7 +671,7 @@ admission like a node.
 (instructions, not engine checks): strictly fewer failures or a failure set not seen before counts as progress,
 two consecutive rounds without progress or a backstop of 6 corrective rounds per ticket stop it, and the
 ticket's `config.budget` is mandatory for any run that uses this path. The Factory makes routine corrections
-as an edit plus a gate re-run. The engine keeps a backstop counter `rounds.prove_repair_batches` (cap 2) for a
+as an edit plus a gate re-run. Before EACH correction round (an orchestrator direct edit or a gate re-run included) the orchestrator imports the usage so far with the existing usage tooling (`usage.mjs import-session` / `import-codex`) and checks the `config.budget` headroom; no headroom, or usage that is unknown or cannot be imported, stops to the owner, never a proceed-on-unknown. `config.budget` is set in the plan template's Budget line BEFORE approval, for every plan (single tickets included), so no later plan edit or re-approval is needed to get a correction budget; a plan without one has no Factory-owned correction, and the ticket returns to the owner at the first failure. The engine keeps a backstop counter `rounds.prove_repair_batches` (cap 2) for a
 `prove`-kind repair item; no production path enqueues one today, so it never limits routine correction. REVIEW
 keeps one repair and one confirmation per review execution (`rounds.review_repairs[<review_execution>]`).
 Beyond them, or after a terminal failure, is `round_limit`: a new original review needs a RUN-STATE `RETRY`,
@@ -690,9 +690,9 @@ not list goes to the OWNER (fail closed).
 
 | Judgment code | Goes to | Why |
 |---|---|---|
-| `crash_with_writes`, `quiescence_unknown`, `ownership_unavailable`, `candidate_unavailable`, `repair_failed`, `red_required`, `red_invalidated`, `dispatched_before_red`, unsupported RED runner output, `repair_outside_findings` | Factory | a routine execution or gate failure; fix or re-dispatch inside the approved paths and re-run |
-| `ownership_violation` | Owner | an ownership conflict is an owner-authority stop in `SKILL.md` "When execution may yield"; the owner decides whether the write is accepted or reverted |
-| `confirmation_fail`, `review_fail_no_repair`, `candidate_moved`, `round_limit` | Factory | a bounded new review: write the root-cause assessment, then a `RETRY` recorded `factory:bounded-retry` under the progress rule. The owner when the FAIL carries a security finding on an ELEVATED ticket, when the candidate moved because of post-freeze drift or a moved base, or when the plan must change |
+| `crash_with_writes`, `quiescence_unknown`, `ownership_unavailable`, `candidate_unavailable`, `repair_failed`, `red_required`, `red_invalidated`, `dispatched_before_red`, unsupported RED runner output | Factory | a routine execution or gate failure; fix or re-dispatch inside the approved paths and re-run |
+| `ownership_violation`, `repair_outside_findings` | Owner | both come from the same outside-the-approved-write-set check; any write outside the approved set is owner-reserved (`SKILL.md` "When execution may yield"), and the owner decides whether it is accepted or reverted |
+| `confirmation_fail`, `review_fail_no_repair`, `candidate_moved`, `round_limit` | Factory | a bounded new review: write the root-cause assessment, then a `RETRY` recorded `factory:bounded-retry` under the progress rule. The owner when the FAIL carries a security finding on an ELEVATED ticket, when the candidate moved because of post-freeze drift or a moved base, or when the plan must change. A failed security review stays with the owner regardless of the ELEVATED tier |
 | `review_terminal` (an overflow FAIL) | Owner | matches the engine's own classification |
 | `stale_candidate` and `post_freeze_drift`, `repair_unauthorized` | Owner | the frozen candidate and its authorization are a gate-safety boundary |
 | `run_mismatch`, `approval_mismatch`, `dag_mismatch` | Owner | the approved plan or DAG changed, which is a material change |

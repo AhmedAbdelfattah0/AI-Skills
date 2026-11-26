@@ -27,7 +27,7 @@ pull request. The source of truth for each phase is
 
 ## Review is bounded
 
-In PROVE, the Factory collects all failures first, fixes them in one consolidated batch inside the approved scope and re-runs the chain, continuing while each round makes progress; it returns to the owner only after two rounds with no progress, when the approved budget is spent, or when a fix would change requirements, scope, security guarantees or an owner-reserved decision. REVIEW may use one repair batch and one targeted
+In PROVE (with a backstop of 6 corrective rounds per ticket), the Factory collects all failures first, fixes them in one consolidated batch inside the approved scope and re-runs the chain, continuing while each round makes progress; it returns to the owner only after two rounds with no progress, when the approved budget is spent, or when a fix would change requirements, scope, security guarantees or an owner-reserved decision. REVIEW may use one repair batch and one targeted
 confirmation of the affected surface only. A failed confirmation is the result, not a new review
 cycle. See [model-routing-and-reviews.md](model-routing-and-reviews.md).
 

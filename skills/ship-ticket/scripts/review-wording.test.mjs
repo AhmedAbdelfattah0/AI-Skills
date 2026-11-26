@@ -177,7 +177,7 @@ test('RC-1 headline rules are pinned: native Plan Mode approval, section 3b, the
   assert.ok(flat(ref('ship.md')).includes('`SECURITY_WAIVER` event with `boundary: "plan-3b"`'));
   assert.ok(skill.includes('This list is the single owner of the stop points, by category'));
   assert.ok(skill.includes('Never force-push without explicit owner authority'));
-  assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure, never relabelled as harness degradation)'));
+  assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure and forgery detection, never relabelled as harness degradation and never a bounded-repair case)'));
 });
 
 test('RC-1 release and stop rules are pinned where they are executed: ship.md block list, the spine stop list, Resume', () => {

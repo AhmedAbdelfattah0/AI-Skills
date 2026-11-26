@@ -161,7 +161,7 @@ test('merge mode: opt-in, once, scope, permanent owner-merge exceptions, deploy 
 });
 
 test('execution rules: dependency trigger, blocked tickets, base drift, extended-run limits', () => {
-  has(sprint, 'A ticket starts as soon as its dependencies hold (`dep_mode`): at PR open or SHIP_READY, or merged when the Factory merges and a later ticket depends on merged code.');
+  has(sprint, 'A ticket starts as soon as its dependencies hold (`dep_mode`). A dependent ticket waits for its dependency to have MERGED, and its `init` (base pinning) is deferred until then, with its branch synchronized to the new base first.');
   has(sprint, 'Park the ticket and only the tickets that genuinely depend on it; continue independent tickets and waves whose prerequisites hold; never stop the whole sprint for one ticket.');
   has(sprint, 'Before execution, revalidate each affected ticket against the current base; routine rebasing and base synchronization are Factory-owned');
   has(sprint, 'If the second reviewer becomes unavailable mid-run, preserve progress and park the affected tickets, never bypass review, and continue independent permitted work within the limits.');

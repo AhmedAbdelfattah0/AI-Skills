@@ -119,7 +119,7 @@ boundary: there is no per-wave approval and no per-ticket approval.
    approved file to `.specs/plans/<KEY>.md`, check that `brief.mjs plan-digest` of
    the extract equals both the digest table and the retained staged draft, run
    `debate-retain`, append START (below) and run `start-check`. No new script is
-   needed. Then it executes in dependency order with work-conserving
+   needed; the extract is checked against the digest table in the approved unified file, and `start-check` then binds it to its own START (no new check). Then it executes in dependency order with work-conserving
    parallelism; the ticket plan files, digests and STARTs are internal Factory
    artifacts, never owner approval surfaces.
 

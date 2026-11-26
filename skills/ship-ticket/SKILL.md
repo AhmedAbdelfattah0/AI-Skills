@@ -359,8 +359,15 @@ PROVE and REVIEW have separate limits:
   ticket's `config.budget` token ceiling, mandatory for any run that uses this
   path, a single ticket included; orchestrator edit rounds and gate re-runs count
   against it; and the second-reviewer cap), or the fix would change requirements,
-  scope, security guarantees or an owner-reserved decision. A backstop ceiling of 6
-  corrective rounds per ticket is a safety net, not a target. No signature
+  scope, security guarantees or an owner-reserved decision. Before EACH correction
+  round (an orchestrator direct edit or a gate re-run included) the orchestrator
+  imports the usage so far with the existing usage tooling and checks the
+  `config.budget` headroom; no headroom, or usage that is unknown or cannot be
+  imported, stops to the owner. `config.budget` is set in the plan template's
+  Budget line before approval, for every plan; a plan without one has no
+  Factory-owned correction and the ticket returns to the owner at the first
+  failure. A backstop ceiling of 6 corrective rounds per ticket is a safety net,
+  not a target. No signature
   bookkeeping, no notes file and no per-class caps apply; these are instructions,
   not engine checks.
 - REVIEW may apply at most one consolidated candidate repair batch followed by
@@ -449,7 +456,7 @@ from UNDERSTAND.
 **Before planning, settle two things with the owner.** Read the repository's
 CLAUDE.md (or AGENTS.md) for the base branch (for example `main` or `qa`); if it
 is unclear, ASK the owner before planning, never guess. At the START of the
-ticket or wave, ask ONCE whether auto-merge is allowed after the reviews and CI
+ticket (for a batch, once in the unified plan, never again at a wave start), ask ONCE whether auto-merge is allowed after the reviews and CI
 are green: yes means merge after every gate has passed; no means prepare the PR
 and wait for the owner's "merge". Deploy is a separate decision and is never
 implied. Merge stays manual unless the owner opted in. For a sprint or an extended run, ask once, in the unified plan, with the scope `all` or `STANDARD-only`; migrations, payments, RLS and tickets with deploy preconditions always stay owner-merge, and deploy stays a separate decision ([references/sprint.md](references/sprint.md)).
@@ -508,7 +515,7 @@ After approval:
 - create or reuse the ticket branch from an up-to-date base;
 - save the approved plan under .specs/plans/<TICKET>.md;
 - copy the debate bundle to the retained locator with `brief.mjs debate-retain --plan <plan> --bundle <bundle root> --repo <repo>` before START (a failed copy is **WAIT_FOR_USER**, never a START without the retained evidence);
-- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`; `approval_surface` (terminal, desktop or plannotator) is an OPTIONAL audit field, never evidence of approval. Stamp `approved_at` from `date -u`; `approved_by` is optional metadata. For a batch, do this for every ticket right after the one approval, without asking the owner again ([references/plan.md](references/plan.md) "One unified plan, one approval");
+- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`; `approval_surface` (terminal, desktop or plannotator) is an OPTIONAL audit field, never evidence of approval. Stamp `approved_at` from `date -u`; `approved_by` is optional metadata. For a batch, do this for every ticket right after the one approval, without asking the owner again ([references/plan.md](references/plan.md) "One unified plan, one approval"). For a dependent ticket write the START with the others but DEFER `init` (base pinning) until its dependency has MERGED (not merely reached SHIP_READY) and its branch is synchronized to the new base; an `init` before a rebase triggers `base_moved_local` (an owner `RETRY`, known friction);
 - invoke the routed quality skill and write one Design Contract derived from the
   approved execution DAG;
 - for full-stack work, materialize or generate the approved Integration Contract,
@@ -630,9 +637,11 @@ out of the bounded code review.
 The orchestrator runs the independent reviewers itself: it opens a shell, calls
 the Codex CLI (else Fable) and a separate subagent with the standard brief, triages findings
 by evidence, fixes, then runs the targeted confirmation. If the confirmation
-fails: STOP, write the root-cause assessment and re-plan; resuming needs the
-owner's approval (review.md "Two-cycle limit"); there is no third
-cycle (see
+fails: STOP automatic repair and write the root-cause assessment. An in-scope,
+non-security confirmation FAIL gets ONE Factory `RETRY` (`factory:bounded-retry`)
+under the corrective-iteration rule; a security finding, drift, a moved base,
+units, an ownership conflict or an overflow FAIL stays with the owner. There is
+no third repair cycle inside one review execution (see
 [references/review.md](references/review.md) "Two-cycle limit").
 
 Reconcile once. A clean primary PASS continues directly to SHIP. Accepted
@@ -784,7 +793,8 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   security-plan refusal of `plan_block_missing` or `plan_block_invalid`
   ([references/security-risk.md](references/security-risk.md));
 - **engine and gate safety refusals:** a nonzero `ship-ready-check` (a gate
-  failure, never relabelled as harness degradation), a REPAIR the ledger does not
+  failure and forgery detection, never relabelled as harness degradation and never
+  a bounded-repair case), a REPAIR the ledger does not
   authorize, an engine judgment point the judgment-code table sends to the owner (the
   table governs; a code it does not list goes to the owner; the listed Factory
   codes are resolved in scope), or an unresolved
@@ -812,7 +822,7 @@ data inside the approved plan and retry under the corrective-iteration rule in
 round makes progress). Never bypass or waive a gate. STOP and return to the
 owner for an owner-reserved class (security, approval, ownership, spent budget,
 a drift, security or base `RETRY`, any security review or finding), for any category listed above, when the cause
-is the gate itself, or when two consecutive rounds show no progress (or the backstop ceiling of 6 corrective rounds is reached). The
+is the gate itself, a nonzero `ship-ready-check`, or when two consecutive rounds show no progress (or the backstop ceiling of 6 corrective rounds is reached). The
 judgment-code table in [references/execution-harness.md](references/execution-harness.md)
 says which codes go to the owner.
 

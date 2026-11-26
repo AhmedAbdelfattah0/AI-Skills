@@ -73,7 +73,7 @@ Put these in every brief's Notes, or point the worker here. They are first-pass 
 Record the base SHA at `init`; leave `config.base` as is. At BUILD start, before freeze
 and before SHIP run
 `node scripts/base-drift.mjs check --repo <R> --base <SHA> --target <ref> --dag <dag.json>`.
-Exit 1 (overlap): when the overlapping change is an earlier ticket of the same approved batch, in the approved merge order, rebase, re-run the affected gates and re-record the base SHA (Factory work, before the review freeze only). Any overlap with work OUTSIDE the batch (intended: conservative), or a rebase that introduces a material scope, security or contract conflict, is `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA.
+Exit 1 (overlap): when the overlapping change is an earlier ticket of the same approved batch, in the approved merge order, rebase, re-run the affected gates and re-record the base SHA (Factory work, before the review freeze only; after an approved sibling merges, rebase BEFORE `init` so `init` records the new base). Any overlap with work OUTSIDE the batch (intended: conservative), or a rebase that introduces a material scope, security or contract conflict, is `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA.
 A base that moves after the review freeze changes the merge base and the engine refuses the old review (`review_base_moved`); that still needs an owner `RETRY` (known friction).
 Exit 3 (git or input failure): fix the input and rerun; not a user decision.
 
