@@ -571,10 +571,11 @@ matching pattern when extending them:
   `scripts/candidate-id.mjs` computes stable reviewed-candidate identity;
   `scripts/run-log.mjs` appends local timing telemetry under Git metadata. The
   execution harness (`harness.mjs` schedule/admission, `carrier.mjs` guarded
-  writer dispatch, `usage.mjs`, `docker-lifecycle.mjs`) refuses PLAN, defaults to
+  writer dispatch, `usage.mjs`, `docker-lifecycle.mjs`, `host-claims.mjs`) refuses PLAN, defaults to
   subscription billing, and builds Claude/Codex arguments only from flags verified
   against the installed CLIs; keep it that way when a CLI changes. None of these
-  needs project-local setup, so symlink and copy installs behave the same. Orchestrator
+  needs project-local setup, so symlink and copy installs behave the same (`host-claims.mjs` keeps its
+  host-wide claim store in the user's `~/.ai-skills-state/host-resources/`, never in the skill). Orchestrator
   checks outside the engine: `scripts/ship-ready-check.mjs` (a hand-written `SHIP_READY`
   must match an engine `GATE ship-ready` line), `scripts/base-drift.mjs` (base against
   target tip, overlap with declared paths). The engine's opt-in audit trail (`config.auditRecord`, W3-record) only adds fields to review

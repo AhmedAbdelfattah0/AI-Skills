@@ -19,7 +19,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fakeHost } from './host-claims.test-helper.mjs';
@@ -214,7 +214,7 @@ test('guard: the store is overridable, and the real ~/.ai-skills-state is never 
   const { storeDir, STORE_ENV } = await store();
   const real = join(homedir(), '.ai-skills-state', 'host-resources');
   const before = existsSync(real) ? statSync(real).mtimeMs : null;
-  assert.equal(storeDir({ [STORE_ENV]: '/tmp/x-store' }), '/tmp/x-store');
+  assert.equal(storeDir({ [STORE_ENV]: resolve('/tmp/x-store') }), resolve('/tmp/x-store'));
   assert.throws(() => storeDir({ NODE_TEST_CONTEXT: 'child' }), { code: 'host_store_default_in_test' });
   assert.equal(storeDir({ HOME: '/home/u' }, { home: '/home/u' }), join('/home/u', '.ai-skills-state', 'host-resources'));
   assert.equal(existsSync(real) ? statSync(real).mtimeMs : null, before, 'the real store is untouched');
