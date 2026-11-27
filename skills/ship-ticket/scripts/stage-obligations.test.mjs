@@ -212,6 +212,11 @@ test('[P6-N5] a failed CURRENT-stage control can never be deferred: an available
   const relabel = POLICY_236(); relabel.deferred.push({ row: 'R1', stage: 'production', environment: 'production', subject: 'x', required_evidence: 'y', tracker_ref: 'T-9' });
   const rf = stageRun(t, { policy: relabel });
   assert.equal(initCode(rf.cli('init', { dag: rf.dagFile })), 'stage_deferral_invalid');
+  // a check this run executes (a testCommands entry) is a current-stage control even if the plan names a later stage for it
+  const ran = POLICY_236(); ran.rows.push({ id: 'R5', check: 'proof', stage: 'production' });
+  ran.deferred.push({ row: 'R5', stage: 'production', environment: 'production', subject: 'x', required_evidence: 'y', tracker_ref: 'T-9' });
+  const rr = stageRun(t, { policy: ran });
+  assert.equal(initCode(rr.cli('init', { dag: rr.dagFile })), 'stage_deferral_invalid');
   // a 3a catalog pair is proven by the engine at the merge stage: never deferrable
   const sec = secRun(t);
   const pair = `${sec.sel.pairs[0].boundary_id}:${sec.sel.pairs[0].control_id}`;
@@ -327,14 +332,15 @@ const dispose = (b, over = {}) => ({ signal_id: b.signal_id, disposition: 'no-ru
 test('[P6-N7a] 124: `this.api.get(` in a client/test file is dismissible with an engine-issued, candidate-bound, independently reviewed disposition (format 2 and 3)', () => {
   for (const format of [2, 3]) {
     for (const path of [CLIENT, 'apps/superadmin/src/app/features/settings/settings-api.service.spec.ts']) {
-      const files = [{ path, added: ['import { inject } from "@angular/core";', CLIENT_LINE, "    expect(this.api.get).toHaveBeenCalled();"] }];
+      const files = [{ path, added: ['import { inject } from "@angular/core";', CLIENT_LINE, "    expect(this.api.get).toHaveBeenCalled();",
+        "    this.api.get(`/settings/${id}`, { params: { a: '1, 2' } }).subscribe((r) => done(r));"] }];
       const id = `new-route@${path}`;
       const first = rea(files, { format });
       assert.equal(first.ok, false);
       assert.equal(first.code, format === 3 ? 'surface_inventory_incomplete' : 'classification_missing', J(first));
       const b = briefOf(first, id);
       assert.ok(b && b.admissible === true, J(first.disposition_briefs));
-      assert.deepEqual(b.lines, [CLIENT_LINE]);
+      assert.deepEqual(b.lines, [CLIENT_LINE, files[0].added[3]]);
       const done = rea(files, { format, dispositions: [dispose(b)] });
       assert.equal(done.ok, true, J(done));
       assert.equal(done.outcome, 'UNCHANGED');
@@ -354,6 +360,8 @@ test('[P6-N7b] a seeded server route can NEVER close by the disposition: bare, m
     ['src/server/settings.ts', ["this.api.get('/settings', (req, res) => res.json(x));"]], // handler-shaped argument
     ['src/server/settings.ts', ["this.api.get('/settings', async function (req) {"]],
     ['src/server/settings.ts', ['this.api.get(']], // a call that does not close on its line cannot be verified
+    ['src/server/settings.ts', ["this.api.get('/settings', this.handle);"]], // a non-literal second argument could be a handler
+    ['src/server/settings.ts', ["this.api.post('/settings', handler)"]],
     ['src/server/settings.ts', ["this.api.get('/x'); fastify.get('/y', h);"]],
     ['src/server/settings.ts', ['@Get(":id")', CLIENT_LINE]],
     ['src/server/settings.ts', ['export async function GET(req) {', CLIENT_LINE]],

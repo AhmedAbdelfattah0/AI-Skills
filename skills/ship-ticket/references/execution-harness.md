@@ -304,6 +304,26 @@ times are read time-zone and locale independently. Each launched attempt of a du
 have not all passed), so `reconcile --deadlines` measures nothing and sends no signal, and the launcher's in-process timers
 remain the only enforcer. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
 
+**Stage obligations** (S4: `config.stagePolicy: { version: 1 }`, opt-in, UNQUALIFIED; `scripts/stage-obligations.mjs`). The
+stage policy is one `stage-policy-v1: <json>` line of the approved narrative: the stages that exist in the run, the merge
+stage, one row per verification row with its stage, and each deferral (row, stage, environment, subject, required evidence,
+trigger or tracker). `preflight` and `init` both refuse an infeasible plan: a row whose stage neither exists nor is deferred
+(`stage_unavailable`), a deferral of an existing stage or of a section 3a pair (`stage_deferral_invalid`), a deferral with
+no trigger and no tracker (`obligation_trigger_missing`), a design-parity artifact of a `ui` run not declared in `artifacts`
+(`required_artifact_outside_contract`), a RED or pair spec no declared runner covers (`red_runner_missing`), a test
+command that is not executable (`runner_not_executable`), and a file-shaped planned write that raises a surface signal no
+surface lists (`surface_inventory_incomplete`, any block format). Each deferral is an open obligation in the state; the
+SHIP_READY event carries `verified_through` (the merge stage) and `obligations_open`, binds each obligation to the
+candidate and re-binds it, with a lineage entry, on a later candidate (a verified one reopens). Only `obligation-verify`
+with evidence for the obligation's stage, environment, subject and bound candidate marks it verified
+(`OBLIGATION_VERIFIED`, evidence with no `authorized_by`). Declared `artifacts` extend the Design Contract that `gate
+reassess` matches. With `no_runtime_boundary: true` in the approved line, `gate reassess` accepts a disposition for a
+new-route signal raised only by added client lines (`<x>.api.<verb>(` with no handler argument), quoting the brief digest
+the engine printed for that candidate and naming an independent reviewer. A route path, any other registration form, an
+auth or migration signal, or a recorded REAPPROVAL is never closed by it. Recording an obligation does not enforce
+deployment: nothing stops a deploy until the deploy boundary consumes the obligation. Section 3b status rules and the
+SHIP waiver wording in [ship.md](ship.md) are unchanged.
+
 **DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields
 are refused, never dropped.
 

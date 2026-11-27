@@ -123,6 +123,10 @@ export function feasibility({ policy, config, nodes, ticket, repoRoot, riskLabel
   const missing = required.filter(a => !policy.artifacts.includes(a));
   if (missing.length) throw coded('required_artifact_outside_contract', `the repository requires ${missing.join(', ')} (design-parity.md, a ui run) but the stage policy does not declare it in artifacts: the first reassess would see it outside the Design Contract (a sticky REAPPROVAL); declare it and re-approve`);
   const tc = config.testCommands ?? {};
+  // A check the engine itself runs in this run (a testCommands entry or a node check) is a current-stage control: never deferred.
+  const inRun = new Set([...Object.keys(tc), ...nodes.flatMap(n => n.checks ?? [])]);
+  const runHere = policy.deferred.filter(d => inRun.has(policy.rows.find(r => r.id === d.row).check));
+  if (runHere.length) throw coded('stage_deferral_invalid', `deferred row(s) ${runHere.map(d => d.row).join(', ')} name a check this run executes (config.testCommands or a node check): a current-stage control is never deferred`);
   const formatted = Object.keys(tc).filter(k => tc[k].format);
   const ghost = Object.keys(policy.runners).filter(k => !formatted.includes(k));
   if (ghost.length) throw coded('stage_policy_invalid', `runners names ${ghost.join(', ')}, not a formatted config.testCommands entry`);

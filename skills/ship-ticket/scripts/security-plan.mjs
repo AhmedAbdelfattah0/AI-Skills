@@ -1038,6 +1038,22 @@ function callArgs(l, from) {
   }
   return null;
 }
+/** The top-level comma-separated arguments of `args` (quotes and brackets respected), trimmed; [] for none. */
+function topLevelArgs(args) {
+  const out = [];
+  let depth = 0, q = null, cur = '';
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (q) { cur += ch; if (ch === '\\') cur += args[++i] ?? ''; else if (ch === q) q = null; continue; }
+    if (ch === "'" || ch === '"' || ch === '`') q = ch;
+    else if ('([{'.includes(ch)) depth++;
+    else if (')]}'.includes(ch)) depth--;
+    else if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
 /** Why `l` (a route-shaped added line) is not a client-only line, or null when every route-shaped match is a client call. */
 function serverForm(l) {
   if (ROUTE_LINE_V3.test(l)) return 'a format-3 route registration form';
@@ -1050,6 +1066,7 @@ function serverForm(l) {
     const args = callArgs(l, m.index + m[0].length);
     if (args === null) return 'the call does not close on its line (cannot be verified)';
     if (/=>|\bfunction\b/.test(args)) return 'a handler-shaped argument';
+    if (topLevelArgs(args).slice(1).some((x) => !x.startsWith('{'))) return 'a non-literal argument after the first (it could be a handler)';
   }
   return any ? null : 'no route-shaped match';
 }
