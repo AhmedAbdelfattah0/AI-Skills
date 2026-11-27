@@ -26,8 +26,24 @@ const unquote = (v) => {
   return s;
 };
 
+/**
+ * Parser versions (S3, P4 A2). Version 1 is the frozen parser, byte for byte, and every run that does not set
+ * config.succession reads with it. Version 2 (config.succession runs only) changes exactly two things:
+ * - the YAML block of a result ends only at its own terminator, `...` at exactly the block pad (`indent + 2`). Version 1
+ *   ended it at ANY line whose trim() is `...`, so the `...` that node's assert diff prints inside an `error: |-` scalar
+ *   ("... Skipped lines" elision, 4 spaces at a top-level test) cut the block before `code: 'ERR_ASSERTION'` and a real
+ *   assertion failure read as `runtime` (SCRUM-348: refused RED). A block that dedents below its pad, or reaches the end of
+ *   the text, before its terminator is malformed: its keys are discarded (fail closed, never absorbed into a later result).
+ * - a result whose `failureType` is `hookFailed` is a `setup` failure, never `assertion`: an asserting before/after hook
+ *   proves the setup failed, not the intended control (D-RED). Version 1 read it as `assertion` when its code was ERR_ASSERTION.
+ * Newly ACCEPTED inputs (enumerated, R1 row 8): a `not ok` result whose YAML block holds, inside a block scalar, a line of
+ * `...` indented deeper than the pad, followed by its assertion keys. Nothing else is newly accepted (tap-parser-v2 tests).
+ * Newly REFUSED inputs: a `hookFailed` result; a block with no exact-pad terminator.
+ */
+export const PARSER_VERSIONS = Object.freeze([1, 2]);
+
 /** Parse `node --test` TAP (nested subtests by indentation) into results. */
-function parseTap(text) {
+function parseTap(text, version = 1) {
   const lines = text.split(/\r?\n/);
   const stack = []; // stack[level] = subtest name announced at that level
   const results = [];
@@ -49,12 +65,25 @@ function parseTap(text) {
     const [title, directive = ''] = (res[2] ?? '').split(/(?<!\\) # /);
     const name = [...stack.slice(0, level), title.replace(/\\([\\#])/g, '$1')].join(' > ');
     stack.length = level;
-    const yaml = {};
+    let yaml = {};
     if (lines[i + 1]?.trim() === '---') {
       const pad = indent + 2;
-      for (i += 2; i < lines.length && lines[i].trim() !== '...'; i++) {
-        const kv = lines[i].length > pad && lines[i][pad] !== ' ' ? lines[i].slice(pad).match(/^(\w+): ?(.*)$/) : null;
-        if (kv) yaml[kv[1]] = unquote(kv[2]);
+      if (version === 1) {
+        for (i += 2; i < lines.length && lines[i].trim() !== '...'; i++) {
+          const kv = lines[i].length > pad && lines[i][pad] !== ' ' ? lines[i].slice(pad).match(/^(\w+): ?(.*)$/) : null;
+          if (kv) yaml[kv[1]] = unquote(kv[2]);
+        }
+      } else {
+        const end = ' '.repeat(pad) + '...';
+        let closed = false;
+        for (i += 2; i < lines.length; i++) {
+          const l = lines[i];
+          if (l === end) { closed = true; break; }
+          if (l.trim() !== '' && l.match(/^ */)[0].length < pad) { i--; break; } // dedent: the outer loop reads this line again
+          const kv = l.length > pad && l[pad] !== ' ' ? l.slice(pad).match(/^(\w+): ?(.*)$/) : null;
+          if (kv) yaml[kv[1]] = unquote(kv[2]);
+        }
+        if (!closed) yaml = {}; // malformed block: no key of it counts
       }
     }
     let status = res[1] ? 'fail' : 'pass';
@@ -64,6 +93,7 @@ function parseTap(text) {
     if (status === 'fail') {
       const dtext = diag.join('\n');
       if (yaml.failureType === 'subtestsFailed') failure_kind = 'subtests';
+      else if (version !== 1 && yaml.failureType === 'hookFailed') failure_kind = 'setup';
       else if (yaml.code === 'ERR_ASSERTION' || yaml.name === 'AssertionError') failure_kind = 'assertion';
       else if (level === 0 && ('exitCode' in yaml || LOAD_TEXT.test(dtext)) && !yaml.name) { failure_kind = 'load'; detail = dtext; }
       else failure_kind = 'runtime';
@@ -116,13 +146,17 @@ function parseJestLike(text) {
 
 const ADAPTERS = { tap: parseTap, 'vitest-json': parseJestLike, 'jest-json': parseJestLike };
 
-/** Parse runner output (`tap`, `vitest-json`, `jest-json`) into per-spec results. Never throws. */
-export function parseRunnerOutput(format, text) {
+/**
+ * Parse runner output (`tap`, `vitest-json`, `jest-json`) into per-spec results. Never throws. `parser` (1 default, or 2:
+ * PARSER_VERSIONS) selects the TAP parser; the jest-shaped adapters are the same in both.
+ */
+export function parseRunnerOutput(format, text, { parser = 1 } = {}) {
   const adapter = Object.hasOwn(ADAPTERS, format) ? ADAPTERS[format] : null;
   if (!adapter) return { supported: false, reason: `unsupported runner format: ${String(format)}` };
   if (typeof text !== 'string') return { supported: false, reason: 'runner output is not text' };
+  if (!PARSER_VERSIONS.includes(parser)) return { supported: false, reason: `unsupported parser version: ${String(parser)}` };
   let results = null;
-  try { results = adapter(text); } catch (err) { return { supported: false, reason: `unparseable ${format} output: ${err.message}` }; }
+  try { results = adapter(text, parser); } catch (err) { return { supported: false, reason: `unparseable ${format} output: ${err.message}` }; }
   return results ? { supported: true, results } : { supported: false, reason: `output is not valid ${format}` };
 }
 
@@ -209,8 +243,8 @@ const SPEC_RANK = ['fail', 'skip', 'unparsed', 'pass', 'missing'];
  * so a spec is 'pass' only when at least one run shows its own file passing and none shows it failing,
  * skipped or unreadable.
  */
-export function specResults(specs, runs) {
-  const parsed = runs.map((r) => (r.truncated === true ? null : parseRunnerOutput(r.format, r.stdout ?? '')));
+export function specResults(specs, runs, { parser = 1 } = {}) {
+  const parsed = runs.map((r) => (r.truncated === true ? null : parseRunnerOutput(r.format, r.stdout ?? '', { parser })));
   return specs.map((s) => {
     const seen = parsed.map((p, i) => specStatus(s, p, runs[i]));
     return { file: s.file, name: s.name, status: SPEC_RANK.find((x) => seen.includes(x)) ?? 'missing' };
@@ -315,7 +349,7 @@ export async function gateRed(input, deps) {
   let verdict;
   const rewritten = [];
   for (const f of Object.keys(spec_digests)) if ((await deps.digestFile(f)) !== spec_digests[f]) rewritten.push(f);
-  const parsed = run.timedOut ? null : parseRunnerOutput(format, run.stdout ?? '');
+  const parsed = run.timedOut ? null : parseRunnerOutput(format, run.stdout ?? '', { parser: input.parser ?? 1 });
   if (rewritten.length) verdict = refuse(state, 'spec_rewritten', [`the RED runner changed spec file(s) ${rewritten.join(', ')}: a spec that never failed is not RED`]);
   else if (run.timedOut) verdict = refuse(state, 'runner_timeout', [`runner exceeded ${timeoutMs} ms; a timeout is never re-run automatically`], { judgment_point: true });
   else if (!parsed.supported) verdict = refuse(state, 'unsupported_output', [parsed.reason, 'RED cannot be established; use the documented manual flow (degraded)'], { judgment_point: true, degraded: true });

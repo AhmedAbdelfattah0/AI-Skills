@@ -1,0 +1,234 @@
+TAP version 13
+# Subtest: API-06 deep
+not ok 1 - API-06 deep
+  ---
+  duration_ms: 1.805583
+  type: 'test'
+  location: '/repo/spec/a.test.mjs:3:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    ... Skipped lines
+    
+      {
+        a: [
+          {
+            x: 1,
+            y: 'long string value 1'
+    ...
+          {
+    +       x: 30,
+    +       y: 'long string value 30'
+    -       x: 31,
+    -       y: 'long string value 31'
+          }
+        ],
+        b: 1
+      }
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    a:
+      0:
+        x: 1
+        y: 'long string value 1'
+      1:
+        x: 2
+        y: 'long string value 2'
+      2:
+        x: 3
+        y: 'long string value 3'
+      3:
+        x: 4
+        y: 'long string value 4'
+      4:
+        x: 5
+        y: 'long string value 5'
+      5:
+        x: 6
+        y: 'long string value 6'
+      6:
+        x: 7
+        y: 'long string value 7'
+      7:
+        x: 8
+        y: 'long string value 8'
+      8:
+        x: 9
+        y: 'long string value 9'
+      9:
+        x: 10
+        y: 'long string value 10'
+      10:
+        x: 11
+        y: 'long string value 11'
+      11:
+        x: 12
+        y: 'long string value 12'
+      12:
+        x: 13
+        y: 'long string value 13'
+      13:
+        x: 14
+        y: 'long string value 14'
+      14:
+        x: 15
+        y: 'long string value 15'
+      15:
+        x: 16
+        y: 'long string value 16'
+      16:
+        x: 17
+        y: 'long string value 17'
+      17:
+        x: 18
+        y: 'long string value 18'
+      18:
+        x: 19
+        y: 'long string value 19'
+      19:
+        x: 20
+        y: 'long string value 20'
+      20:
+        x: 21
+        y: 'long string value 21'
+      21:
+        x: 22
+        y: 'long string value 22'
+      22:
+        x: 23
+        y: 'long string value 23'
+      23:
+        x: 24
+        y: 'long string value 24'
+      24:
+        x: 25
+        y: 'long string value 25'
+      25:
+        x: 26
+        y: 'long string value 26'
+      26:
+        x: 27
+        y: 'long string value 27'
+      27:
+        x: 28
+        y: 'long string value 28'
+      28:
+        x: 29
+        y: 'long string value 29'
+      29:
+        x: 31
+        y: 'long string value 31'
+    b: 1
+  actual:
+    a:
+      0:
+        x: 1
+        y: 'long string value 1'
+      1:
+        x: 2
+        y: 'long string value 2'
+      2:
+        x: 3
+        y: 'long string value 3'
+      3:
+        x: 4
+        y: 'long string value 4'
+      4:
+        x: 5
+        y: 'long string value 5'
+      5:
+        x: 6
+        y: 'long string value 6'
+      6:
+        x: 7
+        y: 'long string value 7'
+      7:
+        x: 8
+        y: 'long string value 8'
+      8:
+        x: 9
+        y: 'long string value 9'
+      9:
+        x: 10
+        y: 'long string value 10'
+      10:
+        x: 11
+        y: 'long string value 11'
+      11:
+        x: 12
+        y: 'long string value 12'
+      12:
+        x: 13
+        y: 'long string value 13'
+      13:
+        x: 14
+        y: 'long string value 14'
+      14:
+        x: 15
+        y: 'long string value 15'
+      15:
+        x: 16
+        y: 'long string value 16'
+      16:
+        x: 17
+        y: 'long string value 17'
+      17:
+        x: 18
+        y: 'long string value 18'
+      18:
+        x: 19
+        y: 'long string value 19'
+      19:
+        x: 20
+        y: 'long string value 20'
+      20:
+        x: 21
+        y: 'long string value 21'
+      21:
+        x: 22
+        y: 'long string value 22'
+      22:
+        x: 23
+        y: 'long string value 23'
+      23:
+        x: 24
+        y: 'long string value 24'
+      24:
+        x: 25
+        y: 'long string value 25'
+      25:
+        x: 26
+        y: 'long string value 26'
+      26:
+        x: 27
+        y: 'long string value 27'
+      27:
+        x: 28
+        y: 'long string value 28'
+      28:
+        x: 29
+        y: 'long string value 29'
+      29:
+        x: 30
+        y: 'long string value 30'
+    b: 1
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///repo/spec/a.test.mjs:3:36)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 37.220875
