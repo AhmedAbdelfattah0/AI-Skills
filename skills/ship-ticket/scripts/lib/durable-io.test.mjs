@@ -506,11 +506,14 @@ test('L31 leaves an exited holder\'s lock to the contender holding the recovery 
   const dir = scratch(t), lockFile = join(dir, 'document.lock');
   const held = record(EXITED_PID);
   writeFileSync(lockFile, held);
-  writeFileSync(lockFile + '.recovery', '{"pid":1,"nonce":"theirs"}');
+  // The contender holding the marker must be ALIVE on every platform: this test process. (pid 1 was used before S1; it is
+  // alive on POSIX (init/launchd) but no process has pid 1 on Windows, where S1 then correctly proves the marker stale.)
+  const theirs = JSON.stringify({ pid: process.pid, nonce: 'theirs' });
+  writeFileSync(lockFile + '.recovery', theirs);
   const ft = fakeTime();
   await assert.rejects(acquireLock(ctxIn(dir, { processInfo: deadFor(EXITED_PID) }), { waitMs: 50, now: ft.now, sleep: ft.sleep }), { code: 'lock_timeout' });
   assert.equal(readFileSync(lockFile, 'utf8'), held);
-  assert.equal(readFileSync(lockFile + '.recovery', 'utf8'), '{"pid":1,"nonce":"theirs"}');
+  assert.equal(readFileSync(lockFile + '.recovery', 'utf8'), theirs);
 });
 
 test('L32 keeps a lock that another contender acquired while this one claimed the exited record', async (t) => {
