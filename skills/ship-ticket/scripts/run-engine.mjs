@@ -70,6 +70,7 @@ const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
   'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'policy', 'catalogFile', 'now']);
 CTX_KEYS.add('deadlineClock'); // S1: the in-process test clock of the deadline sweep (never set by the CLI)
+CTX_KEYS.add('hostClaims'); // S2: test seam of the host claim store { dir, snapshot, now, docker, loadavg } (the CLI uses the default store)
 const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check', 'evidence'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;

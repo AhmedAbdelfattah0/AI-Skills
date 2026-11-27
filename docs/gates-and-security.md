@@ -42,8 +42,9 @@ approved against, and each selected boundary and control pair needs a named spec
 
 ## Host admission
 
-Before heavy work, the orchestrator runs `host-admit.mjs --class heavy`, which samples memory pressure and load and prints one JSON
-line: exit 0 admit, 1 hold, 2 usage error or unsupported platform. It is macOS only; elsewhere it
+Before heavy work, the orchestrator runs it through `host-admit.mjs run --class heavy --op-id <id> -- <command>`. It samples memory pressure
+and load, reads the occupancy from the host claim store, and claims before the command starts. The advisory form
+`host-admit.mjs --class heavy` prints one JSON line: exit 0 admit, 1 hold, 2 usage error or unsupported platform. It is macOS only; elsewhere it
 prints `platform_unsupported`, which is not an allow, and the manual rule applies (check memory and
 load, run one heavy job at a time). Memory pressure level 2 is a warning and level 4 holds; the level
 4 threshold is a pragmatic choice, not a proven safety boundary. The CLI does not report provider

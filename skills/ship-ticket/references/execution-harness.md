@@ -119,12 +119,44 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   one common integer unit (hundredths of KB), `used <= total` and `total == used + free` are compared exactly (no
   tolerance; values beyond the safe-integer range are rejected, never rounded), growth is an exact integer difference
   compared with the exact 2 MB tolerance, and load is compared as `5*load >= 3*cores`.
-- `scripts/host-admit.mjs --class heavy|light [--running N]` is the CLI over `admitHost`/`hostSnapshot`
+- `scripts/host-admit.mjs --class heavy|light` is the CLI over `admitHost`/`hostSnapshot`
   for the orchestrator, run before HEAVY work. One invocation takes up to two `hostSnapshot` windows
-  (about 20 s per window, so up to about 40 s), carries the history in memory and persists nothing.
-  `--running N` is the number of tasks already running (for `heavy` it is the heavy-slot count passed to
-  `admitHost`; default 0). It prints ONE JSON line `{admit, reason, reasons, class, running, signals}`
-  and exits 0 admit, 1 hold, 2 usage error, unsupported platform or an internal failure (`reason:"error"`). Non-macOS prints
+  (about 20 s per window, so up to about 40 s) and carries the sampling history in memory.
+  The occupancy passed to `admitHost` is read from the host claim store (below): the sum of the weights
+  of its live and unknown claims. It is never supplied by the caller (S2 removed `--running`, which
+  defaulted to 0). This form is an ADVISORY check and takes no claim. It prints ONE JSON line
+  `{admit, reason, reasons, class, occupancy, unknown, claimed, signals}`
+  and exits 0 admit, 1 hold, 2 usage error, unsupported platform or an internal failure (`reason:"error"`).
+- `scripts/host-admit.mjs run --class heavy|light --op-id <id> [--resource <path|name>:R|W]... [--container-owner <o> --container-run <r>] -- <command> [args...]`
+  is the claiming form. It claims before the command starts (a hold exits 1 and starts nothing) and runs
+  the command through the launcher in its own process group. The claim is bound to that group's pgid and
+  leader start before the release byte. It is released only once the group is gone and no container with
+  the given owner/run labels remains, and the post-admission peak is persisted. JSON lines go to stderr;
+  the command's exit code is mirrored.
+- **Host claim store** (S2, `scripts/host-claims.mjs`): `~/.ai-skills-state/host-resources/`
+  (override: env `AI_SKILLS_HOST_RESOURCES_DIR`, an absolute path; the default is refused under the test
+  runner). It holds one record per operation: `op_id, class, weight, resources [{resource, mode R|W}],
+  container_label, pgid, leader_start, claimer {pid, process_start_time, start_identity, host}`. It also holds `samples.jsonl` (every
+  admission decision with its host samples, every reclaim, every post-admission peak) and `blocked.json`.
+  - Sampling happens outside the store's short lock. The claims are re-read, decided and written under it.
+  - The sum of the weights stays at or below the heavy slots `admitHost` grants. A heavy claim weighs 1
+    or more; a light claim weighs 0, so light work never waits for capacity.
+  - A `W` claim excludes every `R` or `W` claim on the same canonical resource: the realpath of a path, so
+    two spellings of one installation are one resource.
+  - A claim is reclaimed only on proof. Either it was never bound and its claimer is dead (nothing ran),
+    or its group is proven gone and, for a labelled claim, no labelled container remains. It is never
+    reclaimed by age.
+  - Any other holder is unknown. It stays charged and raises one host-scoped Blocked (`blocked.json`,
+    `host_claim_unknown`), which is cleared with its cause.
+  - Trust is same-user: the records are not authenticated.
+  - An engine DAG opts in with `config.hostClaims: { version: 1, widthReason? }`. Each node then declares
+    `hostClass` (heavy or light: a per-operation class, never ticket-wide) and optional `hostResources`.
+    `config.width` must be explicit, and width 1 needs `widthReason`.
+  - The engine claims before it spawns a heavy node (a lone first node too), binds the claim before the
+    release byte and releases it after the attempt settles. A hold leaves the node pending with a
+    transient `host_held` (plus `host_blocked` while a holder is unknown); it is never a persistent
+    judgment.
+  - RED, proof, unit-check and evidence runners do not take claims yet. Non-macOS prints
   `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
   parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold

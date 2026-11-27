@@ -43,6 +43,7 @@ export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
   'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun'];
+CONFIG_FIELDS.push('hostClaims'); // S2 (P2): opt-in host claims (host-claims.mjs); an engine without S2 refuses it (unknown config)
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -175,8 +176,35 @@ function validateSecurity(nodes, c, bad) {
   if (c.controlCoverage.length && !Object.values(c.testCommands ?? {}).some(e => e.format))
     bad('config.controlCoverage needs a formatted config.testCommands runner (the proof parses each pair spec\'s result)');
 }
+/**
+ * S2 (P2) width policy and host claims. `config.hostClaims: { version: 1, widthReason? }` turns on the host claim store for
+ * this run: every node declares its per-operation `hostClass` (heavy | light; never ticket-wide) and may declare
+ * `hostResources: [{ resource, mode: R|W }]` (shared host paths such as a symlinked node_modules, or opaque names).
+ * The planned width must be explicit (`config.width`), and serial execution (width 1) needs a stated `widthReason`.
+ * Without hostClaims the node fields are refused, so a legacy DAG keeps the frozen dispatch (no claims, width default 1).
+ */
+const HOST_CLASSES = ['heavy', 'light'];
+function validateHostClaims(c, bad) {
+  if (c.hostClaims === undefined) return;
+  const h = c.hostClaims;
+  if (!isObj(h) || h.version !== 1 || Object.keys(h).some(k => k !== 'version' && k !== 'widthReason')) bad('config.hostClaims must be { version: 1, widthReason?: string }');
+  if (c.width === undefined) bad('config.hostClaims needs an explicit config.width (the planned width)');
+  if (h.widthReason !== undefined && !(typeof h.widthReason === 'string' && h.widthReason.trim().length >= 1 && h.widthReason.length <= 300)) bad('config.hostClaims.widthReason must be a non-empty string of at most 300 characters');
+  if (c.width === 1 && h.widthReason === undefined) bad('config.width 1 with config.hostClaims needs config.hostClaims.widthReason (why the run is serial)');
+}
+function validateHostNode(n, c, bad) {
+  if (c.hostClaims === undefined) {
+    if (n.hostClass !== undefined || n.hostResources !== undefined) bad(`node ${n.id}: hostClass/hostResources need config.hostClaims`);
+    return;
+  }
+  if (!HOST_CLASSES.includes(n.hostClass)) bad(`node ${n.id}: hostClass must be heavy or light (config.hostClaims: an explicit per-operation class)`);
+  if (n.hostResources !== undefined && !(Array.isArray(n.hostResources) && n.hostResources.every(r => isObj(r) && Object.keys(r).every(k => k === 'resource' || k === 'mode')
+    && typeof r.resource === 'string' && r.resource.length >= 1 && r.resource.length <= 4096 && !r.resource.includes('\0') && ['R', 'W'].includes(r.mode))))
+    bad(`node ${n.id}: hostResources must be [{ resource, mode: R|W }]`);
+}
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
+NODE_FIELDS.push('hostClass', 'hostResources'); // S2 (P2): the per-operation class and shared host resources, only with config.hostClaims
 // REPAIR is never a DAG node: the engine dispatches repairs from review records only (it would fail 'dispatch refused').
 const NODE_PHASES = ['BUILD', 'PROVE', 'SHIP'];
 const PINNED_PLAN = /^\.specs\/plans\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
@@ -225,12 +253,14 @@ export function validateEngineDag(doc, { ticket } = {}) {
   // placement; `{ version: 1 }` states the default explicitly. An engine without S1 refuses the field (unknown config).
   if (c.durableRun !== undefined && c.durableRun !== false && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1))
     bad('config.durableRun must be false (the legacy per-worktree placement) or exactly { version: 1 }');
+  validateHostClaims(c, bad);
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
     only(n, NODE_FIELDS, `node ${n.id}`);
     if (!NODE_PHASES.includes(n.phase ?? 'BUILD')) bad(`node ${n.id}: phase must be ${NODE_PHASES.join('|')} (REVIEW is never dispatched; REPAIR only from a review record)`);
     if (typeof n.promptFile !== 'string') bad(`node ${n.id}: promptFile required`);
+    validateHostNode(n, c, bad);
     for (const k of ['othersOwned', 'evidence', 'redSpecs']) if (n[k] !== undefined && !Array.isArray(n[k])) bad(`node ${n.id}: ${k} must be an array`);
     return { deps: [], reads: [], writes: [], othersOwned: [], resources: [], risk: [], complexity: 'medium', modelTier: 'inherit',
       estimatedMemoryMb: 0, phase: 'BUILD', evidence: [], redSpecs: [], ...n };
