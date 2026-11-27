@@ -22,6 +22,7 @@ import { checkedIdentity, identityStage } from './engine-identity.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
+import { shipStage, stageArtifacts } from './stage-obligations.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -414,12 +415,14 @@ async function shipReadyGate(E, input, candidate) {
     note(S, 'LOCAL_PROOF', { candidate_id: candidate, passed: commands.length > 0 && commands.every(c => c.result === 'pass') });
     v = gateShipReady({ state: E.S, current });
   }
+  // STAB S4: a config.stagePolicy run binds (or re-binds) its open stage obligations to this candidate; SHIP_READY covers the merge stage only.
+  const stage = v.ok && S.stage ? shipStage(S, candidate, idShip?.base?.merge_base ?? S.base?.merge_base ?? null) : null;
   if (v.ok && S.ship_ready?.candidate_id !== candidate) {
     note(S, 'SHIP_READY', { candidate_id: candidate });
     S.ship_ready = { candidate_id: candidate, seq: S.seq, ...(idShip ? { base: idShip.base } : {}) };
-    S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
+    S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString(), ...(stage ?? {}) });
   } else if (v.ok && idShip) S.ship_ready.base = idShip.base; // S-28a: a RETRY re-freeze of the same candidate moves the base of record
-  return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
+  return { judgment_point: false, ...v, ...(stage ? { stage } : {}), ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
     matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
 
@@ -810,14 +813,20 @@ async function reassessGate(E, input, candidate) {
   const refusal = securityRefusal(sec);
   if (refusal) return refusal;
   const plan = io.readIfExists(E.P.plan) ?? '';
+  // STAB S4: a disposition needs the approved stage policy's no_runtime_boundary (the DAG flag alone never loosens the classifier).
+  const allowDispositions = S.stage?.no_runtime_boundary === true;
+  if (input.dispositions !== undefined && !allowDispositions) return gateNo('disposition_not_approved', ['the approved stage policy does not set no_runtime_boundary: a disposition closes nothing on this run']);
   // The input surfaces pass straight through: reassess unites them with the approved ones (an identical one is
   // that surface; one that redefines an approved boundary id is refused bad_input; one outside the Design
   // Contract is a REAPPROVAL basis).
   const res = sec.sp.reassess({ plan, catalog: sec.catalog, inventory: { candidate_id: candidate, surfaces: input.surfaces ?? [] },
-    changed: { contract_paths: designContract(Object.values(S.nodes)), files: changedFiles(E, E.candidatePaths ?? []) },
-    classifications: input.classifications ?? [], addenda: sec.events.addenda.map(a => ({ pairs: a.pairs.map(pairKey) })) });
+    changed: { contract_paths: [...designContract(Object.values(S.nodes)), ...stageArtifacts(S)], files: changedFiles(E, E.candidatePaths ?? []) },
+    classifications: input.classifications ?? [], addenda: sec.events.addenda.map(a => ({ pairs: a.pairs.map(pairKey) })),
+    ...(allowDispositions ? { allowDispositions, ...(input.dispositions ? { dispositions: input.dispositions } : {}) } : {}) });
+  const briefs = res.disposition_briefs ? { disposition_briefs: res.disposition_briefs } : {};
   if (!res.ok) {
-    if (res.code === 'classification_missing') return gateNo('reassess_unclassified', res.reasons, { unclassified: res.unclassified ?? [], signals: res.signals ?? [] });
+    if (res.code === 'classification_missing') return gateNo('reassess_unclassified', res.reasons, { unclassified: res.unclassified ?? [], signals: res.signals ?? [], ...briefs });
+    if (res.disposition_briefs) return gateNo(res.code, res.reasons ?? [], briefs);
     if (['plan_block_missing', 'plan_block_invalid'].includes(res.code)) return gateNo('security_pairs_mismatch', res.reasons, { judgment_point: true });
     if (['catalog_missing', 'catalog_invalid'].includes(res.code)) return gateNo('catalog_unavailable', res.reasons, { judgment_point: true });
     return gateNo(res.code, res.reasons ?? []);
@@ -831,10 +840,10 @@ async function reassessGate(E, input, candidate) {
   if (res.outcome === 'ADD_CONTROLS') return gateNo('addendum_required', res.delta_pairs.map(p => `${p}: not in an effective pair or a trusted SECURITY_ADDENDUM`),
     { judgment_point: true, outcome: res.outcome, delta_pairs: res.delta_pairs, addendum: res.addendum });
   note(S, 'SECURITY_REASSESSED', { candidate_id: candidate, outcome: res.outcome });
-  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq };
+  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq, ...(res.dispositions_used?.length ? { dispositions: res.dispositions_used } : {}) };
   S.outbox.push({ run_id: S.run_id, event: 'SECURITY_REASSESSED', event_id: `security-reassessed-${S.run_id}-${S.seq}`, candidate_id: candidate,
     outcome: res.outcome, plan_digest: sec.tuple.plan_digest, catalog_digest: sec.tuple.catalog_digest, addendum_set: sec.tuple.addendum_set,
-    timestamp: new Date().toISOString() });
+    timestamp: new Date().toISOString(), ...(res.dispositions_used?.length ? { dispositions: res.dispositions_used } : {}) });
   return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals };
 }
 

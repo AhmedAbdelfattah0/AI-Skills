@@ -30,11 +30,13 @@ try { DEFAULT_EVALUATOR = await import(EVALUATOR_URL); } catch { DEFAULT_EVALUAT
  * disposition_missing, disposition_duplicate, disposition_unknown (the obligation matrix) and
  * surface_inventory_incomplete (a signalling path written by the plan that no surface lists) and
  * citation_missing (a surface-fact citation whose file, or `:symbol` text, is not in the tree checked).
+ * STAB S4 (opt-in, `allowDispositions`): disposition_inadmissible, disposition_stale, disposition_unbound (a
+ * "no runtime boundary" disposition that may not, or no longer, close its new-route signal).
  */
 export const SECURITY_CODES = ['catalog_missing', 'catalog_invalid', 'bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch',
   'fact_uncited', 'control_unpaired', 'classification_missing', 'plan_block_missing', 'plan_block_invalid',
   'surface_fact_not_lowerable', 'surface_fact_ungated', 'surface_fact_reinflates', 'disposition_missing', 'disposition_duplicate',
-  'disposition_unknown', 'surface_inventory_incomplete', 'citation_missing'];
+  'disposition_unknown', 'surface_inventory_incomplete', 'citation_missing', 'disposition_inadmissible', 'disposition_stale', 'disposition_unbound'];
 const EXIT_ONE = new Set(['bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch']);
 export const OUTCOMES = ['UNCHANGED', 'ADD_CONTROLS', 'REAPPROVAL'];
 
@@ -1009,6 +1011,80 @@ export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
   return [...by].map(([path, kinds]) => ({ path, kinds })).sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
+// ---------------------------------------------------------------------------------------------------- dispositions (S4)
+/**
+ * STAB S4 (P6 S, PROVISIONAL, UNQUALIFIED): the "no runtime boundary" disposition. It closes ONE kind of signal, a
+ * new-route signal raised by added LINES only, and only when every route-shaped match on every such line is a client
+ * member call `<receiver>.api.<verb>(` whose arguments close on that line and hold no handler (`=>`, `function`).
+ * Never: a path-raised signal (route directory or route file name), an auth or migration signal, a bare or member
+ * `app|router|server|route` registration, a decorator or exported handler, any ROUTE_LINE_V3 form, a call that does
+ * not close on its line. The detector is untouched (the signal is still raised and reported); there is no filename
+ * rule (owner Option 2). The engine issues a brief per open new-route signal whose digest binds (signal, path,
+ * candidate, matched lines); a disposition quotes that digest plus an independent reviewer and basis, so an edited
+ * file or another candidate is stale. The reviewer is asserted text, as authorized_by is (A16 weakness).
+ */
+const [, NEW_ROUTE_PATH, NEW_ROUTE_LINE] = RULES.find(([k]) => k === 'new-route');
+const NEW_ROUTE_ALL = new RegExp(NEW_ROUTE_LINE.source, 'g');
+const routeLine = (l) => NEW_ROUTE_LINE.test(l) || ROUTE_LINE_V3.test(l);
+/** The arguments of the call opened at `from` (just after its '('), or null when it does not close on the line. */
+function callArgs(l, from) {
+  let depth = 0, q = null;
+  for (let i = from; i < l.length; i++) {
+    const ch = l[i];
+    if (q) { if (ch === '\\') i++; else if (ch === q) q = null; continue; }
+    if (ch === "'" || ch === '"' || ch === '`') q = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')') { if (depth === 0) return l.slice(from, i); depth--; }
+  }
+  return null;
+}
+/** Why `l` (a route-shaped added line) is not a client-only line, or null when every route-shaped match is a client call. */
+function serverForm(l) {
+  if (ROUTE_LINE_V3.test(l)) return 'a format-3 route registration form';
+  let m, any = false;
+  NEW_ROUTE_ALL.lastIndex = 0;
+  while ((m = NEW_ROUTE_ALL.exec(l))) {
+    any = true;
+    if (m[1] !== 'api') return m[1] ? `a ${m[1]}.${m[2]}( registration` : 'a decorator or exported route handler';
+    if (l[m.index - 1] !== '.' || !/[\w$)\]]/.test(l[m.index - 2] ?? '')) return 'a bare api.<verb>( call (not a member of a client object)';
+    const args = callArgs(l, m.index + m[0].length);
+    if (args === null) return 'the call does not close on its line (cannot be verified)';
+    if (/=>|\bfunction\b/.test(args)) return 'a handler-shaped argument';
+  }
+  return any ? null : 'no route-shaped match';
+}
+/** The engine-issued brief for every OPEN new-route signal (class null) of `files`: admissible or not, with its digest. */
+function dispositionBriefs(signals, files, candidateId) {
+  return signals.filter((s) => s.kind === 'new-route' && s.class === null).map((s) => {
+    const f = files.find((x) => x.path === s.path);
+    const lines = (f?.added ?? []).filter(routeLine);
+    const b = s.path.split('/').pop().toLowerCase();
+    const why = NEW_ROUTE_PATH(s.path.toLowerCase(), b) ? 'raised by its path (route directory or route file name)'
+      : !lines.length ? 'no route-shaped added line' : lines.map(serverForm).find((x) => x !== null) ?? null;
+    return { signal_id: s.id, path: s.path, lines, admissible: why === null, ...(why ? { why } : {}),
+      brief_digest: sha(canon({ v: 1, signal_id: s.id, path: s.path, candidate_id: candidateId, lines })) };
+  });
+}
+const DISPOSITION_KEYS = ['signal_id', 'disposition', 'brief_digest', 'reviewer', 'basis'];
+/** Validate `list` against the briefs: the set of signal ids it closes, or a refusal (malformed, unbound, inadmissible, stale). */
+function checkDispositions(list, briefs, candidateId) {
+  if (!Array.isArray(list)) refuse('bad_input', 'dispositions must be an array');
+  const seen = new Set();
+  for (const d of list) {
+    if (!isObj(d) || Object.keys(d).length !== DISPOSITION_KEYS.length || !DISPOSITION_KEYS.every((k) => nonEmpty(d[k])) || d.disposition !== 'no-runtime-boundary' || seen.has(d.signal_id))
+      refuse('bad_input', `a disposition is exactly { ${DISPOSITION_KEYS.join(', ')} } with disposition 'no-runtime-boundary', a non-empty independent reviewer and basis, once per signal`);
+    seen.add(d.signal_id);
+  }
+  if (list.length && !nonEmpty(candidateId)) refuse('disposition_unbound', 'a disposition is bound to a candidate: reassess has no candidate_id');
+  for (const d of list) {
+    const b = briefs.find((x) => x.signal_id === d.signal_id);
+    if (!b) refuse('disposition_inadmissible', `${d.signal_id}: not an open new-route signal of this candidate (auth, migration and every other signal never close by a disposition)`);
+    if (!b.admissible) refuse('disposition_inadmissible', `${d.signal_id}: ${b.why}`);
+    if (d.brief_digest !== b.brief_digest) refuse('disposition_stale', `${d.signal_id}: the brief digest is not the engine's for this candidate and these lines (re-run reassess for a fresh brief)`);
+  }
+  return new Set(list.map((d) => d.signal_id));
+}
+
 // ---------------------------------------------------------------------------------------------------- reassess
 function globRe(glob) {
   let g = normPath(glob);
@@ -1103,7 +1179,7 @@ function withApprovedSurfaces(approved, inventory) {
 export function reassess(input = {}) {
   const r = resolveCatalog(input.catalog);
   if (r.refusal) return r.refusal;
-  let unclassifiedSignals = null;
+  let unclassifiedSignals = null, briefsOut = null;
   const res = asResult(() => {
     const { catalog, digest, evaluator: ev } = r;
     const vocab = catalog.fact_vocabulary;
@@ -1120,6 +1196,9 @@ export function reassess(input = {}) {
       refuse('bad_input', 'changed.contract_paths (the Design Contract paths) is required');
     }
     const files = normFiles(changed.files);
+    // S4: dispositions only when the caller enables them (an approved stage policy with no_runtime_boundary); never ignored.
+    const allowDisp = input.allowDispositions === true;
+    if (input.dispositions !== undefined && !allowDisp) refuse('bad_input', 'dispositions need allowDispositions (an approved stage policy with no_runtime_boundary)');
     if (block.policy === 3) dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');
     const contract = changed.contract_paths.map(globRe);
     const addenda = input.addenda ?? [];
@@ -1159,9 +1238,14 @@ export function reassess(input = {}) {
     const outside = uniqSorted([...files.map((f) => f.path), ...surfaces.map((s) => s.path)].filter((p) => !contract.some((re) => re.test(p))));
     for (const p of outside) { basis.push({ kind: 'out-of-plan-path', path: p }); signals.push({ id: `out-of-plan-path@${p}`, kind: 'out-of-plan-path', path: p, class: null }); }
     signals.sort((a, b) => (a.id < b.id ? -1 : 1));
+    // S4: a disposition is validated only when nothing forces REAPPROVAL (it never clears a REAPPROVAL basis).
+    const candidateEarly = input.candidate_id ?? inv.candidate_id ?? null;
+    if (allowDisp) briefsOut = dispositionBriefs(signals, files, candidateEarly);
+    const disposed = allowDisp && !basis.length ? checkDispositions(input.dispositions ?? [], briefsOut, candidateEarly) : new Set();
     if (block.policy === 3 && !basis.length) {
       // C5 inventory completeness: a signalling path the plan writes (test-named or not) must be a listed surface (typed, before classification).
-      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path) });
+      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path) })
+        .map((g) => ({ ...g, kinds: g.kinds.filter((k) => !disposed.has(`${k}@${g.path}`)) })).filter((g) => g.kinds.length);
       if (gaps.length) refuse('surface_inventory_incomplete', ...gaps.map((g) => `${g.path}: ${g.kinds.join(', ')} with no surface at its path (add one to the inventory)`));
     }
 
@@ -1175,7 +1259,7 @@ export function reassess(input = {}) {
     // signal, or one on an approved surface's path; its facts are merged below whether or not it closed anything.
     const approvedPaths = new Set(block.surfaces.map((s) => normPath(s.path)));
     const dismissed = (s) => byId.has(s.id) && !(SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));
-    const unclassified = open.filter((s) => !dismissed(s)).map((s) => s.id);
+    const unclassified = open.filter((s) => !dismissed(s) && !disposed.has(s.id)).map((s) => s.id);
     if (!basis.length && unclassified.length) { unclassifiedSignals = { signals, unclassified }; refuse('classification_missing', ...unclassified.map((id) => `unclassified signal ${id}`)); }
     const used = classifications.filter((c) => signals.some((s) => s.id === c.signal_id));
 
@@ -1204,6 +1288,8 @@ export function reassess(input = {}) {
       catalog_digest: digest, approved_catalog_digest: block.catalog_digest,
       effective_addendum_digest: sha(canon(addendaPairs)),
       ...(block.policy === 3 ? { reopened_pairs: block.na_pairs.map((n) => n.pair_id).filter((id) => pairs.includes(id)) } : {}),
+      ...(allowDisp ? { dispositions_used: (input.dispositions ?? []).filter((d) => disposed.has(d.signal_id))
+        .map(({ signal_id, brief_digest, reviewer, basis: why }) => ({ signal_id, brief_digest, reviewer, basis: why })) } : {}),
     };
     if (outcome === 'ADD_CONTROLS') {
       out.addendum = { pairs: delta_pairs, controls: uniqSorted(delta_pairs.map((p) => parsePairId(p).control_id)), catalog_digest: digest, candidate_id,
@@ -1213,6 +1299,7 @@ export function reassess(input = {}) {
     return out;
   });
   if (res.ok === false && res.code === 'classification_missing' && unclassifiedSignals) Object.assign(res, unclassifiedSignals);
+  if (res.ok === false && briefsOut && ['classification_missing', 'surface_inventory_incomplete', 'disposition_inadmissible', 'disposition_stale'].includes(res.code)) res.disposition_briefs = briefsOut;
   return res;
 }
 

@@ -52,6 +52,7 @@ import { samePath } from './lib/run-log-paths.mjs';
 import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
+import { stageOn, parseStagePolicy, feasibility, initialStage, verifyObligation } from './stage-obligations.mjs';
 
 export { writeStateAtomic } from './engine-io.mjs';
 /** The ticket's engine lock (S1: in the run's placement: an existing run's, else the default of a new run, durable). */
@@ -390,6 +391,19 @@ async function bindObligations(sp, cat, block, nodes, root) {
 }
 
 /**
+ * STAB S4 (P6): the stage policy and plan feasibility of a config.stagePolicy run, run by BOTH preflight and init (so an
+ * unpreflighted infeasible plan is refused at init). Null for every other run (frozen semantics). The policy is the
+ * approved narrative's stage-policy-v1 line only (no DAG field, no gate input, no RUN-STATE line carries a deferral).
+ */
+async function bindStage(ctx, config, nodes, narrative, text) {
+  if (!stageOn(config)) return null;
+  const policy = parseStagePolicy(narrative, { ticket: ctx.ticket });
+  const sp = config.securityPolicy === 2 ? await securityPlan() : null;
+  const f = feasibility({ policy, config, nodes, ticket: ctx.ticket, repoRoot: ctx.repoRoot, sp, block: sp ? sp.parsePlanSecurityBlock(text) : null, env: ctx.env });
+  return { policy, ...f };
+}
+
+/**
  * F12a plan-time preflight: the checks `init` runs on the plan and DAG (validateEngineDag, bindSecurity, and for a
  * format-3 block the obligation matrix and inventory completeness), callable BEFORE approval: no lock, no state, no
  * START and no write. It also refuses a node that reads what a transitive dependent writes (dag_read_write_dependency,
@@ -413,8 +427,11 @@ export async function preflight(ctx) {
   const block = sp.parsePlanSecurityBlock(text);
   const m = sp.obligationMatrix(sp.loadCatalog(catalogOptions(ctx)), block);
   if (!m.ok) throw coded(m.code, `the §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
+  const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
   return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
-    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix };
+    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix,
+    ...(stage ? { stage: { policy_digest: stage.policy.policy_digest, merge_stage: stage.policy.merge_stage, obligations: stage.policy.deferred.map(d => d.row),
+      artifacts: stage.policy.artifacts, signal_prescan: stage.signal_prescan } } : {}) };
 }
 
 /**
@@ -499,6 +516,7 @@ async function initLocked(ctx, placement) {
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
+    const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
     // S-28a: trust on first use from ONE snapshot of the remote's URLs (engine-identity.mjs bindIdentity): remote_ambiguous, or
     // identity_unbound when it names no repository on github.com (nothing written); the pin is then read by that snapshot only
@@ -521,7 +539,7 @@ async function initLocked(ctx, placement) {
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
       ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable'), ...(testKinds ? { test_kinds: testKinds } : {}),
-      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}) };
+      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
@@ -544,6 +562,7 @@ export async function status(ctx) {
   const out = view(E, drift(E, { mutate: false }));
   if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
   if (E.S.base) out.base = baseStatus(E); // S-12: advisory only (never a judgment), and only for a pinned run
+  if (E.S.stage) out.stage = { merge_stage: E.S.stage.merge_stage, obligations: E.S.stage.obligations }; // S4: open obligations survive every resume
   return out;
 }
 
@@ -909,6 +928,27 @@ export function gateAuditFields(kind, input, v) {
   return out;
 }
 
+/**
+ * STAB S4: record NEW evidence for a deferred stage (stage-obligations.mjs verifyObligation). Evidence, never authority:
+ * the OBLIGATION_VERIFIED event carries no authorized_by. A refusal writes nothing.
+ */
+export async function obligationVerify(ctx) {
+  return locked(ctx, async (E) => {
+    if (!E.S.stage) throw coded('bad_input', 'obligation-verify needs a DAG with config.stagePolicy');
+    const unbound = verifyBinding(E);
+    if (unbound.length) return { obligation: ctx.row, ok: false, code: unbound[0].code, reasons: unbound.map(j => j.reason) };
+    await deliver(E);
+    let ev;
+    try { ev = verifyObligation(E.S, ctx.row, ctx.evidence); }
+    catch (e) { if (typeof e.code === 'string' && e.code.startsWith('obligation_')) return { obligation: ctx.row, ok: false, code: e.code, reasons: [e.message] }; throw e; }
+    note(E.S, 'OBLIGATION_VERIFIED', { row: ctx.row, candidate_id: ev.candidate_id });
+    E.S.outbox.push({ run_id: E.S.run_id, event_id: `obligation-verified-${E.S.run_id}-${ctx.row}-${E.S.seq}`, ...ev, timestamp: new Date().toISOString() });
+    await E.commit();
+    await deliver(E);
+    return { obligation: ctx.row, ok: true, code: 'obligation_verified', ...ev };
+  });
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -918,6 +958,7 @@ export async function gate(ctx) {
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
       if (ctx.gate === 'review' && input.units_consumed !== undefined && !unitReviewOn(E.S)) throw coded('bad_input', 'gate review: units_consumed needs a DAG with config.unitReview');
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
+      if (input.dispositions !== undefined && !E.S.stage) throw coded('bad_input', 'gate reassess: dispositions need a DAG with config.stagePolicy');
       await deliver(E);
       reconcileReviews(E);
       const c = baseCandidate(ctx.repoRoot, E.S, E.S.pinned_exclusions);
@@ -956,9 +997,9 @@ async function main(argv) {
     if (extra.length || !flags.repo || !flags.ticket || !flags.dag) throw new Error('Usage: run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]');
     return preflight({ repoRoot: resolve(flags.repo), ticket: flags.ticket, dagFile: resolve(flags.dag), ...(flags.plan ? { planFile: resolve(flags.plan) } : {}) });
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from', 'deadlines'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from', 'deadlines', 'id'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate' || cmd === 'obligation-verify') !== Boolean(flags.input) || (cmd === 'obligation-verify') !== Boolean(flags.id)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]\n       run-engine.mjs obligation-verify --repo <dir> --ticket <key> --run-id <id> --id <row> --input <evidence-json> (config.stagePolicy run)');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
@@ -967,6 +1008,8 @@ async function main(argv) {
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
+    'obligation-verify': () => { let evidence; try { evidence = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`obligation-verify input ${flags.input}: ${e.message}`); }
+      return obligationVerify({ ...ctx, row: flags.id, evidence }); },
     archive: () => archive({ ...ctx, ...(flags.retire !== undefined ? { retire: flags.retire === 'true' ? true : flags.retire } : {}),
       ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id', 'retire'].includes(k)) ? { extra: 1 } : {}) }),
     adopt: () => adopt({ ...ctx, from: flags.from, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id', 'from'].includes(k)) ? { extra: 1 } : {}) }),
@@ -983,6 +1026,6 @@ async function main(argv) {
 if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true))) process.exitCode = 2;
+    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.obligation !== undefined && !r.ok)) process.exitCode = 2;
   }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 }
