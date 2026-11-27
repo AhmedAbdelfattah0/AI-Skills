@@ -46,7 +46,7 @@ const POLICY_236 = () => ({
   merge_stage: 'merge', stages: ['local', 'merge'],
   rows: [{ id: 'R1', check: 'unit + negative spec', stage: 'local' }, { id: 'R2', check: 'production RLS read-only probe', stage: 'production' }],
   deferred: [{ row: 'R2', stage: 'production', environment: 'production', subject: 'api release of this candidate',
-    required_evidence: 'read-only probe output against production after deploy', tracker_ref: 'SCRUM-430' }],
+    required_evidence: 'read-only probe output against production after deploy', tracker_ref: 'TRK-1' }],
 });
 
 // ---- a legacy (pre-cutoff, no security policy) run: enough for obligations and SHIP_READY ----
@@ -96,7 +96,7 @@ test('[P6-N1] a deferral with no trigger and no tracker is refused (preflight an
   const good = stageRun(t);
   okc(good.cli('init', { dag: good.dagFile }), 'init with a tracker');
   const ob = good.readState().stage.obligations;
-  assert.deepEqual(ob.map((o) => [o.row, o.status, o.deferred_stage, o.verified_through, o.tracker_ref]), [['R2', 'open', 'production', 'merge', 'SCRUM-430']]);
+  assert.deepEqual(ob.map((o) => [o.row, o.status, o.deferred_stage, o.verified_through, o.tracker_ref]), [['R2', 'open', 'production', 'merge', 'TRK-1']]);
   const trig = POLICY_236(); delete trig.deferred[0].tracker_ref; trig.deferred[0].trigger = 'production deploy workflow run';
   const tf = stageRun(t, { policy: trig });
   okc(tf.cli('init', { dag: tf.dagFile }), 'init with a trigger');
@@ -168,7 +168,7 @@ test('[P6-N3] a rebased or changed candidate re-binds the obligation (lineage ke
 test('[P6-N4] the deferred stage cannot be marked verified without new evidence for the bound candidate', { skip: WIN_SKIP }, async (t) => {
   const two = POLICY_236();
   two.rows.push({ id: 'R3', check: 'production email DKIM check', stage: 'production' });
-  two.deferred.push({ row: 'R3', stage: 'production', environment: 'production', subject: 'api release of this candidate', required_evidence: 'DKIM lookup output', tracker_ref: 'SCRUM-431' });
+  two.deferred.push({ row: 'R3', stage: 'production', environment: 'production', subject: 'api release of this candidate', required_evidence: 'DKIM lookup output', tracker_ref: 'TRK-2' });
   const fx = stageRun(t, { policy: two });
   okc(fx.cli('init', { dag: fx.dagFile }), 'init');
   const ev = join(fx.root, 'ev.json');
@@ -318,7 +318,7 @@ test('[P6-OFF] without config.stagePolicy every frozen semantics holds: prefligh
 
 /** Format-2 plan over the gated catalog with one approved request-handler surface; the client file is new. */
 const f2 = () => SP.selectControls(GC, { security_policy: 2, surfaces: [OB.surf('H', 'request-handler', 'src/h.ts')], facts: OB.TRUE3, evidence: OB.cite3(OB.TRUE3) });
-const CLIENT = 'apps/superadmin/src/app/features/settings/settings.service.ts'; // the 124 file (StoreCraft SCRUM-124 tree)
+const CLIENT = 'apps/admin/src/app/features/settings/settings.service.ts'; // the shape of the replayed client file
 const CLIENT_LINE = '      const settings = await this.api.get();';
 const CAND = 'c'.repeat(64);
 const rea = (files, { dispositions, allow = true, plan, candidate = CAND, format = 2, classifications = [] } = {}) => format === 3
@@ -331,7 +331,7 @@ const dispose = (b, over = {}) => ({ signal_id: b.signal_id, disposition: 'no-ru
 
 test('[P6-N7a] 124: `this.api.get(` in a client/test file is dismissible with an engine-issued, candidate-bound, independently reviewed disposition (format 2 and 3)', () => {
   for (const format of [2, 3]) {
-    for (const path of [CLIENT, 'apps/superadmin/src/app/features/settings/settings-api.service.spec.ts']) {
+    for (const path of [CLIENT, 'apps/admin/src/app/features/settings/settings-api.service.spec.ts']) {
       const files = [{ path, added: ['import { inject } from "@angular/core";', CLIENT_LINE, "    expect(this.api.get).toHaveBeenCalled();",
         "    this.api.get(`/settings/${id}`, { params: { a: '1, 2' } }).subscribe((r) => done(r));"] }];
       const id = `new-route@${path}`;
@@ -362,6 +362,9 @@ test('[P6-N7b] a seeded server route can NEVER close by the disposition: bare, m
     ['src/server/settings.ts', ['this.api.get(']], // a call that does not close on its line cannot be verified
     ['src/server/settings.ts', ["this.api.get('/settings', this.handle);"]], // a non-literal second argument could be a handler
     ['src/server/settings.ts', ["this.api.post('/settings', handler)"]],
+    ['src/server/settings.ts', ["this.api.route('/settings').get(handler);"]], // route() chains register handlers
+    ['src/server/settings.ts', ["this.api.route({ method: 'GET', url: '/x', handler: h });"]],
+    ['src/server/settings.ts', ["this.api.all('/x');"]],
     ['src/server/settings.ts', ["this.api.get('/x'); fastify.get('/y', h);"]],
     ['src/server/settings.ts', ['@Get(":id")', CLIENT_LINE]],
     ['src/server/settings.ts', ['export async function GET(req) {', CLIENT_LINE]],
@@ -453,4 +456,16 @@ test('[P6-N7e] engine: without the approved no_runtime_boundary field a disposit
   assert.equal('disposition_briefs' in first.out, false);
   const r = fx.gate('reassess', { dispositions: [{ signal_id: `new-route@${client}`, disposition: 'no-runtime-boundary', brief_digest: 'sha256:' + '0'.repeat(64), reviewer: 'x', basis: 'y' }] });
   assert.equal(r.out?.code, 'disposition_not_approved', r.stdout);
+});
+
+test('[P6-N8] a flagged run whose state lost its stage record never resumes (no SHIP_READY without the obligations)', { skip: WIN_SKIP }, async (t) => {
+  const fx = stageRun(t);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init');
+  fx.editState((s) => { delete s.stage; });
+  const st = fx.cli('status');
+  assert.notEqual(st.status, 0);
+  assert.match(st.stderr, /stage_state_missing/);
+  const sr = fx.gate('ship-ready', {});
+  assert.equal(sr.out?.code ?? (/stage_state_missing/.test(sr.stderr) ? 'stage_state_missing' : sr.stdout), 'stage_state_missing');
+  assert.equal(runStateEvents(fx.planFile).filter((e) => e.event === 'SHIP_READY').length, 0);
 });

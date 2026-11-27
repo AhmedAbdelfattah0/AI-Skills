@@ -1062,6 +1062,7 @@ function serverForm(l) {
   while ((m = NEW_ROUTE_ALL.exec(l))) {
     any = true;
     if (m[1] !== 'api') return m[1] ? `a ${m[1]}.${m[2]}( registration` : 'a decorator or exported route handler';
+    if (m[2] === 'route' || m[2] === 'all') return `api.${m[2]}( registers a handler (only HTTP verb calls are client calls)`;
     if (l[m.index - 1] !== '.' || !/[\w$)\]]/.test(l[m.index - 2] ?? '')) return 'a bare api.<verb>( call (not a member of a client object)';
     const args = callArgs(l, m.index + m[0].length);
     if (args === null) return 'the call does not close on its line (cannot be verified)';

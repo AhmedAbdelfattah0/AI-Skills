@@ -168,6 +168,9 @@ function open(ctx, prefer) {
       // V0 single-entry invariant (R1), re-checked on every load: P4r refuses two RECORDS, not two DECLARED entries
       if (E.S.test_kinds && evidenceEntries(E.S.config).map(([n]) => n).join() !== E.S.test_kinds.entry)
         throw coded('multi_entry_unsupported_v0', `the run's evidence entries (${evidenceEntries(E.S.config).map(([n]) => n).join(', ') || 'none'}) are not exactly its bound entry ${E.S.test_kinds.entry}`);
+      // STAB S4: config.stagePolicy and S.stage come together or not at all (a dropped obligation record never ships)
+      if ((E.S.config?.stagePolicy !== undefined) !== (E.S.stage !== undefined))
+        throw coded('stage_state_missing', 'config.stagePolicy and the stage obligation state disagree: a partial stage record is never resumed');
       // S-12: the pinned-base flag of the run's version, S.base and config.pinnedBase come together or not at all (no partial pin is resumed)
       // (S-12 Round 1: presence is the KEY, so a null/false/0 S.base counts; a pin must be well-formed, never read as no pin)
       if (new Set([E.policy.semantics.pinnedBase === true, Object.hasOwn(E.S, 'base'), pinnedBaseOn(E.S)]).size !== 1)
@@ -895,7 +898,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'stage_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;

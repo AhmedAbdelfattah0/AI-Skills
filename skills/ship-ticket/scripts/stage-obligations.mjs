@@ -14,7 +14,7 @@
  *   run at init, so an unpreflighted infeasible plan is refused there too.
  *
  * Factory recording does NOT enforce deployment. An open obligation stops nothing outside this run until the deploy
- * boundary (for StoreCraft, the GitHub `production` environment) consumes it; the tracker/trigger is how it surfaces.
+ * boundary (for example a hosted `production` deployment environment) consumes it; the tracker/trigger is how it surfaces.
  * The engine writes no authority event: OBLIGATION_VERIFIED is evidence (no authorized_by), never acceptance.
  */
 import { accessSync, statSync, constants } from 'node:fs';
