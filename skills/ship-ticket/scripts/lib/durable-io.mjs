@@ -58,7 +58,7 @@ import { setTimeout as timerSleep } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { processInfo, differentStart } from '../engine-quiesce.mjs';
+import { processInfo, startRecord, recordDiffers } from '../engine-quiesce.mjs';
 
 /** Same shape as engine-dag.mjs `coded` (kept local: engine-dag imports harness.mjs and gate.mjs). */
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
@@ -133,7 +133,8 @@ const NO_LINK = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS', 'E
 const MARKER_DEPTH = 3;
 
 /**
- * S1 (P1, N8): exclusive claim of the recovery marker `path` with record `rec` ({ pid, process_start_time, host, nonce }).
+ * S1 (P1, N8): exclusive claim of the recovery marker `path` with record `rec` ({ pid, process_start_time, host, nonce,
+ * start_identity? }: the same identity representation as the lock record).
  * Returns { release() } (removes the marker only while it is still ours). The marker is published complete or not at all:
  * written to a private temp file, then hard-linked to `path` (link fails with EEXIST when it exists), so a kill -9 never
  * leaves a partial marker. An existing marker is refused (`lock_held`) unless it is PROVEN stale: same host (a marker
@@ -163,7 +164,7 @@ function claimMarker(path, rec, info, host, depth = 0, link = linkSync) {
     if (!m || !Number.isInteger(m.pid) || m.pid <= 0 || m.pid > 0x7fffffff || typeof m.nonce !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(m.nonce)) throw refuse('unreadable');
     if ((m.host ?? host) !== host) throw refuse(`written on host ${m.host}`);
     const o = info(m.pid) ?? { alive: false, startTime: null };
-    const stale = !o.alive || differentStart(o, m.process_start_time ?? null);
+    const stale = !o.alive || recordDiffers(o, m);
     if (!stale || depth >= MARKER_DEPTH) throw refuse('');
     const sub = claimMarker(`${path}.${m.nonce}`, rec, info, host, depth + 1, link);
     try {
@@ -267,7 +268,10 @@ export async function acquireLock(ctx, options = {}) {
   const info = ctx.processInfo ?? processInfo;
   const pid = ctx.pid ?? process.pid;
   const host = ctx.host ?? hostname();
-  mine = { pid, process_start_time: info(pid)?.startTime ?? null, host, run_id: ctx.runId, nonce: randomUUID() };
+  // S1: process_start_time byte-compatible with 705ae1b (its local `ps lstart`), the canonical form beside it (start_identity)
+  const started = startRecord(info(pid));
+  mine = { pid, process_start_time: started.process_start_time, host, run_id: ctx.runId, nonce: randomUUID(),
+    ...(started.start_identity !== undefined ? { start_identity: started.start_identity } : {}) };
   mkdirSync(dirname(lockFile), { recursive: true });
   const create = () => {
     try { writeFileSync(lockFile, JSON.stringify(mine), { flag: 'wx', mode: 0o600 }); }
@@ -297,9 +301,9 @@ export async function acquireLock(ctx, options = {}) {
     const other = info(held.pid) ?? { alive: false, startTime: null };
     // Recovery needs proof: a dead PID, or a live PID whose known start time differs (reuse). A live
     // holder whose start time is unknown on either side is treated as the holder, never broken.
-    // S1 (m7): both forms are compared (canonical UTC and the pre-S1 local one), so a TZ/locale or format difference alone
-    // never proves reuse (engine-quiesce.mjs differentStart).
-    const reused = differentStart(other, held.process_start_time ?? null);
+    // S1: the canonical start_identity when the record has one, else the pre-S1 field in either form (engine-quiesce.mjs
+    // recordDiffers), so a TZ/locale or format difference alone never proves reuse.
+    const reused = recordDiffers(other, held);
     if (other.alive && !reused) throw coded('lock_held', `pid ${held.pid} holds ${lockFile}`);
     step('hook');
     await boundary(ctx.hooks, 'lock-stale-observed', { lockFile, held });
@@ -307,7 +311,8 @@ export async function acquireLock(ctx, options = {}) {
     cancelFirst(); // after the await, before any state change
     // S1 (P1, N8): the marker records the recoverer's identity { pid, process_start_time, host, nonce }, so a recoverer killed
     // inside this window leaves a marker the next acquire can prove stale (claimMarker) instead of refusing it forever.
-    const claim = claimMarker(lockFile + '.recovery', { pid, process_start_time: mine.process_start_time, host, nonce: mine.nonce }, info, host, 0, seam?.link ?? linkSync);
+    const claim = claimMarker(lockFile + '.recovery', { pid, process_start_time: mine.process_start_time, host, nonce: mine.nonce,
+      ...(mine.start_identity !== undefined ? { start_identity: mine.start_identity } : {}) }, info, host, 0, seam?.link ?? linkSync);
     try {
       let current = null;
       try { current = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { /* removed or rewritten */ }

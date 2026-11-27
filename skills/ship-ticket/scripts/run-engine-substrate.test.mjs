@@ -536,3 +536,61 @@ test('deadline record: an unknown boot id measures nothing and says so; a legacy
   assert.equal(a.deadline.start_ns, '42');
   assert.equal(a.deadline.measurement, 'unqualified');
 });
+
+// ---------------------------------------------------------------- round-3 recovery (RCA-S1-ROUND2)
+
+/**
+ * The lock-recovery decision of the FROZEN engine (705ae1b lib/durable-io.mjs acquireLock), copied verbatim: its processInfo
+ * reads `ps -o lstart=` under the inherited environment and compares the record's `process_start_time` raw.
+ */
+function frozenRefuses(lockFile, env) {
+  const held = JSON.parse(readFileSync(lockFile, 'utf8'));
+  let alive;
+  try { process.kill(held.pid, 0); alive = true; } catch (e) { alive = e.code === 'EPERM'; }
+  const r = alive ? spawnSync('ps', ['-o', 'lstart=', '-p', String(held.pid)], { encoding: 'utf8', timeout: 5000, env }) : null;
+  const other = { alive, startTime: r && r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null };
+  const reused = other.startTime !== null && (held.process_start_time ?? null) !== null && other.startTime !== held.process_start_time;
+  return other.alive && !reused; // true: lock_held (the frozen engine leaves the live holder alone)
+}
+
+for (const placement of ['legacy', 'durable']) {
+  test(`mixed versions (${placement} placement): a frozen 705ae1b reader under a non-UTC TZ refuses to steal a live S1 holder's lock`, { skip: SKIP }, async (t) => {
+    const fx = fixture(t, { config: {} });
+    if (placement === 'legacy') fx.env.SHIP_TICKET_PLACEMENT = 'legacy';
+    assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+    const lockFile = placement === 'legacy' ? gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.lock') : join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'lock');
+    assert.equal(existsSync(stateOf(fx.repo)), true);
+    const TZ = 'Asia/Karachi', env = { ...process.env, TZ };
+    const ready = join(fx.root, 'held');
+    const holder = spawn(process.execPath, ['--input-type=module', '-e', `import { acquireLock } from ${JSON.stringify(DURABLE_IO)};
+import { writeFileSync } from 'node:fs';
+await acquireLock({ lockFile: ${JSON.stringify(lockFile)}, runId: 'run-1' }); writeFileSync(${JSON.stringify(ready)}, ''); setTimeout(() => {}, 600000);`],
+    { stdio: 'ignore', env });
+    t.after(() => { try { holder.kill('SIGKILL'); } catch { /* gone */ } });
+    assert.ok(await waitUntil(() => existsSync(ready), 20000), 'the S1 holder took the lock');
+    assert.equal(frozenRefuses(lockFile, env), true, 'the frozen reader sees the live S1 holder as the holder, never as a reused pid');
+    const rec = readJson(lockFile);
+    assert.equal(typeof rec.start_identity, 'string', 'the canonical identity is a separate field');
+    assert.notEqual(rec.process_start_time, rec.start_identity, `${TZ} is not UTC: the two forms differ`);
+  });
+}
+
+test('C-M1: a pre-S1 / escape-hatch archive (policy 1-12) is adoptable into a new default (durable, 13-24) run', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: {}, commit: true });
+  fx.env.SHIP_TICKET_PLACEMENT = 'legacy';
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.equal(fx.cli('drive').status, 0);
+  assert.equal(readJson(gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json')).policy_version, 1);
+  const arch = fx.cli('archive', { retire: 'true' });
+  assert.equal(arch.status, 0, arch.stderr);
+  delete fx.env.SHIP_TICKET_PLACEMENT;
+  const { narrativeDigest } = await import('./engine-test-fixture.mjs');
+  fx.appendRunState({ run_id: 'run-2', event: 'START', timestamp: '2026-11-05T00:00:00Z', approved_plan_digest: narrativeDigest(readFileSync(fx.planFile, 'utf8')) });
+  const init2 = fx.cli('init', { dag: fx.dagFile }, { runId: 'run-2' });
+  assert.equal(init2.status, 0, init2.stderr);
+  assert.equal(readJson(durableState(fx.repo)).policy_version, 13, 'the new run is a default durable run');
+  const a = fx.cli('adopt', { from: arch.out.archive }, { runId: 'run-2' });
+  assert.equal(a.status, 0, a.stdout + a.stderr);
+  assert.equal(a.out.outcome, 'adopted');
+  assert.deepEqual(a.out.adoption.adopted, ['a']);
+});

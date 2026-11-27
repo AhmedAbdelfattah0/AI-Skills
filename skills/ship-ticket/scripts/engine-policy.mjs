@@ -32,7 +32,8 @@ export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.
   12: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true }),
   // S1 (P1): 13-24 are 1-12 plus durableRun (hand-coded, as S-12's and S-28a's rows): the run's state, log, usage, attempts
   // and lock live in <git-common-dir>/ai-skills/ship-ticket/runs/<ticket>/ (lib/run-placement.mjs) and every launched
-  // attempt carries a persisted deadline. An engine without S1 supports none of 13-24 and refuses such a run.
+  // attempt carries a persisted deadline. An engine without S1 supports none of 13-24, but it never sees such a run either: it
+  // looks only at the legacy placement (no_state), so roll back only after durable runs are finished or retired.
   13: Object.freeze({ durableRun: true }), 14: Object.freeze({ testKinds: true, durableRun: true }),
   15: Object.freeze({ securityObligations: true, durableRun: true }), 16: Object.freeze({ testKinds: true, securityObligations: true, durableRun: true }),
   17: Object.freeze({ pinnedBase: true, durableRun: true }), 18: Object.freeze({ testKinds: true, pinnedBase: true, durableRun: true }),

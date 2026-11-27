@@ -42,6 +42,28 @@ export const sameStart = (now, recorded) => recorded != null && now?.startTime !
  */
 export const differentStart = (now, recorded) => recorded != null && now?.startTime != null && !sameStart(now, recorded);
 
+/**
+ * S1 (round-3 recovery): the start-time identity of a lock or recovery-marker record. `process_start_time` keeps the exact
+ * representation 705ae1b writes (the inherited-environment `ps lstart` string), so an engine without S1 that compares it
+ * raw with its own local probe still sees a live holder as live. The canonical (TZ/locale independent) form goes in a
+ * SEPARATE field, `start_identity`, read only by S1 readers. A probe stub without `startTimeLocal` (tests) writes its one
+ * form as `process_start_time`, as before.
+ */
+export const startRecord = (now) => {
+  if (!now || now.startTime == null) return { process_start_time: null };
+  const local = now.startTimeLocal;
+  return local === undefined ? { process_start_time: now.startTime } : { process_start_time: local ?? null, start_identity: now.startTime };
+};
+/**
+ * Whether record `rec` ({ process_start_time, start_identity? }) is PROVEN to name another process than probe `now`: the
+ * canonical `start_identity` when the record has it, else the pre-S1 field in either form (differentStart). An unknown
+ * start time on either side proves nothing (the holder is kept).
+ */
+export function recordDiffers(now, rec) {
+  if (rec?.start_identity != null && now?.startTime != null) return now.startTime !== rec.start_identity;
+  return differentStart(now, rec?.process_start_time ?? null);
+}
+
 /** Start time of a just-launched group leader, recorded on its attempt as `leader_start` (null when unknowable). */
 export const leaderStart = (pid) => (pid ? processInfo(pid).startTime : null);
 

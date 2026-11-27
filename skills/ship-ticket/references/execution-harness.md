@@ -385,6 +385,15 @@ To roll back, revert the PR and check out the earlier commit in the installed ch
 (`git -C ~/.ai-skills checkout <prior main>`). Runs that the newer engine stamped with a version
 the older engine lacks are then refused, not resumed.
 
+S1 rollback boundary (durable runs, policy versions 13-24): an engine without S1 (for example 705ae1b) does not refuse a
+durable run; it cannot see it. It looks only at the legacy `--git-path` placement, so it reports `no_state` and would `init`
+a second, legacy run of the same START beside the durable one (duplicate dispatch); back on S1 the ticket is then refused
+as `state_placement_ambiguous`. Before rolling S1 back, finish or `archive --retire true` every durable run, and never
+re-`init` one on the older engine. A run that must stay readable by an engine without S1 is started under the escape hatch
+(`config.durableRun: false` in the DAG, or `SHIP_TICKET_PLACEMENT=legacy`). Lock and recovery-marker records keep the
+705ae1b representation of `process_start_time` and carry the S1 canonical start time in a separate `start_identity`, so an
+engine without S1 contending for the same lock still sees a live S1 holder as live.
+
 Reverting this change itself removes the check, and the extra fields become inert. Before a later
 slice adds version 2, that revert is safe. After it, the revert would let an engine that knows
 nothing of version 2 resume a version 2 run. Never revert a version table that is already in use.
@@ -621,7 +630,8 @@ state, the state last, into `<archive>/retired/`, so a new run of the ticket can
 **Run adoption (`adopt`, S-13a, same base).** A new run can take over the still-valid work of an archived run of the same
 ticket and approved plan instead of re-dispatching it. Flow: `archive --retire true` the old run; the owner appends a new
 `START` of the new run for the same narrative (that START is the approval: `adopt` has no authority of its own); `init` the
-new run; `run-engine.mjs adopt --from <archive dir>`; then `drive`. `adopt` runs only right after `init` (zero attempts, every
+new run; `run-engine.mjs adopt --from <archive dir>`; then `drive`. Placement is the adopting run's own property (S1): a pre-S1
+or escape-hatch archive (policy 1-12) is adoptable into a default durable run (13-24) and back. `adopt` runs only right after `init` (zero attempts, every
 node pending, no RED, freeze, review or earlier adoption: else `adoption_window_closed`, also what a second or concurrent
 `adopt` gets) and writes one atomic commit or nothing. The source must be FINAL: the completed `archive --retire true` of its
 run (retire record and retired state present) holding that run's latest state; an earlier or plain `archive`, a retire that
