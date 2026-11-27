@@ -24,6 +24,10 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fixture, passReview, failReview, confirmReview, narrativeDigest, BEGIN, END } from './engine-test-fixture.mjs';
+import { legacyPlacement } from './engine-test-fixture.mjs';
+// S1: this file pins frozen bytes (goldens, policy version numbers, origin/main differentials): its runs use the
+// documented legacy escape hatch (config.durableRun: false). The durable default is covered by run-engine-substrate.test.mjs.
+legacyPlacement();
 import * as SP from './security-plan.mjs';
 import * as io from './engine-io.mjs';
 import * as TKIO from './engine-test-kinds-io.mjs';

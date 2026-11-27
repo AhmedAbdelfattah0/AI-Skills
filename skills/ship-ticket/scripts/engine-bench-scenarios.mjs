@@ -393,13 +393,13 @@ async function s9(meter) {
     base_drift_report: { exit: drift.status, stdout: drift.stdout.trim().split('\n') },
     drive_after_move: { exit: after.status, outcome: after.out?.outcome ?? null, nodes: states(after.out), judgments: codes(after.out), writer_runs: { a: w.fx.runs('a').length, b: w.fx.runs('b').length } } };
 
-  // (2) RED provenance across runs: the archive copies state, engine log and usage, not the attempts directory.
+  // (2) RED provenance across runs: the archive copies state, engine log and usage, and (S1, a durable run) the attempts directory.
   const r = world(meter, { red: true, config: { base: 'target' }, nodes: [node('spec', { redSpecs: [{ file: 'spec/red.test.mjs', name: SPEC_NAME }] })] });
   r.fx.behave(plain('spec'));
   spawnSync('git', ['branch', 'target'], { cwd: r.fx.repo });
   r.init();
   const red = r.gate('red', { node: 'spec', command: 'unit' });
-  const attemptsDir = join(dirname(r.fx.stateFile()), 'T-1.attempts');
+  const attemptsDir = r.fx.attemptsDir();
   const live = existsSync(attemptsDir) ? readdirSync(attemptsDir).sort() : [];
   const redEvidence = r.fx.readState().gates?.red?.spec ?? null;
   // The base moves after RED was accepted. The engine's redValid/refreshRed invalidate RED only when a dependent of the RED node is checked or dispatched; this world has one RED node and no dependent, so that check never runs.
@@ -413,7 +413,7 @@ async function s9(meter) {
     red_invalidated: Boolean(invalid), base_moved: invalid?.base_moved ?? null, red_still_accepted: Boolean(r.fx.readState().gates?.red?.spec), ship_ready_reasons: shipReady.reasons.map(x => x.split(':')[0]), ship_ready_code: shipReady.code };
   const arch = r.cli('archive');
   const archived = arch.out?.archive ? readdirSync(arch.out.archive).sort() : [];
-  const archivedAttempts = arch.out?.archive ? archived.filter(n => n.includes('attempts')) : [];
+  const archivedAttempts = arch.out?.archive && existsSync(join(arch.out.archive, 'outputs', 'attempts')) ? readdirSync(join(arch.out.archive, 'outputs', 'attempts')) : []; // S1: durable runs archive attempts/
   const second = r.cli('init', { dag: r.fx.dagFile }, { runId: 'run-2' });
   const attemptId = redEvidence?.attempt_id ?? null;
   const redProvenance = { after_base_move: redAfterMove, red_attempt_output_live: Boolean(attemptId) && live.some(n => n.startsWith(attemptId)), red_gate: red.out?.code ?? null, red_evidence_keys: Object.keys(redEvidence ?? {}).sort(), attempt_files_before_archive: live.length > 0,
@@ -425,8 +425,8 @@ async function s9(meter) {
   return { shows, ok: baseMove.drive_before_move.nodes.b === 'pending' && baseMove.base_drift_report.exit === 1 && baseMove.base_drift_report.stdout[0] === 'base-drift: OVERLAP'
     && baseMove.drive_after_move.outcome === 'done' && baseMove.drive_after_move.judgments.length === 0
     && redAfterMove.red_invalidated === false && redAfterMove.red_still_accepted === true
-    && redProvenance.red_gate === 'red_accepted' && redProvenance.red_attempt_output_live === true && redProvenance.archive_contains_attempts === false
-    && redProvenance.archived_files.join() === 'engine.jsonl,manifest.json,state.json' && redProvenance.second_run_init.refused === 'state_exists' };
+    && redProvenance.red_gate === 'red_accepted' && redProvenance.red_attempt_output_live === true && redProvenance.archive_contains_attempts === true
+    && redProvenance.archived_files.join() === 'engine.jsonl,manifest.json,outputs,outputs.json,state.json' && redProvenance.second_run_init.refused === 'state_exists' };
 }
 
 async function s10(meter) {

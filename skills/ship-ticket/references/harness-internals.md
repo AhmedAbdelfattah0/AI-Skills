@@ -202,8 +202,9 @@ that survived a crashed gate, is not dispatched.
 `archive` paragraph, continued:
 
 Files are staged and published whole, so a failed copy leaves no numbered
-directory. `archive` copies only state, log and usage (a durable run, `config.durableRun`, also copies `attempts/` to
-`<archive>/outputs/attempts/`; nothing below is needed for it). After it runs, copy
+directory. `archive` copies only state, log and usage (a durable run, every new run since S1, also copies `attempts/` to
+`<archive>/outputs/attempts/`, so for it the manual attempts-directory copy in the next sentence is not needed; the
+timing-history preservation rule below applies to every run). After it runs, copy
 `<git-dir>/ai-skills/ship-ticket/<ticket>.attempts` to
 `<git-common-dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>.attempts`, a sibling
 of the archive directory it printed. The run-log.mjs timing log `<ticket>.jsonl` needs no copy:

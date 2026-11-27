@@ -220,9 +220,11 @@ export function validateEngineDag(doc, { ticket } = {}) {
       bad(`config.testCommands.${name}.evidence needs config.testKinds, a format, report 'fd', non-empty covers, config_paths, and files true exactly when args hold {files}`);
   }
   if (c.testKinds !== undefined && !(isObj(c.testKinds) && Object.keys(c.testKinds).join() === 'policy' && c.testKinds.policy === 1)) bad('config.testKinds must be exactly { policy: 1 }');
-  // S1 (P1): opt-in durable run substrate (lib/run-placement.mjs): state, log, usage, attempts and lock in the git common dir,
-  // and a persisted deadline per launched attempt (lib/deadline.mjs). An engine without S1 refuses the field (unknown config).
-  if (c.durableRun !== undefined && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1)) bad('config.durableRun must be exactly { version: 1 }');
+  // S1 (P1): every new run is a durable run (lib/run-placement.mjs: state, log, usage, attempts and lock in the git common
+  // dir; a persisted deadline per launched attempt). `false` is the documented escape hatch to the legacy per-worktree
+  // placement; `{ version: 1 }` states the default explicitly. An engine without S1 refuses the field (unknown config).
+  if (c.durableRun !== undefined && c.durableRun !== false && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1))
+    bad('config.durableRun must be false (the legacy per-worktree placement) or exactly { version: 1 }');
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');

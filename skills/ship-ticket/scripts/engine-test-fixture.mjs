@@ -11,6 +11,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSpec } from './provider-env.mjs';
+import { enginePaths } from './lib/run-placement.mjs';
 
 export const POSIX = process.platform !== 'win32';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
@@ -116,6 +117,15 @@ export function warmFakeClaude(bin, env) {
  * startAt: the START timestamp (default 2026-11-05, before the security policy cutoff).
  * narrativeExtra: text appended to the approved narrative (e.g. a plan §3a security block).
  */
+/**
+ * S1: a test file whose assertions pin FROZEN bytes of a run (goldens, policy version numbers, origin/main differentials,
+ * the legacy quiescence rule) calls `legacyPlacement()` once at the top: its fixtures' env then sets the documented escape
+ * hatch SHIP_TICKET_PLACEMENT=legacy (the DAG bytes stay those an engine before S1 accepts). Every other file runs the production default, a
+ * durable run. Returns the previous setting.
+ */
+let fixtureLegacy = false;
+export function legacyPlacement(on = true) { const was = fixtureLegacy; fixtureLegacy = on; return was; }
+
 export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], config = {}, bind = 'plan', extraEvents = () => [],
   behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-engine-test-')));
@@ -132,7 +142,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   else writeFileSync(join(bin, 'claude.cmd'), `@node "%~dp0fake-claude.mjs" %*\r\n`);
   const sep = POSIX ? ':' : ';';
   const { NODE_TEST_CONTEXT: _nested, ...base } = process.env; // a nested `node --test` must not report to this runner
-  const env = { ...base, PATH: bin + sep + process.env.PATH, Path: bin + sep + (process.env.Path ?? process.env.PATH) };
+  const env = { ...base, PATH: bin + sep + process.env.PATH, Path: bin + sep + (process.env.Path ?? process.env.PATH), ...(fixtureLegacy ? { SHIP_TICKET_PLACEMENT: 'legacy' } : {}) };
   const warmedUp = warmFakeClaude(bin, env);
 
   const promptFor = (id) => { const p = join(root, `prompt-${id}.txt`); writeFileSync(p, `NODE=${id}\n`); return p; };
@@ -169,11 +179,15 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     root, repo, dagFile, dagDigest, planFile, env, warmedUp,
     ctx: (extra = {}) => ({ repoRoot: repo, ticket: 'T-1', runId: 'run-1', dagFile, env, verifySubscription: () => true,
       handleSignals: false, ...extra }),
-    stateFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.state.json'),
-    lockFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.lock'),
+    // S1: engine files through the one placement resolver: the existing run's placement, else the production default for a
+    // new run (durable, unless the DAG sets the escape hatch config.durableRun: false). The run log is not an engine file.
+    placement: () => enginePaths(repo, 'T-1', { prefer: dag.config.durableRun === false || env.SHIP_TICKET_PLACEMENT === 'legacy' ? 'legacy' : 'durable' }),
+    stateFile: () => fx.placement().state,
+    lockFile: () => fx.placement().lock,
     runLog: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.jsonl'),
-    engineLog: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.engine.jsonl'),
-    usageFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.usage.jsonl'),
+    engineLog: () => fx.placement().log,
+    usageFile: () => fx.placement().usage,
+    attemptsDir: () => fx.placement().attempts,
     runs: (id) => { try { return readFileSync(join(root, 'runs.log'), 'utf8').split('\n').filter(l => l && (!id || l === id)); } catch { return []; } },
     behave: (b) => writeFileSync(join(root, 'behaviour.json'), JSON.stringify(b)),
     prompt: promptFor,

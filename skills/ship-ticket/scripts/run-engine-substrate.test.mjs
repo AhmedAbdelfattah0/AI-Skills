@@ -1,19 +1,22 @@
 /**
- * S1 (P1 durable substrate): the five §8 P1 negatives plus their guards.
+ * S1 (P1 durable substrate): the §8 P1 negatives, the round-1 review findings, and their guards.
  *
- *   N1 kill -9 of the driving engine while a fake worker hangs: the deadline sweep (`reconcile --deadlines`, an enforcer
- *      that is not the attempt's launcher) kills the group after its persisted deadline and records `timed_out`.
- *   N2 90% of the deadline consumed across repeated enforcer outages, restarts and a host sleep (all on an injected
- *      monotonic clock), with the wall clock stepped -1 h and +1 h in between: the charge never decreases, never drops an
- *      outage, ignores the wall clock, and the deadline fires at the first observation past it.
- *   N3 a null or mismatched `leader_start`: the sweep sends NO signal, records `unknown` and keeps the attempt's locks.
- *   N4 a recoverer killed (-9) inside the recovery-marker window, leaving a stale lock and its marker: the next acquire
- *      recovers. Plus: of N processes racing over that stale lock and marker, exactly one wins.
- *   N5 `git worktree remove` of the worktree a durable run was started in: the engine state is intact (common dir).
+ * Every hazard test drives a DEFAULT run (a DAG without config.durableRun), exactly as a run is started today, and puts
+ * its behavioural assertion first, so on the frozen engine (705ae1b, where a default run is legacy) it fails for the real
+ * reason: the hung worker is never bounded, a group with no verified identity is signalled, the state is lost with its
+ * worktree. State is looked up in whichever placement exists (stateOf).
  *
- * Measurement is UNQUALIFIED (lib/deadline.mjs MEASUREMENT_QUALIFIED false): N1-N3 inject the clock in-process
- * (`ctx.deadlineClock`); the CLI sweep measures nothing and signals nothing (pinned below). Timing never depends on sleeps:
- * the clock is injected and process handshakes are polled with waitUntil. Temp repos only; no Docker, no network.
+ *   N1 kill -9 of the driver while a fake worker hangs: frozen recovery (`resume`) leaves it running; the deadline sweep
+ *      (another process than its launcher) kills it after its persisted deadline and records `timed_out`.
+ *   N2 90% of the deadline across repeated enforcer outages, restarts, a sleep and wall-clock steps: the charge never
+ *      decreases and fires at the first observation past the deadline.
+ *   N3 null or mismatched `leader_start`, a dead leader with live members: no signal, `unknown`, locks kept.
+ *   N4 a recoverer killed inside the recovery-marker window: the next acquire recovers; exactly one of N racers wins.
+ *   N5 `git worktree remove`: the engine state is intact.
+ *
+ * The D5 measurement is UNQUALIFIED: N1/N2 enforce only through an in-process testClock(); the CLI sweep measures nothing
+ * and signals nothing (pinned below). This is G1 PARTIAL for production enforcement. No sleeps decide anything: the clock
+ * is injected and process handshakes are files polled with waitUntil. Temp repos only; no Docker, no network.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,76 +25,143 @@ import { join } from 'node:path';
 import { tmpdir, hostname } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { fixture, POSIX, waitUntil, codes } from './engine-test-fixture.mjs';
+import { fixture, POSIX, waitUntil, codes, gitPath } from './engine-test-fixture.mjs';
 import { acquireLock } from './lib/durable-io.mjs';
 import { processInfo } from './engine-quiesce.mjs';
 
 const SKIP = POSIX ? false : 'POSIX process groups (Windows quiescence is unknown, known limit D4)';
 const ENGINE_CLI = fileURLToPath(new URL('./run-engine.mjs', import.meta.url));
 const DURABLE_IO = fileURLToPath(new URL('./lib/durable-io.mjs', import.meta.url));
-const DURABLE = { durableRun: { version: 1 } };
 const LIMIT_MS = 600000; // the run timeout: the driver's own in-process timer never fires inside a test
+const S1_REPAIRED = async () => 'durableVersion' in (await import('./engine-policy.mjs'));
+/** A default DAG: no config.durableRun (on the engine before the S1 repair, durable needed the explicit opt-in). */
+const DEFAULT = async () => (existsSync(fileURLToPath(new URL('./lib/run-placement.mjs', import.meta.url))) && !(await S1_REPAIRED()) ? { durableRun: { version: 1 } } : {});
 
 const durableState = (repo) => join(repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'state.json');
+/** The run's state file in whichever placement exists (durable common dir, else the worktree's --git-path). */
+const stateOf = (repo) => (existsSync(durableState(repo)) ? durableState(repo) : gitPath(repo, 'ai-skills/ship-ticket/T-1.state.json'));
 const readJson = (f) => JSON.parse(readFileSync(f, 'utf8'));
+const attemptOf = (repo, id) => readJson(stateOf(repo)).attempts.find(x => x.attempt_id === id);
 const groupAlive = (pgid) => { try { process.kill(-pgid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const killQuietly = (pgid) => { try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ } };
-/** The engine module, loaded dynamically so this file also runs (RED) against an engine without the S1 exports. */
+/** The engine and the deadline module, loaded dynamically so this file also runs (RED) against an engine without them. */
 const engine = () => import('./run-engine.mjs');
+const deadlineMod = async () => { try { return await import('./lib/deadline.mjs'); } catch { return {}; } };
 
-/** An injected clock on the attempt's boot: `at(ms)` sets the monotonic reading to the attempt's start plus `ms`. */
-function clockFor(a) {
+/** An injected test clock on the attempt's boot: `at(ms)` sets the monotonic reading to the attempt's start plus `ms`. */
+async function clockFor(a) {
+  const { testClock = (c) => c } = await deadlineMod();
   let off = 0n;
   const start = BigInt(a.deadline?.start_ns ?? '0');
-  return { bootId: a.deadline?.boot_id ?? 'boot', nowNs: () => start + off, at(ms) { off = BigInt(ms) * 1000000n; return this; },
-    raw(ns) { off = ns - start; return this; } };
+  const c = testClock({ bootId: a.deadline?.boot_id ?? 'boot', nowNs: () => start + off });
+  return { at(ms) { off = BigInt(ms) * 1000000n; return c; } };
+}
+/** Run the sweep, if this engine has one, with `clock` (on the frozen engine nothing exists that bounds the worker). */
+async function sweep(fx, clock, extra = {}) {
+  const { reconcileDeadlines } = await engine();
+  return reconcileDeadlines?.(fx.ctx({ deadlineClock: clock, ...extra }));
 }
 
-/**
- * A durable run whose node `a` hangs, driven by a real `run-engine.mjs drive` child that is then killed with SIGKILL once
- * the attempt is launched: the worker group outlives its driver. Returns { fx, a } (the launched attempt on disk).
- */
-async function orphanedHang(t, { resources = [] } = {}) {
-  const fx = fixture(t, { config: { ...DURABLE, timeoutMs: LIMIT_MS }, nodes: [{ id: 'a', writes: ['src/a.txt'], resources }], behaviour: { a: { hang: true } } });
-  const init = fx.cli('init', { dag: fx.dagFile });
-  assert.equal(init.status, 0, `init of a durable run: ${init.stderr}`);
-  const driver = spawn(process.execPath, [ENGINE_CLI, 'drive', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'], { env: fx.env, stdio: 'ignore' });
+/** Launch `drive` for `repo` and SIGKILL it once the hanging worker REALLY runs ('launched' precedes the release byte). */
+async function killDriverAfterLaunch(t, fx, repo, stateFile) {
+  const driver = spawn(process.execPath, [ENGINE_CLI, 'drive', '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1'], { env: fx.env, stdio: 'ignore' });
   const gone = new Promise(r => driver.on('exit', r));
-  const launched = () => { try { return readJson(durableState(fx.repo)).attempts.find(x => x.status === 'launched' && x.pgid && x.leader_start); } catch { return undefined; } };
-  // 'launched' is committed BEFORE the release byte: wait until the worker really runs (it logs its node), so killing the
-  // driver cannot close the launcher's stdin before the release and end the group by itself.
+  const launched = () => { try { return readJson(stateFile()).attempts.find(x => x.status === 'launched' && x.pgid); } catch { return undefined; } };
   assert.ok(await waitUntil(() => launched() && fx.runs('a').length > 0, 30000), 'the driver launched and released the hanging worker');
   const a = launched();
   t.after(() => killQuietly(a.pgid));
   driver.kill('SIGKILL');
   await gone;
   assert.ok(groupAlive(a.pgid), 'the worker group outlives its SIGKILLed driver');
-  return { fx, a };
+  return a;
 }
 
-test('N1 kill -9 driver + hung worker: the deadline sweep kills the group after its persisted deadline and records timed_out', { skip: SKIP }, async (t) => {
+/** A default run whose node `a` hangs and whose driver was SIGKILLed: the worker group outlives it. Returns { fx, a }. */
+async function orphanedHang(t, { resources = [] } = {}) {
+  const fx = fixture(t, { config: { ...(await DEFAULT()), timeoutMs: LIMIT_MS }, nodes: [{ id: 'a', writes: ['src/a.txt'], resources }], behaviour: { a: { hang: true } } });
+  const init = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(init.status, 0, `init: ${init.stderr}`);
+  return { fx, a: await killDriverAfterLaunch(t, fx, fx.repo, () => stateOf(fx.repo)) };
+}
+
+/** A linked worktree `name` of `fx` on a new branch, with the run's plan. Returns { wt, cli(cmd, flags) } (CLI in the worktree). */
+function linked(fx, name, plan = readFileSync(fx.planFile, 'utf8')) {
+  const wt = join(fx.root, name);
+  assert.equal(spawnSync('git', ['worktree', 'add', '-q', '-b', name, wt], { cwd: fx.repo }).status, 0);
+  mkdirSync(join(wt, '.specs', 'plans'), { recursive: true });
+  writeFileSync(join(wt, '.specs', 'plans', 'T-1.md'), plan);
+  const cli = (cmd, flags = {}) => spawnSync(process.execPath, [ENGINE_CLI, cmd, '--repo', wt, '--ticket', 'T-1', '--run-id', 'run-1',
+    ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { encoding: 'utf8', env: fx.env, timeout: 60000 });
+  return { wt, cli };
+}
+
+// ---------------------------------------------------------------- the default is durable (M1)
+
+test('M1 a new run started as today (no config.durableRun) is durable: common-dir state, policy 13, recorded worktree, persisted deadlines', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: {} });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.ok(existsSync(durableState(fx.repo)), 'the state lives in <git-common-dir>/ai-skills/ship-ticket/runs/T-1/');
+  assert.equal(existsSync(gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json')), false, 'nothing in the per-worktree placement');
+  assert.equal(fx.cli('drive').status, 0);
+  const s = readJson(durableState(fx.repo));
+  assert.equal(s.policy_version, 13);
+  assert.equal(typeof s.durable?.worktree, 'string');
+  assert.ok(s.attempts[0].deadline, 'the attempt carries a persisted deadline');
+});
+
+for (const [hatch, opts] of [['config.durableRun: false', { config: { durableRun: false } }], ['SHIP_TICKET_PLACEMENT=legacy', { env: { SHIP_TICKET_PLACEMENT: 'legacy' } }]]) {
+  test(`M1 the escape hatch ${hatch} keeps the legacy placement and semantics; the sweep refuses such a run`, { skip: SKIP }, async (t) => {
+    const fx = fixture(t, { config: opts.config ?? {} });
+    Object.assign(fx.env, opts.env ?? {});
+    assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+    assert.equal(fx.cli('drive').status, 0);
+    assert.ok(existsSync(gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json')));
+    assert.equal(existsSync(durableState(fx.repo)), false);
+    const s = readJson(gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json'));
+    assert.equal(s.policy_version, 1);
+    assert.equal(s.durable, undefined);
+    assert.equal(s.attempts[0].deadline, undefined);
+    const r = fx.cli('reconcile', { deadlines: 'true' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /deadlines_unsupported/);
+  });
+}
+
+test('a durable state whose policy version, S.durable and placement disagree is never resumed (durable_state_missing)', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: {} });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const s = readJson(durableState(fx.repo));
+  delete s.durable;
+  writeFileSync(durableState(fx.repo), JSON.stringify(s));
+  const r = fx.cli('status');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /durable_state_missing/);
+});
+
+// ---------------------------------------------------------------- N1/N2: the deadline sweep (test clock)
+
+test('N1 kill -9 driver + hung worker: frozen recovery leaves it running; the sweep kills it after its persisted deadline (timed_out)', { skip: SKIP }, async (t) => {
   const { fx, a } = await orphanedHang(t);
-  assert.ok(a.deadline && a.deadline.limit_ms === LIMIT_MS, 'the launched attempt carries a persisted deadline');
-  const { reconcileDeadlines } = await engine();
-  const clock = clockFor(a);
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: clock.at(LIMIT_MS - 1) }));
+  assert.equal(fx.cli('resume').status, 0);
+  assert.ok(groupAlive(a.pgid), 'resume does not bound a live worker');
+  const clock = await clockFor(a);
+  await sweep(fx, clock.at(LIMIT_MS - 1));
   assert.ok(groupAlive(a.pgid), 'before its deadline the worker is not signalled');
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: clock.at(LIMIT_MS + 1) }));
-  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the sweep killed the worker group after the deadline');
-  const s = readJson(durableState(fx.repo)), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
+  await sweep(fx, clock.at(LIMIT_MS + 1));
+  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'HAZARD: after kill -9 of its driver nothing bounded the hung worker');
+  const b = attemptOf(fx.repo, a.attempt_id);
   assert.equal(b.status, 'timed_out');
   assert.equal(b.quiesced, true);
   assert.equal(b.deadline.timed_out.signalled, true);
-  assert.equal(s.nodes.a.state, 'failed');
+  assert.equal(readJson(stateOf(fx.repo)).nodes.a.state, 'failed');
 });
 
 test('N2 90% consumed across repeated enforcer outages, restarts, a sleep and wall-clock steps: consumed execution never disappears, the deadline fires once past it', { skip: SKIP }, async (t) => {
   const { fx, a } = await orphanedHang(t);
-  const { reconcileDeadlines } = await engine();
-  const clock = clockFor(a);
+  const clock = await clockFor(a);
   const realNow = Date.now;
   t.after(() => { Date.now = realNow; });
-  const charged = () => readJson(durableState(fx.repo)).attempts.find(x => x.attempt_id === a.attempt_id).deadline?.charged_ms;
+  const charged = () => attemptOf(fx.repo, a.attempt_id).deadline?.charged_ms;
   // Each sweep is a fresh enforcer invocation (a restart); the gaps between them are outages; 0.40 -> 0.55 is a host sleep
   // on a clock that counts sleep (darwin uv_hrtime): it is charged, conservatively. The wall clock is stepped -1 h / +1 h.
   const marks = [0.10, 0.25, 0.40, 0.55, 0.70, 0.90];
@@ -99,30 +169,29 @@ test('N2 90% consumed across repeated enforcer outages, restarts, a sleep and wa
   let last = -1;
   for (const [i, f] of marks.entries()) {
     Date.now = () => realNow() + steps[i];
-    await reconcileDeadlines?.(fx.ctx({ deadlineClock: clock.at(Math.round(LIMIT_MS * f)) }));
+    await sweep(fx, clock.at(Math.round(LIMIT_MS * f)));
     const c = charged();
     assert.equal(c, Math.round(LIMIT_MS * f), `the charge at ${f} is the full monotonic elapsed time (no outage dropped or capped, wall clock ignored)`);
     assert.ok(c > last, 'the charge never decreases');
     last = c;
     assert.ok(groupAlive(a.pgid), `below the deadline (${f}) the worker is not signalled`);
   }
-  // A reading that went backwards (a misbehaving source) can never reduce a recorded charge.
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: clock.at(Math.round(LIMIT_MS * 0.5)) }));
+  await sweep(fx, clock.at(Math.round(LIMIT_MS * 0.5))); // a backwards reading never reduces a recorded charge
   assert.equal(charged(), Math.round(LIMIT_MS * 0.9), 'consumed execution never disappears');
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: clock.at(LIMIT_MS) }));
+  await sweep(fx, clock.at(LIMIT_MS));
   assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the first observation at the deadline kills the group');
-  assert.equal(readJson(durableState(fx.repo)).attempts.find(x => x.attempt_id === a.attempt_id).status, 'timed_out');
+  assert.equal(attemptOf(fx.repo, a.attempt_id).status, 'timed_out');
 });
 
+// ---------------------------------------------------------------- N3 and Codex 1: no signal without positive identity
+
 for (const [name, edit] of [['null', (b) => { b.leader_start = null; }], ['mismatched (a reused pid)', (b) => { b.leader_start = 'Thu Jan  1 00:00:00 1970'; }]]) {
-  test(`N3 ${name} leader_start: the expired deadline sends no signal, the attempt is unknown and its slot stays charged`, { skip: SKIP }, async (t) => {
+  test(`N3 ${name} leader_start: an expired deadline sends no signal, the attempt is unknown and its slot stays charged`, { skip: SKIP }, async (t) => {
     const { fx, a } = await orphanedHang(t, { resources: ['db:main'] });
-    const file = durableState(fx.repo);
-    const s0 = readJson(file);
+    const file = stateOf(fx.repo), s0 = readJson(file);
     edit(s0.attempts.find(x => x.attempt_id === a.attempt_id));
     writeFileSync(file, JSON.stringify(s0));
-    const { reconcileDeadlines } = await engine();
-    await reconcileDeadlines?.(fx.ctx({ deadlineClock: clockFor(a).at(LIMIT_MS * 2) }));
+    await sweep(fx, (await clockFor(a)).at(LIMIT_MS * 2));
     assert.ok(groupAlive(a.pgid), 'no signal reached the unverified group');
     const s = readJson(file), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
     assert.equal(b.status, 'unknown');
@@ -132,17 +201,84 @@ for (const [name, edit] of [['null', (b) => { b.leader_start = null; }], ['misma
   });
 }
 
-test('N3 (E8) resume of a durable run never signals a live leader whose start time was not recorded', { skip: SKIP }, async (t) => {
+test('N3 (E8) resume never signals a live leader whose start time was not recorded', { skip: SKIP }, async (t) => {
   const { fx, a } = await orphanedHang(t);
-  const file = durableState(fx.repo);
-  const s0 = readJson(file);
+  const file = stateOf(fx.repo), s0 = readJson(file);
   s0.attempts.find(x => x.attempt_id === a.attempt_id).leader_start = null;
   writeFileSync(file, JSON.stringify(s0));
   writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file })); // settle would now retire it
-  const r = fx.cli('resume');
-  assert.equal(r.status, 0, r.stderr);
-  assert.ok(groupAlive(a.pgid), 'no signal reached the unverified group');
-  assert.equal(readJson(file).attempts.find(x => x.attempt_id === a.attempt_id).status, 'unknown');
+  assert.equal(fx.cli('resume').status, 0);
+  assert.ok(groupAlive(a.pgid), 'HAZARD: a group with no verified leader identity was signalled');
+  assert.equal(attemptOf(fx.repo, a.attempt_id).status, 'unknown');
+});
+
+test('Codex 1: recovery never signals a group whose leader is dead while members remain (identity not positively verified)', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { resources: ['db:main'] });
+  process.kill(a.pgid, 'SIGKILL'); // the leader (the launcher) dies; the worker, in the same group, keeps running
+  assert.ok(await waitUntil(() => !processInfo(a.pgid).alive, 5000));
+  assert.ok(groupAlive(a.pgid), 'members remain');
+  const file = stateOf(fx.repo), s0 = readJson(file);
+  s0.attempts.find(x => x.attempt_id === a.attempt_id).status = 'unknown'; // reconcile retires an unknown worker attempt
+  writeFileSync(file, JSON.stringify(s0));
+  assert.equal(fx.cli('resume').status, 0);
+  assert.ok(groupAlive(a.pgid), 'no signal reached a group that could not be positively verified');
+  const s = readJson(file);
+  assert.equal(s.attempts.find(x => x.attempt_id === a.attempt_id).status, 'unknown');
+  assert.equal(s.locks['db:main'], a.attempt_id);
+});
+
+// ---------------------------------------------------------------- sweep settlement (latent L1-L5, Codex 4)
+
+test('L5: an injected clock that is not a testClock() is refused (a caller cannot enable the unqualified measurement)', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t);
+  const { reconcileDeadlines } = await engine();
+  await assert.rejects(reconcileDeadlines(fx.ctx({ deadlineClock: { bootId: a.deadline.boot_id, nowNs: () => BigInt(a.deadline.start_ns) + 10n ** 15n } })),
+    { code: 'deadline_clock_refused' });
+  assert.ok(groupAlive(a.pgid));
+});
+
+test('L1: a group already gone whose overrun was never seen alive is not turned into a timeout (nothing invented): resume settles it', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t);
+  killQuietly(a.pgid); // the worker ends on its own (a crash), with no driver to see it
+  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 5000));
+  await sweep(fx, (await clockFor(a)).at(LIMIT_MS * 3));
+  const b = attemptOf(fx.repo, a.attempt_id);
+  assert.notEqual(b.status, 'timed_out', 'the charge kept growing after the group ended: it proves no timeout');
+  assert.equal(b.deadline?.timed_out, undefined);
+  assert.equal(fx.cli('resume').status, 0);
+  assert.equal(readJson(stateOf(fx.repo)).nodes.a.state, 'pending', 'resume re-queues it (no writes, no envelope), as before S1');
+});
+
+test('Codex 4 + L2: a sweep from another worktree kills an expired verified group; the deadline wins over an envelope written after it (kept as evidence); nothing is recorded against the caller\'s tree', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: { ...(await DEFAULT()), timeoutMs: LIMIT_MS }, commit: true, behaviour: { a: { hang: true } } });
+  const { wt, cli } = linked(fx, 'feature');
+  assert.equal(cli('init', { dag: fx.dagFile }).status, 0);
+  const state = () => (existsSync(durableState(fx.repo)) ? durableState(fx.repo) : join(fx.repo, '.git', 'worktrees', 'feature', 'ai-skills', 'ship-ticket', 'T-1.state.json'));
+  const a = await killDriverAfterLaunch(t, fx, wt, state);
+  writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file })); // "completed" after its deadline
+  const { reconcileDeadlines } = await engine();
+  await reconcileDeadlines?.(fx.ctx({ deadlineClock: (await clockFor(a)).at(LIMIT_MS + 1) })); // from the MAIN checkout
+  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the expired verified group was killed');
+  const s = readJson(state()), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
+  assert.equal(b.status, 'timed_out', 'the deadline wins over the late envelope');
+  assert.equal(s.nodes.a.state, 'failed');
+  assert.equal(b.late_envelope?.exit_code, 0, 'the late envelope is kept as evidence');
+  assert.equal(b.envelope, undefined, 'it was never recorded as the attempt\'s result');
+});
+
+test('L3: after a reboot (another boot id) the attempt is settled through settle(): a result written before the reboot is recorded, no pgid is probed or signalled', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t);
+  const { testClock = (c) => c } = await deadlineMod();
+  await sweep(fx, (await clockFor(a)).at(1000));
+  writeFileSync(a.out_file, JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'OK', usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }));
+  writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file }));
+  await sweep(fx, testClock({ bootId: 'another-boot', nowNs: () => 5n }));
+  assert.ok(groupAlive(a.pgid), 'the (here still running) group was not signalled: after a reboot its pgid may be anyone');
+  const s = readJson(stateOf(fx.repo)), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
+  assert.equal(b.quiesced, true);
+  assert.equal(s.nodes.a.state, 'done', 'the result written before the reboot is recorded');
+  assert.equal(b.deadline.charged_ms, 1000, 'the last measured charge is kept as a lower bound');
+  assert.deepEqual(b.deadline.unmeasured, [{ reason: 'boot_changed', after_ms: 1000, to_boot: 'another-boot' }]);
 });
 
 test('the CLI sweep is unqualified: it measures nothing, signals nothing, and records the attempt as unmeasured', { skip: SKIP }, async (t) => {
@@ -152,46 +288,116 @@ test('the CLI sweep is unqualified: it measures nothing, signals nothing, and re
   assert.equal(r.out.measurement, 'unqualified');
   assert.deepEqual(r.out.swept.map(x => [x.attempt_id, x.action, x.reason]), [[a.attempt_id, 'none', 'measurement_unqualified']]);
   assert.ok(groupAlive(a.pgid));
-  const b = readJson(durableState(fx.repo)).attempts.find(x => x.attempt_id === a.attempt_id);
+  const b = attemptOf(fx.repo, a.attempt_id);
   assert.equal(b.status, 'launched');
   assert.deepEqual(b.deadline.last_sweep, { measured: false, reason: 'measurement_unqualified', identity: 'verified' });
   assert.equal(b.deadline.measurement, 'unqualified');
 });
 
-test('a reboot (another boot id) settles the attempt by boot identity without probing or signalling its pgid, and records the unmeasured interval', { skip: SKIP }, async (t) => {
-  const { fx, a } = await orphanedHang(t);
-  const { reconcileDeadlines } = await engine();
-  const clock = clockFor(a);
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: clock.at(1000) }));
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: { bootId: 'another-boot', nowNs: () => 5n } }));
-  assert.ok(groupAlive(a.pgid), 'the (here still running) group was not signalled: after a reboot its pgid may be anyone');
-  const s = readJson(durableState(fx.repo)), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
-  assert.equal(b.status, 'crashed');
-  assert.equal(b.quiesced, true);
-  assert.equal(b.deadline.charged_ms, 1000, 'the last measured charge is kept as a lower bound');
-  assert.deepEqual(b.deadline.unmeasured, [{ reason: 'boot_changed', after_ms: 1000, to_boot: 'another-boot' }]);
-});
+// ---------------------------------------------------------------- Codex 2: worktree ownership before any observation or write
 
-test('a legacy run (no config.durableRun) keeps its per-worktree placement, records no deadline, and the sweep refuses it', { skip: SKIP }, async (t) => {
-  const fx = fixture(t);
+test('Codex 2: a mutating command from another worktree is refused before it observes or writes: the shared state stays byte-identical', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: await DEFAULT(), commit: true, behaviour: {} });
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
-  assert.equal(fx.cli('drive').status, 0);
-  assert.ok(existsSync(fx.stateFile()), 'legacy state at git-path ai-skills/ship-ticket/T-1.state.json');
-  assert.equal(existsSync(durableState(fx.repo)), false);
-  assert.equal(fx.readState().attempts[0].deadline, undefined);
-  const r = fx.cli('reconcile', { deadlines: 'true' });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /deadlines_unsupported/);
+  // the other worktree's plan carries an extra authority line that must never reach the run's state
+  const { cli } = linked(fx, 'other', readFileSync(fx.planFile, 'utf8').replace('<!-- RUN-STATE:END -->', '{"run_id":"run-1","event":"NOTE","note":"from B"}\n<!-- RUN-STATE:END -->'));
+  const before = readFileSync(stateOf(fx.repo));
+  for (const cmd of ['drive', 'resume']) {
+    const r = cli(cmd);
+    assert.ok(readFileSync(stateOf(fx.repo)).equals(before), `${cmd}: the state is byte-identical after the refusal`);
+    assert.notEqual(r.status, 0, `${cmd} from another worktree is refused`);
+    assert.match(r.stderr + r.stdout, /worktree_mismatch/);
+  }
+  assert.deepEqual(fx.runs(), [], 'nothing was dispatched from the other worktree');
 });
 
-test('both placements present for one ticket: every command refuses (state_placement_ambiguous)', { skip: SKIP }, async (t) => {
-  const fx = fixture(t, { config: DURABLE });
+// ---------------------------------------------------------------- Codex 3: placement reservation across worktrees
+
+test('Codex 3: a durable init of a ticket whose legacy run lives in another worktree is refused, and the legacy run keeps working', { skip: SKIP }, async (t) => {
+  // ONE DAG (bound by the approved plan) for both inits: the main checkout's run is made legacy by the environment escape
+  // hatch (an engine before the S1 repair: legacy by default), the linked worktree's init uses the default placement.
+  const fx = fixture(t, { config: await DEFAULT(), commit: true, behaviour: {} });
+  const legacyEnv = { ...fx.env, SHIP_TICKET_PLACEMENT: 'legacy' };
+  const a = spawnSync(process.execPath, [ENGINE_CLI, 'init', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1', '--dag', fx.dagFile], { encoding: 'utf8', env: legacyEnv, timeout: 60000 });
+  assert.equal(a.status, 0, a.stderr);
+  if (!(await S1_REPAIRED())) { // on the round-1 engine the opt-in DAG made the main run durable: plant the legacy run instead
+    const d = readFileSync(durableState(fx.repo));
+    rmSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs'), { recursive: true, force: true });
+    writeFileSync(gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json'), d);
+  }
+  assert.ok(existsSync(gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json')), 'the legacy run in the main checkout');
+  const { cli } = linked(fx, 'third');
+  const r = cli('init', { dag: fx.dagFile });
+  assert.equal(existsSync(durableState(fx.repo)), false, 'no durable state was published beside the live legacy run');
+  assert.notEqual(r.status, 0, 'the conflicting durable init is refused');
+  assert.match(r.stderr, /state_exists/);
+  assert.equal(spawnSync(process.execPath, [ENGINE_CLI, 'status', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'], { encoding: 'utf8', env: legacyEnv }).status, 0,
+    'the existing legacy run is not stranded (no state_placement_ambiguous)');
+});
+
+test('both placements present for one ticket: every engine command refuses (state_placement_ambiguous); wave reports it corrupt, not "not started"', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: await DEFAULT() });
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   mkdirSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket'), { recursive: true });
-  copyFileSync(durableState(fx.repo), fx.stateFile());
+  copyFileSync(durableState(fx.repo), gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.state.json'));
+  const { readTicket } = await import('./wave.mjs');
+  const w = readTicket({ worktree: fx.repo, key: 'T-1', run_id: 'run-1', plan: '.specs/plans/T-1.md', branch: 'main' });
+  assert.deepEqual([w.state, w.reason], ['corrupt', 'status_state_placement_ambiguous'], 'reported as the ambiguity, not as "not started" or a workspace problem');
   const r = fx.cli('status');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /state_placement_ambiguous/);
+});
+
+// ---------------------------------------------------------------- m8: archive --retire ordering
+
+test('m8 archive --retire of a durable run: a crash at the state rename never leaves the retired attempts in the live run directory', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: await DEFAULT() });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.equal(fx.cli('drive').status, 0);
+  const attempts = join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'attempts');
+  assert.ok(existsSync(attempts));
+  const { archive } = await engine();
+  const hooks = { boundary: async (name, info) => { if (name === 'retire-rename' && info?.name === 'state.json') throw new Error('crash before the state rename'); } };
+  await assert.rejects(archive(fx.ctx({ retire: true, hooks })), /crash before the state rename/);
+  assert.equal(existsSync(attempts), false, 'the attempts were moved into the archive before any engine file');
+  assert.ok(existsSync(durableState(fx.repo)), 'the state is still live (archive --retire again completes it)');
+});
+
+// ---------------------------------------------------------------- N5: worktree removal
+
+test('N5 git worktree remove of the worktree a default run ran in: the engine state survives, none under .git/worktrees', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: await DEFAULT(), commit: true });
+  const { wt, cli } = linked(fx, 'feature');
+  assert.equal(cli('init', { dag: fx.dagFile }).status, 0);
+  const drove = cli('drive');
+  assert.equal(drove.status, 0, drove.stderr);
+  assert.equal(spawnSync('git', ['worktree', 'remove', '--force', wt], { cwd: fx.repo }).status, 0);
+  assert.equal(existsSync(wt), false);
+  assert.ok(existsSync(durableState(fx.repo)), 'HAZARD: the engine state was deleted with its worktree');
+  const s = readJson(durableState(fx.repo));
+  assert.equal(s.nodes.a.state, 'done');
+  assert.ok(s.attempts.length === 1 && s.attempts[0].deadline, 'the attempt record (with its deadline) is intact');
+  assert.ok(existsSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'attempts', `${s.attempts[0].attempt_id}.out`)), 'the worker output too');
+  const wts = join(fx.repo, '.git', 'worktrees');
+  const under = existsSync(wts) ? readdirSync(wts, { recursive: true }).filter(p => String(p).includes('ai-skills')) : [];
+  assert.deepEqual(under, [], '0 engine paths under .git/worktrees/');
+  // Archived and retired from the main checkout once its worktree is gone (no plan of its own is observed there).
+  const arch = spawnSync(process.execPath, [ENGINE_CLI, 'archive', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1', '--retire', 'true'], { encoding: 'utf8', env: fx.env, timeout: 60000 });
+  assert.equal(arch.status, 0, arch.stderr);
+  const out = JSON.parse(arch.stdout);
+  assert.ok(existsSync(join(out.archive, 'outputs.json')) && existsSync(join(out.archive, 'outputs', 'attempts')), 'referenced outputs archived');
+  assert.ok(existsSync(join(out.archive, 'retired', 'attempts')) && !existsSync(durableState(fx.repo)), 'retired: a new run of the ticket can init');
+});
+
+test('archive --retire of a durable run from another worktree is refused while the owning worktree exists', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: await DEFAULT(), commit: true });
+  const { cli } = linked(fx, 'owner');
+  assert.equal(cli('init', { dag: fx.dagFile }).status, 0);
+  const before = readFileSync(durableState(fx.repo));
+  const r = fx.cli('archive', { retire: 'true' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /worktree_mismatch/);
+  assert.ok(readFileSync(durableState(fx.repo)).equals(before));
 });
 
 // ---------------------------------------------------------------- N4: the recovery marker
@@ -240,84 +446,93 @@ test('N4 a live recoverer\'s marker is never broken (its start time matches): lo
   assert.deepEqual(readJson(lockFile + '.recovery'), mine);
 });
 
-test('N4 race: of 6 processes recovering one stale lock under one stale marker at once, exactly one holds the lock', { skip: SKIP }, async (t) => {
-  const dir = scratch(t), lockFile = join(dir, 'lock'), go = join(dir, 'go');
+test('N4 race: of 6 processes recovering one stale lock under one stale marker at once, exactly one holds the lock (no timing assumption)', { skip: SKIP }, async (t) => {
+  const dir = scratch(t), lockFile = join(dir, 'lock'), go = join(dir, 'go'), done = join(dir, 'done');
   const dead = await deadProcess();
   writeFileSync(lockFile, JSON.stringify({ pid: dead.pid, process_start_time: dead.startTime, host: hostname(), run_id: 'old', nonce: 'held' }));
   writeFileSync(lockFile + '.recovery', JSON.stringify({ pid: dead.pid, process_start_time: dead.startTime, host: hostname(), nonce: 'stale' }));
-  const src = `import { acquireLock } from ${JSON.stringify(DURABLE_IO)};
-import { existsSync } from 'node:fs';
+  // Every contender reports ready, waits for `go`, decides, reports, and holds (the winner keeps the lock) until the parent
+  // has collected every decision (`done`): no contender can decide after the winner has exited.
+  const src = (i) => `import { acquireLock } from ${JSON.stringify(DURABLE_IO)};
+import { existsSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(join(dir, `ready-${i}`))}, '');
 while (!existsSync(${JSON.stringify(go)})) await new Promise(r => setTimeout(r, 1));
-try { await acquireLock({ lockFile: ${JSON.stringify(lockFile)}, runId: 'race' }); process.stdout.write('won'); }
-catch (e) { process.stdout.write('lost:' + e.code); }
-setTimeout(() => {}, 1500); // hold, without releasing, until every contender has decided`;
-  const kids = Array.from({ length: 6 }, () => spawn(process.execPath, ['--input-type=module', '-e', src], { stdio: ['ignore', 'pipe', 'inherit'] }));
-  const outs = kids.map(k => new Promise(r => { let o = ''; k.stdout.on('data', d => { o += d; }); k.on('exit', () => r(o)); }));
+let out;
+try { await acquireLock({ lockFile: ${JSON.stringify(lockFile)}, runId: 'race' }); out = 'won'; } catch (e) { out = 'lost:' + e.code; }
+writeFileSync(${JSON.stringify(join(dir, `result-${i}`))}, out);
+while (!existsSync(${JSON.stringify(done)})) await new Promise(r => setTimeout(r, 5));`;
+  const kids = Array.from({ length: 6 }, (_, i) => spawn(process.execPath, ['--input-type=module', '-e', src(i)], { stdio: ['ignore', 'ignore', 'inherit'] }));
+  const exits = kids.map(k => new Promise(r => k.on('exit', r)));
+  t.after(() => { for (const k of kids) try { k.kill('SIGKILL'); } catch { /* gone */ } });
+  const all = (prefix) => [0, 1, 2, 3, 4, 5].every(i => existsSync(join(dir, `${prefix}-${i}`)));
+  assert.ok(await waitUntil(() => all('ready'), 60000), 'every contender is ready');
   writeFileSync(go, '');
-  const results = await Promise.all(outs);
+  assert.ok(await waitUntil(() => all('result'), 60000), 'every contender decided');
+  const results = [0, 1, 2, 3, 4, 5].map(i => readFileSync(join(dir, `result-${i}`), 'utf8'));
+  writeFileSync(done, '');
+  await Promise.all(exits);
   assert.equal(results.filter(o => o === 'won').length, 1, `exactly one winner: ${results.join(' ')}`);
   assert.ok(results.filter(o => o !== 'won').every(o => o === 'lost:lock_held'), results.join(' '));
   assert.ok(!existsSync(lockFile + '.recovery'), 'no marker is left once the recovery is done');
 });
 
-// ---------------------------------------------------------------- N5: worktree removal
-
-test('N5 git worktree remove of the worktree a durable run ran in: engine state intact in the common dir, none under .git/worktrees', { skip: SKIP }, async (t) => {
-  const fx = fixture(t, { config: DURABLE, commit: true });
-  const git = (cwd, ...a) => { const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
-  const wt = join(fx.root, 'wt');
-  git(fx.repo, 'worktree', 'add', '-q', '-b', 'feature', wt);
-  mkdirSync(join(wt, '.specs', 'plans'), { recursive: true });
-  copyFileSync(fx.planFile, join(wt, '.specs', 'plans', 'T-1.md'));
-  const cli = (cmd, flags = {}) => spawnSync(process.execPath, [ENGINE_CLI, cmd, '--repo', wt, '--ticket', 'T-1', '--run-id', 'run-1',
-    ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { encoding: 'utf8', env: fx.env, timeout: 60000 });
-  assert.equal(cli('init', { dag: fx.dagFile }).status, 0);
-  const drove = cli('drive');
-  assert.equal(drove.status, 0, drove.stderr);
-  const before = readFileSync(durableState(fx.repo), 'utf8');
-  git(fx.repo, 'worktree', 'remove', '--force', wt);
-  assert.equal(existsSync(wt), false);
-  assert.ok(existsSync(durableState(fx.repo)), 'the state survived the removal');
-  assert.equal(readFileSync(durableState(fx.repo), 'utf8'), before, 'byte for byte');
-  const s = JSON.parse(before);
-  assert.equal(s.nodes.a.state, 'done');
-  assert.ok(s.attempts.length === 1 && s.attempts[0].deadline, 'the attempt record (with its deadline) is intact');
-  assert.ok(existsSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'attempts', `${s.attempts[0].attempt_id}.out`)), 'the worker output too');
-  const wts = join(fx.repo, '.git', 'worktrees');
-  const under = existsSync(wts) ? readdirSync(wts, { recursive: true }).filter(p => String(p).includes('ai-skills')) : [];
-  assert.deepEqual(under, [], '0 engine paths under .git/worktrees/');
-  // The run can still be archived from the main checkout after its worktree is gone.
-  const arch = spawnSync(process.execPath, [ENGINE_CLI, 'archive', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'], { encoding: 'utf8', env: fx.env, timeout: 60000 });
-  assert.equal(arch.status, 0, arch.stderr);
-  const out = JSON.parse(arch.stdout);
-  assert.ok(existsSync(join(out.archive, 'outputs.json')) && existsSync(join(out.archive, 'outputs', 'attempts')), 'referenced outputs archived');
+test('m7 start times are time-zone independent: a live holder that locked under another TZ is never judged reused', { skip: SKIP }, async (t) => {
+  const dir = scratch(t), lockFile = join(dir, 'lock'), ready = join(dir, 'ready');
+  const holder = spawn(process.execPath, ['--input-type=module', '-e', `import { acquireLock } from ${JSON.stringify(DURABLE_IO)};
+import { writeFileSync } from 'node:fs';
+await acquireLock({ lockFile: ${JSON.stringify(lockFile)}, runId: 'tz' }); writeFileSync(${JSON.stringify(ready)}, ''); setTimeout(() => {}, 600000);`],
+  { stdio: 'ignore', env: { ...process.env, TZ: 'Pacific/Kiritimati' } });
+  t.after(() => { try { holder.kill('SIGKILL'); } catch { /* gone */ } });
+  assert.ok(await waitUntil(() => existsSync(ready), 20000));
+  const tz = process.env.TZ;
+  process.env.TZ = 'America/Adak';
+  try { await assert.rejects(acquireLock({ lockFile, runId: 'r' }), { code: 'lock_held' }, 'the live holder is never broken'); }
+  finally { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; }
+  assert.equal(readJson(lockFile).pid, holder.pid);
 });
 
-test('a durable run refuses mutating commands from another worktree of the repository (worktree_mismatch)', { skip: SKIP }, async (t) => {
-  const fx = fixture(t, { config: DURABLE, commit: true, behaviour: {} });
-  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
-  const wt = join(fx.root, 'wt2');
-  assert.equal(spawnSync('git', ['worktree', 'add', '-q', '-b', 'other', wt], { cwd: fx.repo }).status, 0);
-  mkdirSync(join(wt, '.specs', 'plans'), { recursive: true });
-  copyFileSync(fx.planFile, join(wt, '.specs', 'plans', 'T-1.md'));
-  const r = spawnSync(process.execPath, [ENGINE_CLI, 'drive', '--repo', wt, '--ticket', 'T-1', '--run-id', 'run-1'], { encoding: 'utf8', env: fx.env, timeout: 60000 });
-  assert.equal(r.status, 2, r.stderr);
-  assert.ok(JSON.parse(r.stdout).judgments.some(j => j.code === 'worktree_mismatch'));
-  assert.deepEqual(fx.runs(), [], 'nothing was dispatched from the other worktree');
+test('m5 a filesystem without hard links: the recovery marker falls back to an exclusive create and recovery still succeeds', { skip: SKIP }, async (t) => {
+  const { TEST_SEAM } = await import('./lib/durable-io.mjs');
+  const dir = scratch(t), lockFile = join(dir, 'lock');
+  const dead = await deadProcess();
+  writeFileSync(lockFile, JSON.stringify({ pid: dead.pid, process_start_time: dead.startTime, host: hostname(), run_id: 'old', nonce: 'held' }));
+  const noLink = () => { throw Object.assign(new Error('ENOTSUP: operation not supported'), { code: 'ENOTSUP' }); };
+  const h = await acquireLock({ lockFile, runId: 'r' }, { [TEST_SEAM]: { link: noLink } });
+  assert.equal(readJson(lockFile).pid, process.pid);
+  assert.deepEqual(readdirSync(dir), ['lock']);
+  await h.release();
+});
+
+// ---------------------------------------------------------------- m3: synchronous child calls carry a timeout
+
+test('m3 every synchronous child call in the S1-touched modules carries a timeout', () => {
+  const files = ['run-engine.mjs', 'engine-attempts.mjs', 'engine-io.mjs', 'engine-quiesce.mjs', 'engine-gates.mjs', 'engine-units.mjs', 'gate.mjs', 'carrier.mjs',
+    'check-pr-scope.mjs', 'engine-accepted.mjs', 'eval.mjs', 'wave.mjs', 'lib/durable-io.mjs', 'lib/run-placement.mjs', 'lib/deadline.mjs'];
+  const missing = [];
+  for (const f of files) {
+    let src; try { src = readFileSync(fileURLToPath(new URL(`./${f}`, import.meta.url)), 'utf8'); } catch { continue; }
+    for (const m of src.matchAll(/spawnSync\(/g)) {
+      let depth = 0, end = m.index + 'spawnSync'.length;
+      for (; end < src.length; end++) { if (src[end] === '(') depth++; else if (src[end] === ')' && --depth === 0) break; }
+      if (!/timeout/.test(src.slice(m.index, end + 1))) missing.push(`${f}:${src.slice(0, m.index).split('\n').length}`);
+    }
+  }
+  assert.deepEqual(missing, []);
 });
 
 // ---------------------------------------------------------------- lib/deadline.mjs (pure)
 
 test('deadline record: an unknown boot id measures nothing and says so; a legacy state arms nothing; the mechanism is unqualified', async () => {
-  const { armRecord, armAttempt, observe, MEASUREMENT_QUALIFIED } = await import('./lib/deadline.mjs');
+  const { armRecord, armAttempt, observe, MEASUREMENT_QUALIFIED, resolveSweepClock } = await import('./lib/deadline.mjs');
   assert.equal(MEASUREMENT_QUALIFIED, false, 'G0 has not passed: the flag stays off');
+  assert.equal(resolveSweepClock(undefined), null, 'unqualified: no real clock is bound for enforcement');
   const rec = armRecord(1000, { bootId: null, nowNs: () => 0n });
   assert.deepEqual(observe(rec, { bootId: null, nowNs: () => 5000000000n }), { charged_ms: 0, expired: false, boot_ended: false, measured: false });
   assert.deepEqual(rec.unmeasured, [{ reason: 'boot_unknown' }], 'recorded explicitly as unmeasured, never as zero execution');
   const a = { pid: 7 };
   armAttempt({ config: {} }, a, 1000, { bootId: 'b', nowNs: () => 0n });
-  assert.equal(a.deadline, undefined, 'a run without config.durableRun records no deadline');
-  armAttempt({ config: { durableRun: { version: 1 } } }, a, 1000, { bootId: 'b', nowNs: () => 42n });
+  assert.equal(a.deadline, undefined, 'a legacy run (no S.durable) records no deadline');
+  armAttempt({ config: {}, durable: { version: 1, worktree: '/x' } }, a, 1000, { bootId: 'b', nowNs: () => 42n });
   assert.equal(a.deadline.start_ns, '42');
   assert.equal(a.deadline.measurement, 'unqualified');
 });

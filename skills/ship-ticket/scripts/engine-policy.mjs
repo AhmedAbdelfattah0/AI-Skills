@@ -29,7 +29,30 @@ export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.
   7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }),
   9: Object.freeze({ pinnedBase: true, repoIdentity: true }), 10: Object.freeze({ testKinds: true, pinnedBase: true, repoIdentity: true }),
   11: Object.freeze({ securityObligations: true, pinnedBase: true, repoIdentity: true }),
-  12: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true }) });
+  12: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true }),
+  // S1 (P1): 13-24 are 1-12 plus durableRun (hand-coded, as S-12's and S-28a's rows): the run's state, log, usage, attempts
+  // and lock live in <git-common-dir>/ai-skills/ship-ticket/runs/<ticket>/ (lib/run-placement.mjs) and every launched
+  // attempt carries a persisted deadline. An engine without S1 supports none of 13-24 and refuses such a run.
+  13: Object.freeze({ durableRun: true }), 14: Object.freeze({ testKinds: true, durableRun: true }),
+  15: Object.freeze({ securityObligations: true, durableRun: true }), 16: Object.freeze({ testKinds: true, securityObligations: true, durableRun: true }),
+  17: Object.freeze({ pinnedBase: true, durableRun: true }), 18: Object.freeze({ testKinds: true, pinnedBase: true, durableRun: true }),
+  19: Object.freeze({ securityObligations: true, pinnedBase: true, durableRun: true }),
+  20: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, durableRun: true }),
+  21: Object.freeze({ pinnedBase: true, repoIdentity: true, durableRun: true }), 22: Object.freeze({ testKinds: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
+  23: Object.freeze({ securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
+  24: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }) });
+
+/**
+ * S1 (P1): the durable version of each version 1-12 (its flags plus durableRun). `init` records it for every NEW run unless
+ * the DAG sets the documented escape hatch `config.durableRun: false`; a state of version 1-12 keeps its placement and
+ * semantics, byte for byte (existing runs are never migrated).
+ */
+export const DURABLE_VERSION_OF = Object.freeze(Object.fromEntries(Array.from({ length: 12 }, (_, i) => [i + 1, i + 13])));
+/** The durable version for `version` in `table`, or null when that engine has no durable row for it (an engine without S1). */
+export const durableVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Object.hasOwn(DURABLE_VERSION_OF, String(version)) ? DURABLE_VERSION_OF[version] : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].durableRun === true ? w : null;
+};
 
 /** The version `init` records for a run that activates test kinds (design rev 5 section 5). */
 export const TEST_KINDS_POLICY_VERSION = 2;

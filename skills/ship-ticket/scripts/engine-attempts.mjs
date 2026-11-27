@@ -210,13 +210,16 @@ const unquiet = (S, a, item) => {
  * duplicate writer); unknown quiescence -> judgment, locks kept; quiescent with no relevant writes
  * (or never released) -> re-queued.
  */
-export async function settle(E, a, { timedOut = false, wait = 0 } = {}) {
+export async function settle(E, a, { timedOut = false, wait = 0, owned = false, deadlineWins = false, bootEnded = false } = {}) {
   const { S } = E;
   const item = itemOf(S, a);
-  if (!item) { if (!(await retire(S, a, E.alive, 'orphaned'))) unquiet(S, a, null); return; }
+  // S1: `owned` is the launcher's own process (runAttempt); every other settle is recovery and, in a durable run, signals
+  // only a verified group (engine-quiesce.mjs retire). `bootEnded`: proven gone by boot identity (the deadline sweep).
+  const how = { owned, bootEnded };
+  if (!item) { if (!(await retire(S, a, E.alive, 'orphaned', how))) unquiet(S, a, null); return; }
   let env = io.readJson(a.envelope_file);
   if (!env && a.status === 'intent') { // never released: no pid was recorded
-    if (await retire(S, a, E.alive, 'abandoned')) item.state = 'pending'; else unquiet(S, a, item);
+    if (await retire(S, a, E.alive, 'abandoned', how)) item.state = 'pending'; else unquiet(S, a, item);
     return;
   }
   if (!env) {
@@ -225,7 +228,10 @@ export async function settle(E, a, { timedOut = false, wait = 0 } = {}) {
     env ??= io.readJson(a.envelope_file);
     if (!env && alive === true && !timedOut) return 'live';
   }
-  if (!(await retire(S, a, E.alive, 'exited'))) return unquiet(S, a, item);
+  if (!(await retire(S, a, E.alive, 'exited', how))) return unquiet(S, a, item);
+  // S1 (Codex 4): a deadline the sweep proved expired while the group was alive wins over an envelope written after it:
+  // the envelope is kept as evidence (late_envelope), never recorded as the attempt's result.
+  if (env && deadlineWins) { a.late_envelope = { file: a.envelope_file, exit_code: env.exit_code ?? null }; env = null; }
   if (env) return record(E, a, item, env);
   // Released and ran, but left no envelope (timeout, crash): its usage is unknown, never zero, so the
   // budget is flagged unenforceable instead of admitting a redispatch against an under-count.
@@ -348,7 +354,7 @@ async function runAttempt(E, job) {
     await exited;
     clearTimeout(timer);
     await killing;
-    await settle(E, a, { timedOut, wait: 2000 });
+    await settle(E, a, { timedOut, wait: 2000, owned: true });
     await E.commit();
     return true;
   } finally { E.live.delete(id); }
@@ -356,7 +362,7 @@ async function runAttempt(E, job) {
 
 /** The launcher itself failed to start (no pid recorded, nothing ran): retired, retried once, then failed. */
 async function settleSpawnFailure(E, a, item) {
-  if (!(await retire(E.S, a, E.alive, 'spawn_failed'))) { unquiet(E.S, a, item); await E.commit(); return; }
+  if (!(await retire(E.S, a, E.alive, 'spawn_failed', { owned: true }))) { unquiet(E.S, a, item); await E.commit(); return; }
   if ((item.retries ?? 0) < MAX_RETRIES) {
     item.retries = (item.retries ?? 0) + 1; item.state = 'pending';
     note(E.S, 'INFRA_RETRY', { node: a.node, attempt_id: a.attempt_id, cause: 'launcher_spawn_failed' });

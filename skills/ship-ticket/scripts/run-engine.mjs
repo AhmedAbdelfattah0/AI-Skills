@@ -40,20 +40,22 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion } from './engine-policy.mjs';
+import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion, durableVersion } from './engine-policy.mjs';
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
-import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve, archiveFinality, sourceState } from './engine-adopt.mjs';
+import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
-import { enginePaths, legacyPaths } from './lib/run-placement.mjs';
+import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
-import { observe, MEASUREMENT_QUALIFIED } from './lib/deadline.mjs';
+import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
 
-export { acquireLock, writeStateAtomic } from './engine-io.mjs';
+export { writeStateAtomic } from './engine-io.mjs';
+/** The ticket's engine lock (S1: in the run's placement: an existing run's, else the default of a new run, durable). */
+export const acquireLock = (ctx, options) => io.acquireLock(ctx?.lockFile ? ctx : { ...ctx, lockFile: enginePaths(ctx.repoRoot, ctx.ticket, { prefer: 'durable' }).lock }, options);
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
@@ -85,9 +87,23 @@ function locate(ctx, prefer = 'legacy') {
     planRel: `.specs/plans/${ctx.ticket}.md`, plan: join(ctx.repoRoot, '.specs', 'plans', ctx.ticket + '.md') };
 }
 
-/** Init's placement: durable when the DAG file sets config.durableRun (validated at init); anything unreadable is legacy. */
+/**
+ * S1 (M1): init's placement. Every NEW run is durable (policy versions 13-24, engine-policy.mjs DURABLE_VERSION_OF) unless its
+ * DAG sets the documented escape hatch `config.durableRun: false`, the environment sets SHIP_TICKET_PLACEMENT=legacy, or the engine (an injected ctx.policy of a test simulating
+ * an engine without S1) has no durable versions. An unreadable DAG is durable too: init refuses it before writing anything.
+ */
 function initPlacement(ctx) {
-  try { return JSON.parse(readFileSync(ctx.dagFile, 'utf8'))?.config?.durableRun !== undefined ? 'durable' : 'legacy'; } catch { return 'legacy'; }
+  const semantics = (ctx.policy ?? { semantics: POLICY_SEMANTICS }).semantics;
+  if (!Object.values(semantics).some(f => f?.durableRun === true)) return 'legacy';
+  // the operational escape hatch (frozen-byte tests, an install that must keep per-worktree state): never bound by a DAG digest,
+  // so a run's DAG is the same bytes on an engine with and without S1 (the origin/main differentials rely on it)
+  if ((ctx.env ?? process.env).SHIP_TICKET_PLACEMENT === 'legacy') return 'legacy';
+  try { return JSON.parse(readFileSync(ctx.dagFile, 'utf8'))?.config?.durableRun === false ? 'legacy' : 'durable'; } catch { return 'durable'; }
+}
+
+/** S1 (Codex 2): whether `S` is a durable run owned by another worktree than the caller's. */
+function foreignWorktree(S, repoRoot) {
+  return S?.durable !== undefined && !samePath(S.durable.worktree, worktreeTop(repoRoot));
 }
 
 /**
@@ -162,6 +178,10 @@ function open(ctx, prefer) {
       const repoIdentity = E.policy.semantics.repoIdentity === true;
       if (repoIdentity !== repoIdentityOn(E.S) || (repoIdentity && !identityStateHolds(E.S)))
         throw coded('identity_state_missing', `policy_version ${E.S.policy_version}: the repository identity state (config.repoIdentity, S.base.identity, the freeze and SHIP_READY base records) is partial or malformed: it is never resumed`);
+      // S1: the durableRun flag of the run's version, S.durable and the placement come together or not at all
+      if (new Set([E.policy.semantics.durableRun === true, Object.hasOwn(E.S, 'durable'), P.placement === 'durable']).size !== 1
+        || (Object.hasOwn(E.S, 'durable') && !(E.S.durable && typeof E.S.durable.worktree === 'string' && E.S.durable.version === 1)))
+        throw coded('durable_state_missing', `policy_version ${E.S.policy_version}, S.durable and the ${P.placement} placement of ${P.state} disagree: a partial durable run is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -196,7 +216,7 @@ function open(ctx, prefer) {
  * again after it, so an owner line appended between commands is trusted at the next command and a
  * line appended while this command's attempts ran is not.
  */
-async function locked(ctx, fn, { load = true, waitMs, prefer } = {}) {
+async function locked(ctx, fn, { load = true, waitMs, prefer, foreign = false } = {}) {
   const E = open(ctx, prefer);
   // S1: a durable run's lock lives in its common-dir run directory; a legacy run keeps its per-worktree lock (unchanged).
   const lockCtx = E.P.placement === 'durable' ? { ...ctx, lockFile: E.P.lock } : ctx;
@@ -205,9 +225,17 @@ async function locked(ctx, fn, { load = true, waitMs, prefer } = {}) {
   const signals = ctx.handleSignals === false ? [] : ['SIGINT', 'SIGTERM'];
   for (const s of signals) process.on(s, onSignal);
   try {
-    if (load) { E.load(); E.observe(); }
+    if (load) {
+      E.load();
+      // S1 (Codex 2): ownership is checked right after the load, before any observation or write: a refused command leaves
+      // the shared state byte-identical. A command allowed from elsewhere (`foreign`: the deadline sweep) never observes
+      // authority from the caller's plan, which is not the run's.
+      E.foreign = foreignWorktree(E.S, ctx.repoRoot);
+      if (E.foreign && !foreign) throw coded('worktree_mismatch', `engine state of ${E.S.ticket} belongs to the worktree ${E.S.durable.worktree}, not ${ctx.repoRoot}`);
+      if (!E.foreign) E.observe();
+    }
     const out = await fn(E);
-    if (E.S) { E.observe(); await E.commit(); }
+    if (E.S) { if (!E.foreign) E.observe(); await E.commit(); }
     return out;
   } finally { for (const s of signals) process.off(s, onSignal); await lock.release(); }
 }
@@ -219,9 +247,6 @@ async function locked(ctx, fn, { load = true, waitMs, prefer } = {}) {
 function verifyBinding(E) {
   const { S, ctx } = E;
   if (S.run_id !== ctx.runId) return [judgment('run_mismatch', null, `engine state belongs to run ${S.run_id}, not ${ctx.runId}`)];
-  // S1: a durable run's state is shared by every worktree; only the worktree that started it may mutate it.
-  if (S.worktree !== undefined && !samePath(S.worktree, worktreeTop(ctx.repoRoot)))
-    return [judgment('worktree_mismatch', null, `engine state of ${S.ticket} belongs to the worktree ${S.worktree}, not ${ctx.repoRoot}`)];
   const out = [];
   try {
     const approved = approvedPlan(ctx, E.P, S);
@@ -396,14 +421,17 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
   // S-12: a pinned base adds its flag to the version of the other flags (engine-policy.mjs PINNED_BASE_VERSION_OF)
   const pinnedOrNot = pinned ? pinnedVersion(version) : version;
   // S-28a: repoIdentity adds its flag to the pinned version (engine-policy.mjs REPO_IDENTITY_VERSION_OF)
-  const recorded = identity ? repoIdentityVersion(pinnedOrNot) : pinnedOrNot;
+  const flagged = identity ? repoIdentityVersion(pinnedOrNot) : pinnedOrNot;
+  // S1 (M1): a durable run records the durable row of its other flags (13-24); an engine without one cannot start it
+  const recorded = durable ? durableVersion(flagged, engine.semantics) : flagged;
+  if (recorded === null) throw coded('policy_version_unsupported', `no durable-run policy version for policy_version ${flagged}`);
   return { policy_version: runPolicy({ policy_version: recorded }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
@@ -440,9 +468,28 @@ async function bindTestKinds(ctx, config, text, pinned = null) {
 
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
 export async function init(ctx) {
+  const placement = initPlacement(ctx);
+  // S1 (Codex 3): every init of a ticket, in either placement and from any worktree, reserves its placement under ONE
+  // common lock (the durable run directory's lock, which a durable init also runs under), so a legacy and a durable init
+  // can never both publish. A legacy init takes it in addition to its own per-worktree lock.
+  const reserve = placement === 'legacy' ? await io.acquireLock({ ...ctx, lockFile: durablePaths(ctx.repoRoot, ctx.ticket).lock }) : null;
+  try { return await initLocked(ctx, placement); } finally { await reserve?.release(); }
+}
+
+/** The placement conflict of a new run of `ticket` (a state in the other placement, in ANY worktree), or null. */
+function placementConflict(ctx, placement) {
+  if (placement === 'legacy') { const D = durablePaths(ctx.repoRoot, ctx.ticket); return existsSync(D.state) ? D.state : null; }
+  return legacyStatesAnywhere(ctx.repoRoot, ctx.ticket)[0] ?? null;
+}
+
+async function initLocked(ctx, placement) {
   return locked(ctx, async (E) => {
     if (existsSync(E.P.state)) throw coded('state_exists', `${E.P.state} already exists`);
-    if (E.P.placement === 'durable' && existsSync(legacyPaths(ctx.repoRoot, ctx.ticket).state)) throw coded('state_exists', `a legacy engine state of ${ctx.ticket} exists in this worktree`);
+    const conflict = () => {
+      const other = placementConflict(ctx, E.P.placement);
+      if (other) throw coded('state_exists', `engine state of ${ctx.ticket} already exists at ${other} (another placement or worktree); finish or archive that run (run-engine.mjs archive --retire true from its worktree) before starting a new one`);
+    };
+    conflict();
     const { text, digest, events, start } = approvedPlan(ctx, E.P);
     let raw;
     try { raw = readFileSync(ctx.dagFile); } catch { throw coded('dag_invalid', 'dagFile unreadable'); }
@@ -473,8 +520,8 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}),
-      ...(dag.config.durableRun ? { worktree: worktreeTop(ctx.repoRoot) } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable'), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
@@ -483,9 +530,10 @@ export async function init(ctx) {
         note(E.S, 'BASE_LOCAL_DIVERGED', { advisory: true, ref: dag.config.base, expected: pin.base.merge_base, observed: pin.local });
     }
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
+    conflict(); // S1 (Codex 3): revalidated under the reservation lock right before publication
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
-  }, { load: false, prefer: initPlacement(ctx) });
+  }, { load: false, prefer: placement });
 }
 
 /** Read-only STATUS (freeze drift is reported, nothing is written). */
@@ -677,9 +725,16 @@ export async function archive(ctx) {
     let runId, raw;
     try { raw = JSON.parse(readFileSync(E.P.state, 'utf8')); runId = raw.run_id; } catch { throw coded('state_unreadable', `${E.P.state} is not valid JSON`); }
     if (runId !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${runId}, not ${ctx.runId}`);
+    // S1 (Codex 2, m9): a durable run is archived from any worktree (its own may be gone); --retire from another worktree
+    // only once the owning worktree no longer exists, and then without observing the caller's plan (not the run's).
+    const foreign = foreignWorktree(raw, ctx.repoRoot);
+    if (foreign && ctx.retire && existsSync(raw.durable.worktree))
+      throw coded('worktree_mismatch', `engine state of ${ctx.ticket} belongs to the worktree ${raw.durable.worktree}, not ${ctx.repoRoot}; retire it from there`);
     const busy = ctx.retire ? retireRefusal(raw) : null;
     if (busy) throw coded('retire_live_attempts', busy);
     // retire finishes the RUN-STATE observation first and persists it, so the archived (final) state has classified every line
+    // from another worktree (its own gone) nothing is observed: the caller's plan is not the run's
+    const retireObserve = foreign ? (S) => S.authority !== undefined && S.authority !== null : observeForRetire;
     const authorityPresent = ctx.retire ? retireObserve(raw, io.readIfExists(E.P.plan), E.alive) : null;
     if (ctx.retire) await io.writeStateAtomic(E.P.state, raw, { hooks: ctx.hooks, fs: ctx.fs, platform: ctx.platform });
     const base = join(io.commonGitDir(ctx.repoRoot), 'ai-skills', 'ship-ticket', 'archive', ctx.ticket);
@@ -708,74 +763,88 @@ export async function archive(ctx) {
       renameSync(stage, dir);
     } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
     if (!ctx.retire) return { archive: dir, files };
+    // S1: the run directory's attempts/ is renamed (never deleted) into the archive BEFORE the engine files (m8), so a new
+    // run starts clean and a crash never strands a retired run's outputs beside a new run.
     const retired = await retireLive({ dir, files, sources: { 'state.json': E.P.state, 'engine.jsonl': E.P.log, 'usage.jsonl': E.P.usage }, hooks: ctx.hooks,
-      record: { run_id: runId, final_seq: raw.seq, authority_present: authorityPresent } });
-    // S1: the run directory's attempts follow the retired state (renamed, never deleted), so a new run starts clean.
-    if (E.P.placement === 'durable' && existsSync(E.P.attempts)) renameSync(E.P.attempts, join(dir, 'retired', 'attempts'));
+      record: { run_id: runId, final_seq: raw.seq, authority_present: authorityPresent },
+      moveFirst: E.P.placement === 'durable' && existsSync(E.P.attempts) ? [[E.P.attempts, 'attempts']] : [] });
     return { archive: dir, files, retired };
   }, { load: false });
 }
 
 /**
  * S1 (P1): the deadline sweep, `reconcile --deadlines true`: an enforcer that is NOT the launcher of the attempts it
- * checks. Invoked in-session (no scheduler is installed). It runs under the run's lock, so it acts once the driving
- * process is gone (a live driver holds the lock and enforces its own in-process timers). Durable runs only
- * (`deadlines_unsupported` otherwise: a legacy attempt has no persisted deadline). For every released LIVE attempt with a
- * persisted deadline:
- * - Measurement (lib/deadline.mjs) is UNQUALIFIED (G0 not passed): with no clock (`ctx.deadlineClock` is an in-process
- *   test injection; the CLI never sets it) nothing is measured or signalled; the attempt records
- *   `deadline.last_sweep { measured: false, reason: 'measurement_unqualified', identity }`.
- * - With a clock: the charge is observed. Expired and the group 'verified' (engine-quiesce.mjs groupIdentity: leader alive
- *   with exactly the recorded `leader_start`) -> the group is killed and the attempt settled `timed_out` through the
- *   existing settle/retire path. Expired and 'gone' -> settled `timed_out` without a signal. Expired and 'unknown' (null or
- *   mismatched identity) -> NO signal: status `unknown`, a quiescence_unknown judgment, every lock kept (capacity stays
- *   charged). Another boot id -> proven gone by boot identity (no probe, no signal), the unmeasured interval recorded.
+ * checks. Invoked in-session (no scheduler is installed). It runs under the run's lock: a driving process holds that lock
+ * for its whole command, so while one is alive (even hung) the sweep waits for the lock and that driver's in-process timers
+ * are the only bound. Durable runs only (`deadlines_unsupported` otherwise: a legacy attempt has no persisted deadline). It
+ * may run from another worktree than the run's (its own may be gone); it then never observes that caller's plan and never
+ * records ownership or fingerprints against the caller's tree (an expired attempt is settled by the timeout branch only).
+ *
+ * The D5 measurement is UNQUALIFIED (lib/deadline.mjs MEASUREMENT_QUALIFIED false), and resolveSweepClock is the gate: the
+ * CLI binds no clock, so the sweep measures nothing and signals nothing; each released LIVE attempt with a persisted
+ * deadline records `deadline.last_sweep { measured: false, reason: 'measurement_unqualified', identity }`. With a clock
+ * (only an in-process testClock() until G0 passes):
+ * - expired while the group is 'verified' (engine-quiesce.mjs groupIdentity: leader alive with exactly the recorded
+ *   `leader_start`): `deadline.over_while_alive` is recorded, the group is killed, and the attempt is settled through
+ *   settle(..., { timedOut, deadlineWins }): `timed_out`, an envelope written after the deadline kept as `late_envelope`.
+ * - expired with identity 'unknown' (null or mismatched leader_start, a failed probe, a dead leader with live members): NO
+ *   signal; status `unknown`, a quiescence_unknown judgment, every lock kept (capacity stays charged).
+ * - group 'gone': a timeout only when an over-limit charge was recorded while it was verified alive (L1); otherwise the
+ *   charge cannot tell when it ended, nothing is invented: the attempt is left to `resume` (action none).
+ * - another boot id: proven gone by boot identity (no probe, no signal), settled through settle(..., { bootEnded }) in the
+ *   owning worktree (an envelope from before the reboot is recorded normally); the unmeasured interval is recorded.
+ * `deadline.timed_out` is written only when the attempt really ends `timed_out`.
  * Returns { ticket, run_id, measurement, swept: [{ attempt_id, kind, identity, action, charged_ms?, status }] }.
  */
 export async function reconcileDeadlines(ctx) {
+  const clock = resolveSweepClock(ctx.deadlineClock); // throws deadline_clock_refused for any non-test injected clock
   return locked(ctx, async (E) => {
-    if (E.P.placement !== 'durable') throw coded('deadlines_unsupported', `${ctx.ticket} is not a durable run (config.durableRun): its attempts carry no persisted deadline`);
+    if (E.P.placement !== 'durable') throw coded('deadlines_unsupported', `${ctx.ticket} is not a durable run: its attempts carry no persisted deadline`);
     if (E.S.run_id !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${E.S.run_id}, not ${ctx.runId}`);
-    const clock = ctx.deadlineClock ?? null; // MEASUREMENT_QUALIFIED is false: the real clock is never bound here
+    const measurement = clock === null ? 'unqualified' : MEASUREMENT_QUALIFIED ? 'qualified' : 'test_clock';
     const swept = [];
     const unknown = (a, reason) => {
       a.status = 'unknown';
       if (!E.S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === a.node)) E.S.judgments.push(judgment('quiescence_unknown', a.node, reason));
     };
+    const runner = (a) => RUNNER_KINDS.includes(a.kind);
     for (const a of E.S.attempts) {
       if (!LIVE.includes(a.status) || !a.deadline || a.pid === undefined || a.pid === null) continue;
       const identity = groupIdentity(a, E.alive);
       const row = { attempt_id: a.attempt_id, kind: a.kind, identity };
-      if (!clock) {
-        a.deadline.last_sweep = { measured: false, reason: MEASUREMENT_QUALIFIED ? 'no_clock' : 'measurement_unqualified', identity };
-        swept.push({ ...row, action: 'none', reason: a.deadline.last_sweep.reason, status: a.status });
+      if (clock === null) {
+        a.deadline.last_sweep = { measured: false, reason: 'measurement_unqualified', identity };
+        swept.push({ ...row, action: 'none', reason: 'measurement_unqualified', status: a.status });
         continue;
       }
       const m = observe(a.deadline, clock);
       row.charged_ms = m.charged_ms;
       if (m.boot_ended) {
-        const runner = RUNNER_KINDS.includes(a.kind);
-        await retire(E.S, a, E.alive, runner ? 'abandoned' : 'crashed', { bootEnded: true });
-        const item = a.kind === 'repair' ? E.S.repairs.find(r => r.id === a.node) : E.S.nodes[a.node];
-        if (!runner && item) { item.state = 'failed'; item.reason = 'the host rebooted during the attempt; its execution after the last observation is unmeasured'; }
+        if (runner(a) || E.foreign) {
+          await retire(E.S, a, E.alive, runner(a) ? 'abandoned' : 'crashed', { bootEnded: true });
+          const item = a.kind === 'repair' ? E.S.repairs.find(r => r.id === a.node) : E.S.nodes[a.node];
+          if (!runner(a) && item) { item.state = 'failed'; item.reason = 'the host rebooted during the attempt (settled from another worktree; ownership not checked)'; }
+        } else await settle(E, a, { bootEnded: true });
         swept.push({ ...row, identity: 'gone_by_boot', action: 'settled', status: a.status });
         continue;
       }
-      if (!m.measured || !m.expired) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
+      if (identity === 'verified' && m.measured && m.expired) a.deadline.over_while_alive = { charged_ms: m.charged_ms };
+      const overAlive = a.deadline.over_while_alive !== undefined;
+      if (!m.measured || !m.expired || (identity === 'gone' && !overAlive)) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
       if (identity === 'unknown') {
         unknown(a, `deadline of ${a.attempt_id} expired (${m.charged_ms}/${a.deadline.limit_ms} ms) but its process group ${a.pgid ?? a.pid} has no verified identity: not signalled, its capacity stays charged`);
         swept.push({ ...row, action: 'no_signal', status: a.status });
         continue;
       }
       if (identity === 'verified') await io.killGroup(a.pgid, E.alive);
-      a.deadline.timed_out = { charged_ms: m.charged_ms, signalled: identity === 'verified' };
-      if (RUNNER_KINDS.includes(a.kind)) { if (!(await retire(E.S, a, E.alive, 'timed_out'))) unknown(a, `cannot prove ${a.kind} runner group ${a.pgid} has exited after its deadline`); }
-      else await settle(E, a, { timedOut: true });
+      if (runner(a)) { if (!(await retire(E.S, a, E.alive, 'timed_out'))) unknown(a, `cannot prove ${a.kind} runner group ${a.pgid} has exited after its deadline`); }
+      else await settle(E, a, { timedOut: true, deadlineWins: true });
+      if (a.status === 'timed_out') a.deadline.timed_out = { charged_ms: m.charged_ms, signalled: identity === 'verified' };
       swept.push({ ...row, action: identity === 'verified' ? 'killed' : 'settled', status: a.status });
     }
-    if (swept.length) note(E.S, 'DEADLINE_SWEEP', { measurement: clock ? 'injected' : 'unqualified', swept: swept.map(r => ({ attempt_id: r.attempt_id, action: r.action, status: r.status })) });
-    return { ticket: ctx.ticket, run_id: ctx.runId, measurement: clock ? 'injected' : 'unqualified', swept };
-  });
+    if (swept.length) note(E.S, 'DEADLINE_SWEEP', { measurement, swept: swept.map(r => ({ attempt_id: r.attempt_id, action: r.action, status: r.status })) });
+    return { ticket: ctx.ticket, run_id: ctx.runId, measurement, swept };
+  }, { foreign: true });
 }
 
 /** How long a second `adopt` waits for the ticket lock before lock_timeout (it then finds the window spent). */
@@ -807,7 +876,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;

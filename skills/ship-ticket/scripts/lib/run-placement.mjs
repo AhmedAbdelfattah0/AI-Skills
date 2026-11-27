@@ -4,10 +4,10 @@
  * Node built-ins only, no local imports.
  *
  * Two placements:
- * - `legacy` (every run before S1, and every run whose DAG does not set config.durableRun): `git rev-parse --git-path
+ * - `legacy` (every run before S1, and a new run whose DAG sets the escape hatch config.durableRun: false): `git rev-parse --git-path
  *   ai-skills/ship-ticket/<ticket>.{state.json,engine.jsonl,usage.jsonl,attempts,lock}`. In a linked worktree that is the
  *   worktree's private gitdir, which `git worktree remove` deletes (RC9). Unchanged, byte for byte.
- * - `durable` (a run whose DAG sets config.durableRun { version: 1 }, chosen at init): one run directory in the git COMMON
+ * - `durable` (every NEW run since S1: policy versions 13-24, chosen at init): one run directory in the git COMMON
  *   dir, `<git-common-dir>/ai-skills/ship-ticket/runs/<ticket>/{state.json,engine.jsonl,usage.jsonl,attempts/,lock}`,
  *   shared by every worktree of the repository, so removing a worktree loses no engine state.
  *
@@ -16,7 +16,7 @@
  * run yet, and only `init` (which knows the DAG) chooses. In the main checkout both live under `.git`, at different names.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
@@ -59,4 +59,17 @@ export function enginePaths(repoRoot, ticket, { prefer = null } = {}) {
   if (l) return L;
   if (d) return D;
   return prefer === 'durable' ? D : prefer === 'legacy' ? L : null;
+}
+
+/**
+ * S1 (Codex 3): every legacy state file of `ticket` in the repository, whatever worktree it belongs to: the main checkout's
+ * `<common>/ai-skills/ship-ticket/<ticket>.state.json` and each linked worktree's
+ * `<common>/worktrees/<name>/ai-skills/ship-ticket/<ticket>.state.json` (a removed worktree's gitdir is gone with it).
+ */
+export function legacyStatesAnywhere(repoRoot, ticket) {
+  if (!SAFE_ID.test(ticket ?? '')) throw coded('bad_context', 'a safe ticket id is required');
+  const common = rev(repoRoot, ['--git-common-dir']);
+  const dirs = [common];
+  try { for (const d of readdirSync(join(common, 'worktrees'))) dirs.push(join(common, 'worktrees', d)); } catch { /* no linked worktree */ }
+  return dirs.map(d => join(d, 'ai-skills', 'ship-ticket', `${ticket}.state.json`)).filter(f => existsSync(f));
 }

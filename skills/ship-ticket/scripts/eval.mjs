@@ -458,7 +458,7 @@ function parseArgs(argv) {
 }
 
 function git(repo, args) {
-  const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
   if (r.status !== 0) fail(r.stderr.trim() || `git ${args.join(' ')} failed`);
   return r.stdout.trim();
 }

@@ -4,9 +4,11 @@
  * STATUS: the measurement mechanism below is UNQUALIFIED. Its design and the G0 falsification fixtures (§8 P1-M a-f) are in
  * lib/deadline-g0.test-helper.mjs and the S1 report; not every fixture can run on a host in-session (a real wall-clock
  * step, host sleep and reboot cannot), so G0 has NOT passed and `MEASUREMENT_QUALIFIED` is false. While it is false the
- * engine never derives a signal from a measurement: the sweep (`run-engine.mjs reconcile --deadlines`) classifies identity
- * and records the attempt as unmeasured, and the launcher's in-process timers stay the only enforcer. A test injects a
- * clock (`ctx.deadlineClock`, in-process only, never set by the CLI) to exercise the persisted-deadline logic.
+ * engine never derives a signal from a measurement: the real clock is bound for ARMING only (the persisted origin), never
+ * for enforcement; the sweep (`run-engine.mjs reconcile --deadlines`) classifies identity and records the attempt as
+ * unmeasured, and the launcher's in-process timers stay the only enforcer. `resolveSweepClock` is the gate: the real clock
+ * when MEASUREMENT_QUALIFIED, else only a clock created by `testClock()` (in-process tests; the CLI never passes one);
+ * any other injected clock is refused (`deadline_clock_refused`).
  *
  * Mechanism (as designed, for falsification):
  * - Clock: `process.hrtime.bigint()`, libuv `uv_hrtime`. On darwin with libuv 1.51 (Node 22) it was MEASURED on the S1 host
@@ -60,6 +62,21 @@ export function realClock() {
   return { nowNs: () => process.hrtime.bigint(), bootId: memoBoot.id };
 }
 
+const TEST_CLOCK = Symbol('ship-ticket unqualified test clock');
+/** A clock for in-process tests of the persisted-deadline logic: `{ bootId, nowNs }` tagged as a test clock. */
+export const testClock = (clock) => Object.assign(clock, { [TEST_CLOCK]: true });
+/**
+ * S1 (L5): the clock the deadline sweep may enforce with. MEASUREMENT_QUALIFIED -> the real clock (an injected one only when
+ * it is a testClock); otherwise a testClock or null (nothing measured, nothing signalled). Throws `deadline_clock_refused`
+ * for any other injected clock, so no caller can enable unqualified enforcement by passing one.
+ */
+export function resolveSweepClock(injected) {
+  if (injected !== undefined && injected !== null && injected[TEST_CLOCK] !== true)
+    throw Object.assign(new Error('deadline_clock_refused: the D5 measurement is unqualified; only a testClock() may be injected'), { code: 'deadline_clock_refused' });
+  if (injected) return injected;
+  return MEASUREMENT_QUALIFIED ? realClock() : null;
+}
+
 /** The persisted deadline of a just-launched attempt (its group is the attempt's pgid): limit and clock origin. */
 export function armRecord(limitMs, clock = realClock()) {
   const start = clock.nowNs();
@@ -69,10 +86,10 @@ export function armRecord(limitMs, clock = realClock()) {
 
 /**
  * Arm attempt `a` of state `S` right after its pid is recorded (before the release byte is sent), in a durable run only
- * (config.durableRun; a legacy run records nothing, byte for byte). `clock` is the in-process test clock, else the real one.
+ * (S.durable; a legacy run records nothing, byte for byte). `clock` is the in-process test clock, else the real one.
  */
 export function armAttempt(S, a, limitMs, clock = null) {
-  if (!S?.config?.durableRun || !a?.pid) return;
+  if (!S?.durable || !a?.pid) return;
   a.deadline = armRecord(limitMs, clock ?? realClock());
 }
 

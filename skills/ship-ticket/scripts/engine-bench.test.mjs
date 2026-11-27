@@ -198,7 +198,7 @@ test('S8 baseline: what the review gate records and refuses for evidence-integri
   assert.equal(r.metrics.reference_bytes, referenceBytes({}));
 });
 
-test('S9 baseline: a moved base is not detected by the engine in this world (single RED node, no dependent, so no RED check ran), and the archive does not carry the RED attempt output', { skip: N7_SKIP }, async () => {
+test('S9 baseline: a moved base is not detected by the engine in this world (single RED node, no dependent, so no RED check ran); since S1 the archive of a (durable, default) run carries the RED attempt output', { skip: N7_SKIP }, async () => {
   const r = await scenario('S9');
   assertResult(r, 'S9');
   const base = r.shows.base_moves_mid_run;
@@ -211,8 +211,8 @@ test('S9 baseline: a moved base is not detected by the engine in this world (sin
   assert.equal(red.after_base_move.red_invalidated, false);
   assert.equal(red.after_base_move.red_still_accepted, true);
   assert.equal(red.red_attempt_output_live, true);
-  assert.equal(red.archive_contains_attempts, false);
-  assert.deepEqual(red.archived_files, ['engine.jsonl', 'manifest.json', 'state.json']);
+  assert.equal(red.archive_contains_attempts, true, 'S1: a durable run archives its attempts/ outputs');
+  assert.deepEqual(red.archived_files, ['engine.jsonl', 'manifest.json', 'outputs', 'outputs.json', 'state.json']);
   assert.equal(red.second_run_init.refused, 'state_exists', 'a second run cannot start from the live state; it would have to rely on the archive');
 });
 

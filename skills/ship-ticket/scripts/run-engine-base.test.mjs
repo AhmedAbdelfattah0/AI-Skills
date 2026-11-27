@@ -17,6 +17,10 @@ import { existsSync, mkdirSync, writeFileSync, renameSync, readFileSync, readdir
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture, withOrigin } from './engine-test-fixture.mjs';
+import { legacyPlacement } from './engine-test-fixture.mjs';
+// S1: this file pins frozen bytes (goldens, policy version numbers, origin/main differentials): its runs use the
+// documented legacy escape hatch (config.durableRun: false). The durable default is covered by run-engine-substrate.test.mjs.
+legacyPlacement();
 import * as SP from './security-plan.mjs';
 import { init, status, gate as gateCmd } from './run-engine.mjs';
 import { POLICY_SEMANTICS } from './engine-policy.mjs';

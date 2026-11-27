@@ -58,7 +58,7 @@ import { setTimeout as timerSleep } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { processInfo } from '../engine-quiesce.mjs';
+import { processInfo, differentStart } from '../engine-quiesce.mjs';
 
 /** Same shape as engine-dag.mjs `coded` (kept local: engine-dag imports harness.mjs and gate.mjs). */
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
@@ -127,6 +127,8 @@ export async function writeStateAtomic(file, state, { hooks, fs = {}, platform =
 
 const RECOVER = 'stop every engine command for this ticket, confirm no engine process is running, then remove';
 
+/** link() errors meaning "this filesystem has no hard links": the marker falls back to an exclusive create. */
+const NO_LINK = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS', 'EMLINK']);
 /** How many stale-marker takeovers may nest (each needs a recoverer killed inside the previous takeover's window). */
 const MARKER_DEPTH = 3;
 
@@ -142,22 +144,28 @@ const MARKER_DEPTH = 3;
  * marker it read is gone or no longer N. The winner re-reads `path` (still N: only the holder of `<path>.<N>` or N's
  * dead owner could have removed it) and renames its own complete record over it. Nesting is bounded (MARKER_DEPTH).
  */
-function claimMarker(path, rec, info, host, depth = 0) {
+function claimMarker(path, rec, info, host, depth = 0, link = linkSync) {
   const body = JSON.stringify(rec);
   const tmp = `${path}.${rec.nonce}.${depth}.tmp`;
   const release = () => { try { if (JSON.parse(readFileSync(path, 'utf8')).nonce === rec.nonce) unlinkSync(path); } catch { /* gone */ } };
   const refuse = (why) => coded('lock_held', `another recovery is in progress (${path}${why ? `: ${why}` : ''}); if none is, ${RECOVER} the marker`);
   writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 });
   try {
-    try { linkSync(tmp, path); return { release }; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    try { link(tmp, path); return { release }; } catch (e) {
+      if (NO_LINK.has(e.code)) {
+        // S1 (m5): a filesystem without hard links (some exFAT/SMB/volume mounts): the pre-S1 exclusive create. A kill -9
+        // between its create and its write leaves an empty marker, which is refused as unreadable (lock_held), as before S1.
+        try { writeFileSync(path, body, { flag: 'wx', mode: 0o600 }); return { release }; } catch (w) { if (w.code !== 'EEXIST') throw w; }
+      } else if (e.code !== 'EEXIST') throw e;
+    }
     let m;
     try { m = JSON.parse(readFileSync(path, 'utf8')); } catch (e) { throw refuse(e.code === 'ENOENT' ? 'it was released meanwhile' : 'unreadable'); }
     if (!m || !Number.isInteger(m.pid) || m.pid <= 0 || m.pid > 0x7fffffff || typeof m.nonce !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(m.nonce)) throw refuse('unreadable');
     if ((m.host ?? host) !== host) throw refuse(`written on host ${m.host}`);
     const o = info(m.pid) ?? { alive: false, startTime: null };
-    const stale = !o.alive || (o.startTime !== null && (m.process_start_time ?? null) !== null && o.startTime !== m.process_start_time);
+    const stale = !o.alive || differentStart(o, m.process_start_time ?? null);
     if (!stale || depth >= MARKER_DEPTH) throw refuse('');
-    const sub = claimMarker(`${path}.${m.nonce}`, rec, info, host, depth + 1);
+    const sub = claimMarker(`${path}.${m.nonce}`, rec, info, host, depth + 1, link);
     try {
       let cur = null;
       try { cur = JSON.parse(readFileSync(path, 'utf8')); } catch { /* removed meanwhile */ }
@@ -178,6 +186,7 @@ function claimMarker(path, rec, info, host, depth = 0) {
  *   await), `sleep`/`slept` (around each back-off sleep) and `commit` (immediately before the final
  *   cancellation check, which is the last thing before the one success return). A test aborts the signal from
  *   it, synchronously or after N microtasks, to reach every await and microtask boundary.
+ * - `link(from, to)` (S1) replaces linkSync in the recovery marker publish (a filesystem without hard links).
  * - `readLock`/`unlinkLock` replace readFileSync/unlinkSync in the cancellation release only
  *   (fault injection for the leak report). The normal `handle.release()` and the stale-lock
  *   recovery never use them.
@@ -288,7 +297,9 @@ export async function acquireLock(ctx, options = {}) {
     const other = info(held.pid) ?? { alive: false, startTime: null };
     // Recovery needs proof: a dead PID, or a live PID whose known start time differs (reuse). A live
     // holder whose start time is unknown on either side is treated as the holder, never broken.
-    const reused = other.startTime !== null && (held.process_start_time ?? null) !== null && other.startTime !== held.process_start_time;
+    // S1 (m7): both forms are compared (canonical UTC and the pre-S1 local one), so a TZ/locale or format difference alone
+    // never proves reuse (engine-quiesce.mjs differentStart).
+    const reused = differentStart(other, held.process_start_time ?? null);
     if (other.alive && !reused) throw coded('lock_held', `pid ${held.pid} holds ${lockFile}`);
     step('hook');
     await boundary(ctx.hooks, 'lock-stale-observed', { lockFile, held });
@@ -296,7 +307,7 @@ export async function acquireLock(ctx, options = {}) {
     cancelFirst(); // after the await, before any state change
     // S1 (P1, N8): the marker records the recoverer's identity { pid, process_start_time, host, nonce }, so a recoverer killed
     // inside this window leaves a marker the next acquire can prove stale (claimMarker) instead of refusing it forever.
-    const claim = claimMarker(lockFile + '.recovery', { pid, process_start_time: mine.process_start_time, host, nonce: mine.nonce }, info, host);
+    const claim = claimMarker(lockFile + '.recovery', { pid, process_start_time: mine.process_start_time, host, nonce: mine.nonce }, info, host, 0, seam?.link ?? linkSync);
     try {
       let current = null;
       try { current = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { /* removed or rewritten */ }

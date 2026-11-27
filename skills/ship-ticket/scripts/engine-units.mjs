@@ -287,7 +287,7 @@ async function runCheck(E, u, name, resources) {
     launch.release();
     result = await launch.done;
   } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
-  if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited'))) {
+  if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited', { owned: true }))) {
     a.status = 'unknown';
     pushJudgment(E.S, 'quiescence_unknown', u, `cannot prove unit-check runner group ${a.pgid ?? a.pid} (${u}/${name}) has exited; no check evidence recorded`);
     await E.commit();

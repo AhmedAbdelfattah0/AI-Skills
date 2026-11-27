@@ -59,6 +59,10 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents } from './engine-test-fixture.mjs';
+import { legacyPlacement } from './engine-test-fixture.mjs';
+// S1: this file pins frozen bytes (goldens, policy version numbers, origin/main differentials): its runs use the
+// documented legacy escape hatch (config.durableRun: false). The durable default is covered by run-engine-substrate.test.mjs.
+legacyPlacement();
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;

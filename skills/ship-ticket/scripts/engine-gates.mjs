@@ -270,7 +270,7 @@ async function runProof(E) {
       launch.release();
       result = await launch.done;
     } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
-    if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited'))) {
+    if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited', { owned: true }))) {
       a.status = 'unknown';
       const reason = `cannot prove proof runner group ${a.pgid ?? a.pid} (${name}) has exited; no local proof recorded`;
       if (!E.S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === name)) E.S.judgments.push(judgment('quiescence_unknown', name, reason));
@@ -534,7 +534,7 @@ async function runEvidence(E, M, d, point) {
     launch.release();
     result = await launch.done;
   } catch (e) { typed = TYPED_RUNNER_REFUSALS.has(e?.code) ? e.code : null; result = { exitCode: null, timedOut: false, error: e.message, quiescent: true }; } // retire() decides
-  if (result.quiescent !== true || !(await retire(S, a, E.alive, 'exited'))) {
+  if (result.quiescent !== true || !(await retire(S, a, E.alive, 'exited', { owned: true }))) {
     a.status = 'unknown';
     const reason = `cannot prove evidence runner group ${a.pgid ?? a.pid} (${T.entry}) has exited; no evidence recorded`;
     if (!S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === T.entry)) S.judgments.push(judgment('quiescence_unknown', T.entry, reason));

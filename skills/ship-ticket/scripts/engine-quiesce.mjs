@@ -12,14 +12,35 @@ export const LIVE = ['intent', 'launched', 'running', 'unknown'];
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-/** Real process liveness and start time (POSIX `ps lstart`; null where unavailable). */
+/** `ps -o lstart=` of `pid` under `env`, or null. */
+function lstart(pid, env) {
+  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, ...(env ? { env } : {}) });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+/** S1 (m7): the canonical, time-zone and locale independent environment of a start-time read. */
+const CANON_ENV = () => ({ ...process.env, TZ: 'UTC', LC_ALL: 'C', LC_TIME: 'C', LANG: 'C' });
+
+/**
+ * Real process liveness and start time (POSIX `ps lstart`; null where unavailable). S1 (m7): `startTime` is read under
+ * TZ=UTC and the C locale, so two processes with different TZ/LC_* agree on it; `startTimeLocal` (lazy) is the same read
+ * under the inherited environment, the form records written before S1 carry. Compare with sameStart/differentStart.
+ */
 export function processInfo(pid) {
   let alive;
   try { process.kill(pid, 0); alive = true; } catch (e) { alive = e.code === 'EPERM'; }
   if (!alive || process.platform === 'win32') return { alive, startTime: null };
-  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000 });
-  return { alive, startTime: r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null };
+  let local;
+  return { alive, startTime: lstart(pid, CANON_ENV()), get startTimeLocal() { return local === undefined ? (local = lstart(pid, null)) : local; } };
 }
+
+/** Whether probe `now` ({ startTime, startTimeLocal? }) matches the recorded start time `recorded` in either form. */
+export const sameStart = (now, recorded) => recorded != null && now?.startTime != null
+  && (now.startTime === recorded || (now.startTimeLocal != null && now.startTimeLocal === recorded));
+/**
+ * Whether `recorded` is PROVEN different from the probe (both known, and neither form matches): a mismatch caused only by
+ * the pre-S1 local-time format reads as the same process (held), never as a reused pid.
+ */
+export const differentStart = (now, recorded) => recorded != null && now?.startTime != null && !sameStart(now, recorded);
 
 /** Start time of a just-launched group leader, recorded on its attempt as `leader_start` (null when unknowable). */
 export const leaderStart = (pid) => (pid ? processInfo(pid).startTime : null);
@@ -32,7 +53,7 @@ export const leaderStart = (pid) => (pid ? processInfo(pid).startTime : null);
 function reused(a) {
   if (!a.leader_start || !a.pgid) return false;
   const now = processInfo(a.pgid);
-  return now.alive && now.startTime !== null && now.startTime !== a.leader_start;
+  return now.alive && differentStart(now, a.leader_start);
 }
 
 /**
@@ -48,13 +69,12 @@ export function groupIdentity(a, isAlive, info = processInfo) {
   if (group === false) return 'gone';
   if (group !== true || !a.leader_start) return 'unknown';
   const now = info(a.pgid);
-  return now.alive && now.startTime !== null && now.startTime === a.leader_start ? 'verified' : 'unknown';
+  return now.alive && sameStart(now, a.leader_start) ? 'verified' : 'unknown';
 }
 
 /**
  * S1 (E8): a durable run never signals a group whose leader pid is alive while its start time was not recorded: without
- * `leader_start` a live leader cannot be told from a reused pid (reused() treats it as not reused). A dead leader whose
- * group still has members is still ours (a pid is not reallocated while its group has members).
+ * `leader_start` a live leader cannot be told from a reused pid (reused() treats it as not reused).
  */
 function unverifiedLeader(a) {
   return !a.leader_start && Boolean(a.pgid) && processInfo(a.pgid).alive;
@@ -88,12 +108,18 @@ export async function quiesce(pgid, isAlive) {
  * returns true. Not proven: status 'unknown', locks kept; returns false (the caller raises the
  * quiescence_unknown judgment).
  */
-export async function retire(S, a, isAlive, status, { bootEnded = false } = {}) {
+export async function retire(S, a, isAlive, status, { bootEnded = false, owned = false } = {}) {
   const unreleased = a.pid === undefined || a.pid === null;
   // S1: `bootEnded` (the deadline sweep saw another boot id than the attempt's): every process of that boot is gone, so the
   // attempt is proven quiescent WITHOUT probing or signalling its pgid, which after a reboot may name an unrelated group.
   if (bootEnded && !unreleased) return proven(S, a, status);
-  if (!unreleased && (reused(a) || (S.config?.durableRun && unverifiedLeader(a)))) { a.status = 'unknown'; return false; }
+  // S1 (Codex 1): in a durable run (S.durable), a process that did NOT launch the attempt (reconcile, resume, a later gate,
+  // the sweep: `owned` false) signals only a POSITIVELY verified group (groupIdentity 'verified'); 'gone' needs no
+  // signal; anything else (a failed start-time read, no recorded leader_start, a dead leader whose group still has
+  // members) is unknown: no signal, locks kept. The launcher's own process (`owned`, right after its child exited) and a
+  // legacy run keep the frozen reused() rule.
+  if (!unreleased && S.durable && !owned && !['verified', 'gone'].includes(groupIdentity(a, isAlive))) { a.status = 'unknown'; return false; }
+  if (!unreleased && (reused(a) || (S.durable && unverifiedLeader(a)))) { a.status = 'unknown'; return false; }
   const quiet = unreleased ? false : await quiesce(a.pgid, isAlive);
   if (quiet !== false) { a.status = 'unknown'; return false; }
   return proven(S, a, status);
