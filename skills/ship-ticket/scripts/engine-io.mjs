@@ -175,9 +175,9 @@ export function repoFileDigest(repoRoot, rel) {
 export const evidenceExists = (repoRoot) => (rel) => { try { return repoFileDigest(repoRoot, rel) !== 'missing'; } catch { return false; } };
 
 /** `gateRed` deps for the engine: durable commits, repo file digests, group liveness, the binding re-check and the RED runner. */
-export function gateRedDeps({ commit, alive, platform, repoRoot, verifyBinding, ...runner }) {
+export function gateRedDeps({ commit, alive, platform, repoRoot, verifyBinding, deadlineClock, ...runner }) {
   return { newAttemptId: () => 'att-' + randomUUID(), commit, digestFile: async (f) => repoFileDigest(repoRoot, f), isGroupAlive: alive,
-    platform, verifyBinding, spawnRunner: gateRunner({ repoRoot, platform, alive, ...runner }) };
+    platform, verifyBinding, spawnRunner: gateRunner({ repoRoot, platform, alive, ...runner }), ...(deadlineClock ? { deadlineClock } : {}) };
 }
 
 /** Current digests of the named repo-relative artifacts (the gate compares them to the graded ones). */
@@ -279,7 +279,7 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
     const done = (async () => {
       const timer = setTimeout(() => {
         timedOut = true;
-        killing = platform === 'win32' ? spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }) : killGroup(pgid, alive);
+        killing = platform === 'win32' ? spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 30000 }) : killGroup(pgid, alive);
       }, timeoutMs);
       const status = await exited;
       clearTimeout(timer);

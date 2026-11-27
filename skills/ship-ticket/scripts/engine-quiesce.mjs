@@ -35,6 +35,31 @@ function reused(a) {
   return now.alive && now.startTime !== null && now.startTime !== a.leader_start;
 }
 
+/**
+ * S1 (P1): the identity of attempt `a`'s process group for an enforcer that did NOT launch it (the deadline sweep):
+ * 'verified' only when `leader_start` is recorded and the leader pid is alive now with exactly that start time;
+ * 'gone' when no member of the group exists; otherwise 'unknown' (no pgid, no recorded or readable start time, a
+ * different start time, or a dead leader whose group still has members, which this check cannot attribute). Only
+ * 'verified' may be signalled. Stricter than reused(), which treats an absent `leader_start` as not reused.
+ */
+export function groupIdentity(a, isAlive, info = processInfo) {
+  if (!a?.pgid || !Number.isInteger(a.pgid) || a.pgid <= 0) return 'unknown';
+  const group = isAlive(a.pgid);
+  if (group === false) return 'gone';
+  if (group !== true || !a.leader_start) return 'unknown';
+  const now = info(a.pgid);
+  return now.alive && now.startTime !== null && now.startTime === a.leader_start ? 'verified' : 'unknown';
+}
+
+/**
+ * S1 (E8): a durable run never signals a group whose leader pid is alive while its start time was not recorded: without
+ * `leader_start` a live leader cannot be told from a reused pid (reused() treats it as not reused). A dead leader whose
+ * group still has members is still ours (a pid is not reallocated while its group has members).
+ */
+function unverifiedLeader(a) {
+  return !a.leader_start && Boolean(a.pgid) && processInfo(a.pgid).alive;
+}
+
 /** SIGTERM then SIGKILL the group, waiting for it to go; returns the final liveness (null when unknowable). */
 export async function killGroup(pgid, isAlive) {
   for (const sig of ['SIGTERM', 'SIGKILL']) {
@@ -63,11 +88,19 @@ export async function quiesce(pgid, isAlive) {
  * returns true. Not proven: status 'unknown', locks kept; returns false (the caller raises the
  * quiescence_unknown judgment).
  */
-export async function retire(S, a, isAlive, status) {
+export async function retire(S, a, isAlive, status, { bootEnded = false } = {}) {
   const unreleased = a.pid === undefined || a.pid === null;
-  if (!unreleased && reused(a)) { a.status = 'unknown'; return false; }
+  // S1: `bootEnded` (the deadline sweep saw another boot id than the attempt's): every process of that boot is gone, so the
+  // attempt is proven quiescent WITHOUT probing or signalling its pgid, which after a reboot may name an unrelated group.
+  if (bootEnded && !unreleased) return proven(S, a, status);
+  if (!unreleased && (reused(a) || (S.config?.durableRun && unverifiedLeader(a)))) { a.status = 'unknown'; return false; }
   const quiet = unreleased ? false : await quiesce(a.pgid, isAlive);
   if (quiet !== false) { a.status = 'unknown'; return false; }
+  return proven(S, a, status);
+}
+
+/** Quiescence proven: mark `a` retired with `status` and release every lock it holds. */
+function proven(S, a, status) {
   a.quiesced = true;
   if (status) a.status = status;
   for (const [r, holder] of Object.entries(S.locks ?? {})) if (holder === a.attempt_id) delete S.locks[r];

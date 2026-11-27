@@ -68,8 +68,9 @@ if (process.argv[2] === 'worker') {
 }
 
 // ---- harness ----------------------------------------------------------------------------------------------------
+let workers = 0;
 function startWorker(dir, runMs) {
-  const log = join(dir, 'progress.jsonl');
+  const log = join(dir, `progress-${++workers}.jsonl`); // one ground-truth log per worker
   const w = spawn(process.execPath, [SELF, 'worker', log, String(runMs)], { detached: true, stdio: 'ignore' });
   w.unref();
   return { pgid: w.pid, log, exited: new Promise(r => w.on('exit', r)) };
@@ -133,7 +134,8 @@ async function fixtureB(dir, { killMidway = false } = {}) {
   const truth = trueMs(w.log);
   const pass = fired !== null && truth >= LIMIT - TOLERANCE_MS && truth <= LIMIT + SWEEP + TOLERANCE_MS && !groupAlive(w.pgid);
   if (groupAlive(w.pgid)) try { process.kill(-w.pgid, 'SIGKILL'); } catch { /* gone */ }
-  return { fixture: killMidway ? 'e' : 'b', result: pass ? 'PASS' : 'FAIL', limit_ms: LIMIT, sweep_interval_ms: SWEEP, outages_ms: outages,
+  // (e) is only half runnable in-session: its reboot half is NOT_RUN, so a passing kill/restart half is PARTIAL, never PASS
+  return { fixture: killMidway ? 'e' : 'b', result: pass ? (killMidway ? 'PARTIAL' : 'PASS') : 'FAIL', limit_ms: LIMIT, sweep_interval_ms: SWEEP, outages_ms: outages,
     true_execution_at_kill_ms: truth, charged_at_kill_ms: fired?.charged_ms ?? null, bound_ms: LIMIT + SWEEP + TOLERANCE_MS,
     ...(killMidway ? { enforcer_killed_minus_9_and_restarted: true, reboot: 'NOT_RUN (a reboot cannot be exercised in-session; the boot-id path is SIMULATED in run-engine-substrate.test.mjs)' } : {}) };
 }

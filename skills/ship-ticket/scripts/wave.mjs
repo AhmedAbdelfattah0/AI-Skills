@@ -35,6 +35,7 @@ import { isEntrypoint } from './harness.mjs';
 import { BEGIN, END, parseRunState } from './run-state.mjs';
 import { planDigest, startCheck } from './brief.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
+import { enginePaths } from './lib/run-placement.mjs';
 
 export const WAVE_SCHEMA = 'ship-ticket-wave-v1';
 export const ENDPOINT = 'SHIP_READY';
@@ -343,9 +344,9 @@ export function worktreeProblems(t) {
   return st.stdout.trim() === '' ? [] : ['worktree_dirty'];
 }
 
+/** S1: the ticket's engine file through the one placement resolver (lib/run-placement.mjs); null when unresolvable. */
 function enginePath(worktree, key, ext) {
-  const r = git(worktree, ['rev-parse', '--git-path', `ai-skills/ship-ticket/${key}.${ext}`]);
-  return r.status === 0 ? resolve(worktree, r.stdout.trim()) : null;
+  try { const P = enginePaths(worktree, key, { prefer: 'legacy' }); return ext === 'state.json' ? P.state : P.log; } catch { return null; }
 }
 
 /** Read one ticket's state through the engine CLI `status` (no lock) and the plan's RUN-STATE; never writes. */

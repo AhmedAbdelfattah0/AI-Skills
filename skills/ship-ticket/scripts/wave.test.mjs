@@ -342,7 +342,8 @@ test('wave CLI: worktree precondition (wrong branch / dirty), unlisted claiming 
 test('wave: read-only vocabulary and import graph (B11)', () => {
   const src = readFileSync(SRC, 'utf8');
   const specs = [...src.matchAll(/^import .* from '([^']+)'/gm)].map((x) => x[1]);
-  assert.deepEqual(specs.sort(), ['./brief.mjs', './harness.mjs', './lib/shape.mjs', './run-state.mjs', './ship-ready-check.mjs', 'node:child_process', 'node:crypto', 'node:fs', 'node:path', 'node:url'].sort());
+  // S1: lib/run-placement.mjs is the read-only placement resolver of engine state (a leaf: node built-ins only, no writes)
+  assert.deepEqual(specs.sort(), ['./brief.mjs', './harness.mjs', './lib/run-placement.mjs', './lib/shape.mjs', './run-state.mjs', './ship-ready-check.mjs', 'node:child_process', 'node:crypto', 'node:fs', 'node:path', 'node:url'].sort());
   assert.ok(!specs.some((s) => /gate|carrier|engine-|run-engine|durable-io/.test(s)), 'no gate/carrier/engine internals are imported');
   const code = src.split('\n').filter((l) => !/^\s*(\*|\/\*|\/\/)/.test(l)).join('\n');
   for (const word of ['writeFileSync', 'appendFileSync', 'mkdirSync', 'rmSync', 'renameSync', 'unlinkSync', 'acquireLock', "'commit'", "'push'", "'add'", "'checkout'", 'worktree add', "'pr'", 'detached']) assert.ok(!code.includes(word), `read-only: ${word} must not appear`);

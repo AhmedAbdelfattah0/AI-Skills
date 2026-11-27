@@ -14,6 +14,7 @@ import { prepareDispatch, childEnv, spawnSpec, workerRunStateAppend } from './ca
 import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
+import { armAttempt } from './lib/deadline.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
@@ -209,7 +210,7 @@ const unquiet = (S, a, item) => {
  * duplicate writer); unknown quiescence -> judgment, locks kept; quiescent with no relevant writes
  * (or never released) -> re-queued.
  */
-async function settle(E, a, { timedOut = false, wait = 0 } = {}) {
+export async function settle(E, a, { timedOut = false, wait = 0 } = {}) {
   const { S } = E;
   const item = itemOf(S, a);
   if (!item) { if (!(await retire(S, a, E.alive, 'orphaned'))) unquiet(S, a, null); return; }
@@ -334,6 +335,7 @@ async function runAttempt(E, job) {
     await io.boundary(ctx.hooks, 'after-spawn', { attempt_id: id });
     if (!child.pid) { await exited; await settleSpawnFailure(E, a, item); return true; }
     a.pid = child.pid; a.pgid = platform === 'win32' ? null : child.pid; a.leader_start = leaderStart(a.pgid); a.status = 'launched';
+    armAttempt(S, a, timeoutMs, ctx.deadlineClock); // S1: persisted with the pid, before the release byte
     await E.commit();
     await io.boundary(ctx.hooks, 'after-pid', { attempt_id: id, pid: a.pid, pgid: a.pgid });
     await new Promise(r => child.stdin.end(io.RELEASE, r));
@@ -341,7 +343,7 @@ async function runAttempt(E, job) {
     let timedOut = false, killing = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      killing = platform === 'win32' ? spawnSync('taskkill', ['/pid', String(a.pid), '/T', '/F'], { stdio: 'ignore' }) : io.killGroup(a.pgid, E.alive);
+      killing = platform === 'win32' ? spawnSync('taskkill', ['/pid', String(a.pid), '/T', '/F'], { stdio: 'ignore', timeout: 30000 }) : io.killGroup(a.pgid, E.alive);
     }, timeoutMs);
     await exited;
     clearTimeout(timer);

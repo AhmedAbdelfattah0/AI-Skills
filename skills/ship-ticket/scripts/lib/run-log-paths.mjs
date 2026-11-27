@@ -9,7 +9,8 @@
  * (`legacyPresent`); `run-log.mjs legacy` prints it for audit; the carrier's REPAIR read is unchanged. In the main
  * checkout the old path IS the common dir, so its pre-S5 history is the shared log.
  *
- * Engine files (.state.json, .engine.jsonl, .usage.jsonl, .attempts) are not run logs and stay per-worktree.
+ * Engine files (.state.json, .engine.jsonl, .usage.jsonl, .attempts) are not run logs: they stay per-worktree unless the
+ * run is durable (S1, config.durableRun: lib/run-placement.mjs places them in <git-common-dir>/ai-skills/ship-ticket/runs/).
  */
 import { spawnSync } from 'node:child_process';
 import { accessSync, closeSync, constants as fsConstants, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs';

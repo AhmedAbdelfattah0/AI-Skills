@@ -10,8 +10,8 @@
  *   and indexers surface it): the only behavioural change on a default path, win32 only.
  * - Two default-valued seams: writeStateAtomic's `fs.fsyncSync` and acquireLock's `ctx.lockFile`
  *   (default: the per-ticket path, as before). run-engine.mjs forwards its `ctx.fs` (a test-only
- *   field) to writeStateAtomic, so an engine test could reach `fs.fsyncSync`; no caller passes
- *   `ctx.lockFile`.
+ *   field) to writeStateAtomic, so an engine test could reach `fs.fsyncSync`; since S1 run-engine.mjs
+ *   passes `ctx.lockFile` for a durable run (its common-dir run directory), and run-log-io for its log.
  * - acquireLock refuses a lock record whose pid is not an integer in 1..2^31-1 as `lock_malformed`
  *   (fail closed). Before, such a record was probed as a dead PID (or as a process group) and
  *   recovered; only a hand-edited or corrupted record can carry one.
@@ -52,7 +52,7 @@
  * holder (no reuse proof) and only a dead PID is recovered. Unchanged from engine-io.mjs.
  */
 import { spawnSync } from 'node:child_process';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as timerSleep } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
@@ -127,6 +127,49 @@ export async function writeStateAtomic(file, state, { hooks, fs = {}, platform =
 
 const RECOVER = 'stop every engine command for this ticket, confirm no engine process is running, then remove';
 
+/** How many stale-marker takeovers may nest (each needs a recoverer killed inside the previous takeover's window). */
+const MARKER_DEPTH = 3;
+
+/**
+ * S1 (P1, N8): exclusive claim of the recovery marker `path` with record `rec` ({ pid, process_start_time, host, nonce }).
+ * Returns { release() } (removes the marker only while it is still ours). The marker is published complete or not at all:
+ * written to a private temp file, then hard-linked to `path` (link fails with EEXIST when it exists), so a kill -9 never
+ * leaves a partial marker. An existing marker is refused (`lock_held`) unless it is PROVEN stale: same host (a marker
+ * without `host` predates the field and was written here), and its pid dead or alive with a known start time that differs
+ * from a recorded one (the lock's own rule). A malformed marker, an unknown start time on either side of a live pid, or a
+ * foreign host proves nothing and is refused, as before. Taking over a stale instance N needs the nested claim
+ * `<path>.<N>`, so of two recoverers that both judged N stale exactly one replaces it; the other is refused because the
+ * marker it read is gone or no longer N. The winner re-reads `path` (still N: only the holder of `<path>.<N>` or N's
+ * dead owner could have removed it) and renames its own complete record over it. Nesting is bounded (MARKER_DEPTH).
+ */
+function claimMarker(path, rec, info, host, depth = 0) {
+  const body = JSON.stringify(rec);
+  const tmp = `${path}.${rec.nonce}.${depth}.tmp`;
+  const release = () => { try { if (JSON.parse(readFileSync(path, 'utf8')).nonce === rec.nonce) unlinkSync(path); } catch { /* gone */ } };
+  const refuse = (why) => coded('lock_held', `another recovery is in progress (${path}${why ? `: ${why}` : ''}); if none is, ${RECOVER} the marker`);
+  writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 });
+  try {
+    try { linkSync(tmp, path); return { release }; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    let m;
+    try { m = JSON.parse(readFileSync(path, 'utf8')); } catch (e) { throw refuse(e.code === 'ENOENT' ? 'it was released meanwhile' : 'unreadable'); }
+    if (!m || !Number.isInteger(m.pid) || m.pid <= 0 || m.pid > 0x7fffffff || typeof m.nonce !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(m.nonce)) throw refuse('unreadable');
+    if ((m.host ?? host) !== host) throw refuse(`written on host ${m.host}`);
+    const o = info(m.pid) ?? { alive: false, startTime: null };
+    const stale = !o.alive || (o.startTime !== null && (m.process_start_time ?? null) !== null && o.startTime !== m.process_start_time);
+    if (!stale || depth >= MARKER_DEPTH) throw refuse('');
+    const sub = claimMarker(`${path}.${m.nonce}`, rec, info, host, depth + 1);
+    try {
+      let cur = null;
+      try { cur = JSON.parse(readFileSync(path, 'utf8')); } catch { /* removed meanwhile */ }
+      if (cur?.nonce !== m.nonce) throw refuse('it changed while being recovered');
+      const swap = `${tmp}.swap`;
+      writeFileSync(swap, body, { flag: 'wx', mode: 0o600 });
+      try { renameSync(swap, path); } catch (e) { try { unlinkSync(swap); } catch { /* gone */ } throw e; }
+      return { release };
+    } finally { sub.release(); }
+  } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
+}
+
 /**
  * Test-only seam key of acquireLock's options (never re-exported by engine-io.mjs; no production
  * caller passes it). `options[TEST_SEAM] = { step(name), readLock(path), unlinkLock(path) }`:
@@ -145,7 +188,10 @@ export const TEST_SEAM = Symbol('durable-io acquireLock test seam');
  * Take the per-ticket engine lock (`O_EXCL` file holding {pid, process_start_time,
  * host, run_id, nonce}). A same-host lock whose PID is dead, or alive with a
  * different start time, is recovered; concurrent recoverers race on an `O_EXCL`
- * recovery marker and re-check the observed nonce, so exactly one wins.
+ * recovery marker and re-check the observed nonce, so exactly one wins. S1 (P1, N8): the marker
+ * records { pid, process_start_time, host, nonce }; a marker left by a recoverer killed inside the
+ * window is recovered by the next acquire once it is PROVEN stale by the lock's own rule (claimMarker),
+ * where before it was refused until removed by hand. A durable run passes its common-dir `ctx.lockFile`.
  *
  * Opt-in `{ waitMs, signal, now, sleep }`: without `waitMs` one attempt is made and every error is
  * thrown as it arises (`signal` is still honoured). `now` (monotonic ms) and `sleep(ms, signal)`
@@ -248,9 +294,9 @@ export async function acquireLock(ctx, options = {}) {
     await boundary(ctx.hooks, 'lock-stale-observed', { lockFile, held });
     step('hooked');
     cancelFirst(); // after the await, before any state change
-    const marker = lockFile + '.recovery';
-    try { writeFileSync(marker, JSON.stringify({ pid, nonce: mine.nonce }), { flag: 'wx', mode: 0o600 }); }
-    catch (e) { if (e.code === 'EEXIST') throw coded('lock_held', `another recovery is in progress (${marker}); if none is, ${RECOVER} the marker`); throw e; }
+    // S1 (P1, N8): the marker records the recoverer's identity { pid, process_start_time, host, nonce }, so a recoverer killed
+    // inside this window leaves a marker the next acquire can prove stale (claimMarker) instead of refusing it forever.
+    const claim = claimMarker(lockFile + '.recovery', { pid, process_start_time: mine.process_start_time, host, nonce: mine.nonce }, info, host);
     try {
       let current = null;
       try { current = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { /* removed or rewritten */ }
@@ -258,7 +304,7 @@ export async function acquireLock(ctx, options = {}) {
       unlinkSync(lockFile);
       if (!create()) throw coded('lock_held', `${lockFile} was taken during recovery`);
       return true;
-    } finally { try { unlinkSync(marker); } catch { /* gone */ } }
+    } finally { claim.release(); }
   };
   const platform = ctx.platform ?? process.platform;
   const transient = (e) => ['lock_held', 'lock_malformed'].includes(e?.code) || e?.lockVanished === true || (platform === 'win32' && e?.code === 'EPERM');

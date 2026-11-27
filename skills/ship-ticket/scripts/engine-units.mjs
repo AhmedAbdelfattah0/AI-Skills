@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSpec } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
+import { armAttempt } from './lib/deadline.mjs';
 import { note, judgment, closure, clampTimeout, coded } from './engine-dag.mjs';
 import { baseCandidate, baseCommit } from './engine-base-read.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
@@ -38,7 +39,7 @@ export function runnerDeps(E) {
   const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
   return io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn,
     commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
-    verifyBinding: () => E.verifyBinding() });
+    verifyBinding: () => E.verifyBinding(), deadlineClock: ctx.deadlineClock });
 }
 
 /** A prototype-free record (unit and check names are keys; `constructor` must stay an ordinary name). */
@@ -280,6 +281,7 @@ async function runCheck(E, u, name, resources) {
   try {
     const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs) });
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
+    armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
     await E.commit();
     await io.boundary(E.ctx.hooks, 'unit-check-running', { attempt_id: a.attempt_id, unit: u, check: name });
     launch.release();

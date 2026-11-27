@@ -12,6 +12,7 @@
  * and run-engine-repair.test.mjs.
  *
  * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id>
+ *      run-engine.mjs reconcile --deadlines true ... (S1: the persisted-deadline sweep of a durable run; reconcileDeadlines)
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
  *      run-engine.mjs archive ... [--retire true]; run-engine.mjs adopt ... --from <archive dir> (S-13a, engine-adopt.mjs)
  *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
@@ -21,7 +22,8 @@
  *        plan-time dry run of init's plan and DAG checks (no START, state or write); exit 0 with the
  *        obligation matrix, 1 with `run-engine: <code>: ...` (F12a).
  */
-import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync, realpathSync, cpSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -45,25 +47,47 @@ import { redChanges } from './engine-attempts.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
+import { enginePaths, legacyPaths } from './lib/run-placement.mjs';
+import { samePath } from './lib/run-log-paths.mjs';
+import { observe, MEASUREMENT_QUALIFIED } from './lib/deadline.mjs';
+import { groupIdentity, retire } from './engine-quiesce.mjs';
+import { settle } from './engine-attempts.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
+
+/** The top level of the work tree at `repoRoot` (realpath when it exists), recorded on a durable run as `worktree`. */
+function worktreeTop(repoRoot) {
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
+  const top = r.status === 0 ? r.stdout.trim() : resolve(repoRoot);
+  try { return realpathSync(top); } catch { return resolve(top); }
+}
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
   'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'policy', 'catalogFile', 'now']);
+CTX_KEYS.add('deadlineClock'); // S1: the in-process test clock of the deadline sweep (never set by the CLI)
+const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check', 'evidence'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_RETRIES = 1;
 
-function locate(ctx) {
+/**
+ * The run's files (S1: lib/run-placement.mjs, the one placement resolver). An existing state decides its placement
+ * (legacy `--git-path` or the durable common-dir run directory); with none, `prefer` (init's choice from the DAG) or legacy.
+ */
+function locate(ctx, prefer = 'legacy') {
   if (!SAFE_ID.test(ctx?.ticket ?? '') || !SAFE_ID.test(ctx?.runId ?? '') || typeof ctx.repoRoot !== 'string')
     throw coded('bad_context', 'repoRoot, safe ticket and runId required');
-  const base = `ai-skills/ship-ticket/${ctx.ticket}`;
-  return { state: io.gitPath(ctx.repoRoot, base + '.state.json'), log: io.gitPath(ctx.repoRoot, base + '.engine.jsonl'),
-    usage: io.gitPath(ctx.repoRoot, base + '.usage.jsonl'), attempts: io.gitPath(ctx.repoRoot, base + '.attempts'),
+  const F = enginePaths(ctx.repoRoot, ctx.ticket, { prefer });
+  return { placement: F.placement, runDir: F.dir, lock: F.lock, state: F.state, log: F.log, usage: F.usage, attempts: F.attempts,
     planRel: `.specs/plans/${ctx.ticket}.md`, plan: join(ctx.repoRoot, '.specs', 'plans', ctx.ticket + '.md') };
+}
+
+/** Init's placement: durable when the DAG file sets config.durableRun (validated at init); anything unreadable is legacy. */
+function initPlacement(ctx) {
+  try { return JSON.parse(readFileSync(ctx.dagFile, 'utf8'))?.config?.durableRun !== undefined ? 'durable' : 'legacy'; } catch { return 'legacy'; }
 }
 
 /**
@@ -111,8 +135,8 @@ function auditNow(ctx) {
 }
 
 /** Context for one command: paths, state, serialized commits and live in-process attempts. */
-function open(ctx) {
-  const P = locate(ctx);
+function open(ctx, prefer) {
+  const P = locate(ctx, prefer);
   const E = { ctx, P, S: null, policy: null, live: new Map(), refused: new Set(), lock: Promise.resolve(), verifyBinding: () => verifyBinding(E),
     stamps: { ev: new Map(), end: new Map() },
     alive: (pgid) => (ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)))(pgid),
@@ -172,9 +196,11 @@ function open(ctx) {
  * again after it, so an owner line appended between commands is trusted at the next command and a
  * line appended while this command's attempts ran is not.
  */
-async function locked(ctx, fn, { load = true, waitMs } = {}) {
-  const E = open(ctx);
-  const lock = await (waitMs === undefined ? io.acquireLock(ctx) : io.acquireLock(ctx, { waitMs }));
+async function locked(ctx, fn, { load = true, waitMs, prefer } = {}) {
+  const E = open(ctx, prefer);
+  // S1: a durable run's lock lives in its common-dir run directory; a legacy run keeps its per-worktree lock (unchanged).
+  const lockCtx = E.P.placement === 'durable' ? { ...ctx, lockFile: E.P.lock } : ctx;
+  const lock = await (waitMs === undefined ? io.acquireLock(lockCtx) : io.acquireLock(lockCtx, { waitMs }));
   const onSignal = () => { lock.release().finally(() => process.exit(130)); };
   const signals = ctx.handleSignals === false ? [] : ['SIGINT', 'SIGTERM'];
   for (const s of signals) process.on(s, onSignal);
@@ -193,6 +219,9 @@ async function locked(ctx, fn, { load = true, waitMs } = {}) {
 function verifyBinding(E) {
   const { S, ctx } = E;
   if (S.run_id !== ctx.runId) return [judgment('run_mismatch', null, `engine state belongs to run ${S.run_id}, not ${ctx.runId}`)];
+  // S1: a durable run's state is shared by every worktree; only the worktree that started it may mutate it.
+  if (S.worktree !== undefined && !samePath(S.worktree, worktreeTop(ctx.repoRoot)))
+    return [judgment('worktree_mismatch', null, `engine state of ${S.ticket} belongs to the worktree ${S.worktree}, not ${ctx.repoRoot}`)];
   const out = [];
   try {
     const approved = approvedPlan(ctx, E.P, S);
@@ -413,6 +442,7 @@ async function bindTestKinds(ctx, config, text, pinned = null) {
 export async function init(ctx) {
   return locked(ctx, async (E) => {
     if (existsSync(E.P.state)) throw coded('state_exists', `${E.P.state} already exists`);
+    if (E.P.placement === 'durable' && existsSync(legacyPaths(ctx.repoRoot, ctx.ticket).state)) throw coded('state_exists', `a legacy engine state of ${ctx.ticket} exists in this worktree`);
     const { text, digest, events, start } = approvedPlan(ctx, E.P);
     let raw;
     try { raw = readFileSync(ctx.dagFile); } catch { throw coded('dag_invalid', 'dagFile unreadable'); }
@@ -443,7 +473,8 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...(dag.config.durableRun ? { worktree: worktreeTop(ctx.repoRoot) } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
@@ -454,7 +485,7 @@ export async function init(ctx) {
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
-  }, { load: false });
+  }, { load: false, prefer: initPlacement(ctx) });
 }
 
 /** Read-only STATUS (freeze drift is reported, nothing is written). */
@@ -666,13 +697,85 @@ export async function archive(ctx) {
         files[name] = sha(readFileSync(join(stage, name)));
       }
       writeFileSync(join(stage, 'manifest.json'), JSON.stringify({ ticket: ctx.ticket, run_id: ctx.runId, archived_at: new Date().toISOString(), files }, null, 2) + '\n');
+      // S1: a durable run also preserves the outputs its records reference (attempts/: worker .out, envelopes, plan
+      // snapshots), with their own sha256 list (outputs.json); manifest.json and its file set are unchanged.
+      if (E.P.placement === 'durable' && existsSync(E.P.attempts)) {
+        cpSync(E.P.attempts, join(stage, 'outputs', 'attempts'), { recursive: true, verbatimSymlinks: true });
+        const listed = Object.fromEntries(readdirSync(join(stage, 'outputs', 'attempts')).sort()
+          .map(f => [f, sha(readFileSync(join(stage, 'outputs', 'attempts', f)))]));
+        writeFileSync(join(stage, 'outputs.json'), JSON.stringify({ ticket: ctx.ticket, run_id: ctx.runId, attempts: listed }, null, 2) + '\n');
+      }
       renameSync(stage, dir);
     } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
     if (!ctx.retire) return { archive: dir, files };
     const retired = await retireLive({ dir, files, sources: { 'state.json': E.P.state, 'engine.jsonl': E.P.log, 'usage.jsonl': E.P.usage }, hooks: ctx.hooks,
       record: { run_id: runId, final_seq: raw.seq, authority_present: authorityPresent } });
+    // S1: the run directory's attempts follow the retired state (renamed, never deleted), so a new run starts clean.
+    if (E.P.placement === 'durable' && existsSync(E.P.attempts)) renameSync(E.P.attempts, join(dir, 'retired', 'attempts'));
     return { archive: dir, files, retired };
   }, { load: false });
+}
+
+/**
+ * S1 (P1): the deadline sweep, `reconcile --deadlines true`: an enforcer that is NOT the launcher of the attempts it
+ * checks. Invoked in-session (no scheduler is installed). It runs under the run's lock, so it acts once the driving
+ * process is gone (a live driver holds the lock and enforces its own in-process timers). Durable runs only
+ * (`deadlines_unsupported` otherwise: a legacy attempt has no persisted deadline). For every released LIVE attempt with a
+ * persisted deadline:
+ * - Measurement (lib/deadline.mjs) is UNQUALIFIED (G0 not passed): with no clock (`ctx.deadlineClock` is an in-process
+ *   test injection; the CLI never sets it) nothing is measured or signalled; the attempt records
+ *   `deadline.last_sweep { measured: false, reason: 'measurement_unqualified', identity }`.
+ * - With a clock: the charge is observed. Expired and the group 'verified' (engine-quiesce.mjs groupIdentity: leader alive
+ *   with exactly the recorded `leader_start`) -> the group is killed and the attempt settled `timed_out` through the
+ *   existing settle/retire path. Expired and 'gone' -> settled `timed_out` without a signal. Expired and 'unknown' (null or
+ *   mismatched identity) -> NO signal: status `unknown`, a quiescence_unknown judgment, every lock kept (capacity stays
+ *   charged). Another boot id -> proven gone by boot identity (no probe, no signal), the unmeasured interval recorded.
+ * Returns { ticket, run_id, measurement, swept: [{ attempt_id, kind, identity, action, charged_ms?, status }] }.
+ */
+export async function reconcileDeadlines(ctx) {
+  return locked(ctx, async (E) => {
+    if (E.P.placement !== 'durable') throw coded('deadlines_unsupported', `${ctx.ticket} is not a durable run (config.durableRun): its attempts carry no persisted deadline`);
+    if (E.S.run_id !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${E.S.run_id}, not ${ctx.runId}`);
+    const clock = ctx.deadlineClock ?? null; // MEASUREMENT_QUALIFIED is false: the real clock is never bound here
+    const swept = [];
+    const unknown = (a, reason) => {
+      a.status = 'unknown';
+      if (!E.S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === a.node)) E.S.judgments.push(judgment('quiescence_unknown', a.node, reason));
+    };
+    for (const a of E.S.attempts) {
+      if (!LIVE.includes(a.status) || !a.deadline || a.pid === undefined || a.pid === null) continue;
+      const identity = groupIdentity(a, E.alive);
+      const row = { attempt_id: a.attempt_id, kind: a.kind, identity };
+      if (!clock) {
+        a.deadline.last_sweep = { measured: false, reason: MEASUREMENT_QUALIFIED ? 'no_clock' : 'measurement_unqualified', identity };
+        swept.push({ ...row, action: 'none', reason: a.deadline.last_sweep.reason, status: a.status });
+        continue;
+      }
+      const m = observe(a.deadline, clock);
+      row.charged_ms = m.charged_ms;
+      if (m.boot_ended) {
+        const runner = RUNNER_KINDS.includes(a.kind);
+        await retire(E.S, a, E.alive, runner ? 'abandoned' : 'crashed', { bootEnded: true });
+        const item = a.kind === 'repair' ? E.S.repairs.find(r => r.id === a.node) : E.S.nodes[a.node];
+        if (!runner && item) { item.state = 'failed'; item.reason = 'the host rebooted during the attempt; its execution after the last observation is unmeasured'; }
+        swept.push({ ...row, identity: 'gone_by_boot', action: 'settled', status: a.status });
+        continue;
+      }
+      if (!m.measured || !m.expired) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
+      if (identity === 'unknown') {
+        unknown(a, `deadline of ${a.attempt_id} expired (${m.charged_ms}/${a.deadline.limit_ms} ms) but its process group ${a.pgid ?? a.pid} has no verified identity: not signalled, its capacity stays charged`);
+        swept.push({ ...row, action: 'no_signal', status: a.status });
+        continue;
+      }
+      if (identity === 'verified') await io.killGroup(a.pgid, E.alive);
+      a.deadline.timed_out = { charged_ms: m.charged_ms, signalled: identity === 'verified' };
+      if (RUNNER_KINDS.includes(a.kind)) { if (!(await retire(E.S, a, E.alive, 'timed_out'))) unknown(a, `cannot prove ${a.kind} runner group ${a.pgid} has exited after its deadline`); }
+      else await settle(E, a, { timedOut: true });
+      swept.push({ ...row, action: identity === 'verified' ? 'killed' : 'settled', status: a.status });
+    }
+    if (swept.length) note(E.S, 'DEADLINE_SWEEP', { measurement: clock ? 'injected' : 'unqualified', swept: swept.map(r => ({ attempt_id: r.attempt_id, action: r.action, status: r.status })) });
+    return { ticket: ctx.ticket, run_id: ctx.runId, measurement: clock ? 'injected' : 'unqualified', swept };
+  });
 }
 
 /** How long a second `adopt` waits for the ticket lock before lock_timeout (it then finds the window spent). */
@@ -784,12 +887,14 @@ async function main(argv) {
     if (extra.length || !flags.repo || !flags.ticket || !flags.dag) throw new Error('Usage: run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]');
     return preflight({ repoRoot: resolve(flags.repo), ticket: flags.ticket, dagFile: resolve(flags.dag), ...(flags.plan ? { planFile: resolve(flags.plan) } : {}) });
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from', 'deadlines'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
   if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
+    reconcile: () => { if (flags.deadlines !== 'true') throw new Error('Usage: run-engine.mjs reconcile --deadlines true --repo <dir> --ticket <key> --run-id <id>');
+      return reconcileDeadlines(ctx); },
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
