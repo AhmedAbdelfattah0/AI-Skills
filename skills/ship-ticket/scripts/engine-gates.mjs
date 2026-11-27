@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { gateRed, gateReview, gateShipReady, specResults } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
+import { armAttempt } from './lib/deadline.mjs';
 import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs';
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry, baseRef } from './engine-dag.mjs';
 import { pinnedBaseRefusal, baseCandidate, baseCommit as baseCommit_, onBase } from './engine-base-read.mjs';
@@ -264,11 +265,12 @@ async function runProof(E) {
     try {
       const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(c.evidence ? { report: true } : {}) });
       Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
+      armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
       await E.commit();
       launch.release();
       result = await launch.done;
     } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
-    if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited'))) {
+    if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited', { owned: true }))) {
       a.status = 'unknown';
       const reason = `cannot prove proof runner group ${a.pgid ?? a.pid} (${name}) has exited; no local proof recorded`;
       if (!E.S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === name)) E.S.judgments.push(judgment('quiescence_unknown', name, reason));
@@ -527,11 +529,12 @@ async function runEvidence(E, M, d, point) {
   try {
     const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: d.command, timeoutMs: clampTimeout(S.config.timeoutMs), report: true });
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
+    armAttempt(S, a, clampTimeout(S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
     await E.commit();
     launch.release();
     result = await launch.done;
   } catch (e) { typed = TYPED_RUNNER_REFUSALS.has(e?.code) ? e.code : null; result = { exitCode: null, timedOut: false, error: e.message, quiescent: true }; } // retire() decides
-  if (result.quiescent !== true || !(await retire(S, a, E.alive, 'exited'))) {
+  if (result.quiescent !== true || !(await retire(S, a, E.alive, 'exited', { owned: true }))) {
     a.status = 'unknown';
     const reason = `cannot prove evidence runner group ${a.pgid ?? a.pid} (${T.entry}) has exited; no evidence recorded`;
     if (!S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === T.entry)) S.judgments.push(judgment('quiescence_unknown', T.entry, reason));

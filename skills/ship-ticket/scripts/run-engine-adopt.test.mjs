@@ -19,6 +19,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { POSIX, fixture, withOrigin, narrativeDigest, passReview, primaryReview } from './engine-test-fixture.mjs';
+import { legacyPlacement } from './engine-test-fixture.mjs';
+// S1: this file pins frozen bytes (goldens, policy version numbers, origin/main differentials): its runs use the
+// documented legacy escape hatch (config.durableRun: false). The durable default is covered by run-engine-substrate.test.mjs.
+legacyPlacement();
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 import { archive, gate } from './run-engine.mjs';
 

@@ -58,6 +58,7 @@ import { CEILING_METRICS, GAP_REASONS, REVIEW_ROLE_OF, expectedReviewRoles } fro
 import { runPolicy } from './engine-policy.mjs';
 import { legacyRows, readEvents } from './measure/events.mjs';
 import { commonLogDir, labelLegacyRun } from './lib/run-log-paths.mjs';
+import { enginePaths, RUNS_SUBDIR } from './lib/run-placement.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -457,7 +458,7 @@ function parseArgs(argv) {
 }
 
 function git(repo, args) {
-  const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
   if (r.status !== 0) fail(r.stderr.trim() || `git ${args.join(' ')} failed`);
   return r.stdout.trim();
 }
@@ -544,7 +545,9 @@ function report(options) {
     const names = (d, timing) => (d ? list(d, timing).flatMap((n) => (timing && n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') && !n.endsWith('.review-auth.jsonl') ? [n.slice(0, -6)]
       : !timing && n.endsWith('.state.json') ? [n.slice(0, -11)] : [])) : []);
     const timingNames = logDir ? names(logDir, true) : [];
-    tickets = [...new Set([...timingNames, ...names(dir, false)])].filter((n) => SAFE_ID.test(n)).sort();
+    // S1: a durable run's state is <common>/ai-skills/ship-ticket/runs/<ticket>/state.json (lib/run-placement.mjs)
+    const durableNames = logDir ? list(join(logDir, RUNS_SUBDIR), false).filter((n) => existsSync(join(logDir, RUNS_SUBDIR, n, 'state.json'))) : [];
+    tickets = [...new Set([...timingNames, ...names(dir, false), ...durableNames])].filter((n) => SAFE_ID.test(n)).sort();
   }
   const runs = [];
   const states = {};
@@ -565,7 +568,10 @@ function report(options) {
     }
     // The same labelling rule as run-log summary: abandoned is never complete (so never accepted); partial_legacy is possible.
     for (const [runId, rows] of byRun) runs.push(labelLegacyRun(buildRun(ticket, runId, rows), rows));
-    const statePath = join(dir, `${ticket}.state.json`);
+    // S1: the one placement resolver; a ticket with state in both placements refuses the whole report (fail closed)
+    let placed = null;
+    try { placed = enginePaths(options.repo, ticket); } catch (e) { if (e?.code === 'state_placement_ambiguous') fail(`${ticket}: ${e.message}`); /* unresolvable: the legacy path below */ }
+    const statePath = placed?.state ?? join(dir, `${ticket}.state.json`);
     if (existsSync(statePath)) { try { states[ticket] = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* unreadable state stays unknown */ } }
     // S-27-min: a run this install cannot interpret refuses the whole report (fail closed, like every engine command).
     if (states[ticket] !== undefined) { try { runPolicy(states[ticket]); } catch (e) { fail(`${ticket}: ${e.message}`); } }

@@ -35,6 +35,7 @@ import { isEntrypoint } from './harness.mjs';
 import { BEGIN, END, parseRunState } from './run-state.mjs';
 import { planDigest, startCheck } from './brief.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
+import { enginePaths } from './lib/run-placement.mjs';
 
 export const WAVE_SCHEMA = 'ship-ticket-wave-v1';
 export const ENDPOINT = 'SHIP_READY';
@@ -343,15 +344,20 @@ export function worktreeProblems(t) {
   return st.stdout.trim() === '' ? [] : ['worktree_dirty'];
 }
 
+/**
+ * S1: the ticket's engine file through the one placement resolver (lib/run-placement.mjs); null when unresolvable. State in
+ * both placements is NOT "not started" (m1): it returns { ambiguous: true }, which readTicket reports as corrupt.
+ */
 function enginePath(worktree, key, ext) {
-  const r = git(worktree, ['rev-parse', '--git-path', `ai-skills/ship-ticket/${key}.${ext}`]);
-  return r.status === 0 ? resolve(worktree, r.stdout.trim()) : null;
+  try { const P = enginePaths(worktree, key, { prefer: 'durable' }); return ext === 'state.json' ? P.state : P.log; }
+  catch (e) { return e?.code === 'state_placement_ambiguous' ? { ambiguous: true } : null; }
 }
 
 /** Read one ticket's state through the engine CLI `status` (no lock) and the plan's RUN-STATE; never writes. */
 export function readTicket(t, { engineCli = join(dirname(fileURLToPath(import.meta.url)), 'run-engine.mjs') } = {}) {
   const plan = join(t.worktree, t.plan);
   const statePath = existsSync(t.worktree) ? enginePath(t.worktree, t.key, 'state.json') : null;
+  if (statePath?.ambiguous) return { ...deriveTicketState({ statusError: 'state_placement_ambiguous' }), plan_text: readText(plan) };
   if (!statePath || !existsSync(statePath)) return { ...deriveTicketState({ statusError: 'no_state', workspace: worktreeProblems(t) }), plan_text: readText(plan) };
   const r = spawnSync(process.execPath, [engineCli, 'status', '--repo', t.worktree, '--ticket', t.key, '--run-id', t.run_id], { encoding: 'utf8', timeout: 60000 });
   let status = null, statusError = null;

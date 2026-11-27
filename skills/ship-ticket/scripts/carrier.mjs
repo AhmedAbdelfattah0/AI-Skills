@@ -36,6 +36,7 @@ import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawn
 import { finalMessage, parseWorkerReport } from './worker-report.mjs';
 import { runPolicy } from './engine-policy.mjs';
 import { AUTH_SUBDIR, ownDirIsShared } from './lib/run-log-paths.mjs';
+import { enginePaths } from './lib/run-placement.mjs';
 
 export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
@@ -129,7 +130,8 @@ export function verifyApproval(repoRoot, approval) {
 
 /**
  * A REPAIR dispatch must repair a review round that really happened. When the run engine's state
- * file exists (git-path ai-skills/ship-ticket/<ticket>.state.json) it is the only authority: its
+ * file exists (lib/run-placement.mjs: git-path ai-skills/ship-ticket/<ticket>.state.json, or a durable run's
+ * <git-common-dir>/ai-skills/ship-ticket/runs/<ticket>/state.json; both present is refused) it is the only authority: its
  * review chain must hold an accepted original FAIL for `reviewExecution` in the same run that opened
  * a finding-bound write set. Only without engine state does the run log (written by run-log.mjs)
  * decide: a `start` row of kind `phase` named REVIEW in the same run with a matching
@@ -141,7 +143,9 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution, write
   const r = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
   if (r.status !== 0) fail('REPAIR needs a Git repository with engine state or a run log');
   const dir = resolve(repoRoot, r.stdout.trim());
-  const stateFile = join(dir, approval.ticket + '.state.json');
+  let placed = null;
+  try { placed = enginePaths(repoRoot, approval.ticket); } catch (e) { fail(e.message + '; REPAIR is not authorized'); }
+  const stateFile = placed?.state ?? join(dir, approval.ticket + '.state.json');
   if (existsSync(stateFile)) {
     let state;
     try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { fail('engine state ' + stateFile + ' is unreadable; REPAIR is not authorized'); }
@@ -298,7 +302,7 @@ async function terminateTree(child, platform = process.platform) {
   if (!child.pid) return true;
   if (platform === 'win32') {
     if (child.exitCode === null && child.signalCode === null)
-      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 30000 });
     return null; // Windows: tree state after leader exit is not observable
   }
   if (!groupAlive(child.pid)) return true;

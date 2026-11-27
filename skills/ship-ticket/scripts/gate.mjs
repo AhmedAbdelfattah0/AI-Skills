@@ -8,6 +8,7 @@
  */
 import { requiredEvidence, controlKind } from './harness.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
+import { armAttempt } from './lib/deadline.mjs';
 import { RUNNER_REFUSALS } from './engine-io.mjs';
 
 export { requiredEvidence };
@@ -274,7 +275,7 @@ export async function gateRed(input, deps) {
   await deps.commit(snapshot());
   // The only way to 'exited': retire() proves the whole group gone (or that it was never released).
   const finish = async (envelope) => {
-    if (!(await retire(state, attempt, deps.isGroupAlive, 'exited'))) return false;
+    if (!(await retire(state, attempt, deps.isGroupAlive, 'exited', { owned: true }))) return false;
     attempt.envelope = envelope;
     return true;
   };
@@ -290,6 +291,7 @@ export async function gateRed(input, deps) {
   try {
     const launch = await deps.spawnRunner({ attempt_id: attempt.attempt_id, command, timeoutMs, resources: [...resources] });
     attempt.pid = launch.pid; attempt.pgid = launch.pgid; attempt.leader_start = leaderStart(launch.pgid); attempt.status = 'running';
+    armAttempt(state, attempt, timeoutMs, deps.deadlineClock); // S1: durable run (S.durable) only
     await deps.commit(snapshot());
     launch.release();
     run = await launch.done;

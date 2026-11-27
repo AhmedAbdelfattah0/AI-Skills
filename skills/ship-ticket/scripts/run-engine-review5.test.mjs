@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { drive } from './run-engine.mjs';
 import { groupAlive } from './engine-io.mjs';
 import { POSIX, fixture, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
+import { legacyPlacement } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const END = '<!-- RUN-STATE:END -->';
@@ -148,7 +149,10 @@ async function unknownWorker(t) {
 }
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-test('m1 after mark failed->pending, the CLI drive retires the unknown predecessor (killing its live group) before re-dispatching', { skip: WIN_SKIP }, async (t) => {
+// S1 (Codex 1): this pins the LEGACY rule (a dead leader's surviving member is signalled on recovery). A durable run never
+// signals a group it cannot positively verify (run-engine-substrate.test.mjs "Codex 1"), so this test uses the escape hatch.
+test('m1 (legacy placement) after mark failed->pending, the CLI drive retires the unknown predecessor (killing its live group) before re-dispatching', { skip: WIN_SKIP }, async (t) => {
+  const prevPlacement = legacyPlacement(); t.after(() => legacyPlacement(prevPlacement));
   const { fx, old, sleeper } = await unknownWorker(t);
   assert.ok(pidAlive(sleeper), 'the predecessor group is still alive');
   ok(fx.cli('drive'));

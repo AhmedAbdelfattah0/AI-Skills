@@ -152,7 +152,8 @@ short booleans, numbers, or enum-like labels.
 
 The run engine ([execution-harness.md](execution-harness.md)) writes its own
 events (`MARK`, resume and retry events) to a sibling file,
-`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.engine.jsonl` (per worktree). It is not a timing
+`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.engine.jsonl` (per worktree, a legacy run; a durable run, the default since S1:
+`<git-common-dir>/ai-skills/ship-ticket/runs/<TICKET>/engine.jsonl`). It is not a timing
 log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
 
 Measurement events (`run-log.mjs event`, `close`) are validated against a closed schema

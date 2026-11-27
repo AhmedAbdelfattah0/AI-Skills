@@ -48,6 +48,7 @@ import { resolve } from 'node:path';
 import { isEntrypoint } from './harness.mjs';
 import { status } from './run-engine.mjs';
 import { gitPath, fingerprints } from './engine-io.mjs';
+import { enginePaths } from './lib/run-placement.mjs';
 import { baseCandidate } from './engine-base-read.mjs';
 import { securityOn, sha, planNarrativeDigest } from './engine-dag.mjs';
 import { securityPlan } from './engine-gates.mjs';
@@ -391,7 +392,11 @@ async function readSecurity(S) {
 /** Read the run and return the accepted-view. */
 export async function readRun({ repoRoot, ticket, runId, lastFile, statusFn = status }) {
   if (!SAFE_ID.test(ticket ?? '') || !SAFE_ID.test(runId ?? '') || typeof repoRoot !== 'string') throw new Error('repo, a safe ticket and run id are required');
-  const files = { state: gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.state.json`), log: gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.engine.jsonl`) };
+  // S1: the one placement resolver (legacy per-worktree or durable common-dir run directory); ambiguity is status's refusal
+  let placed = null;
+  try { placed = enginePaths(repoRoot, ticket, { prefer: 'legacy' }); } catch { /* status refuses state_placement_ambiguous below */ }
+  const files = placed ? { state: placed.state, log: placed.log }
+    : { state: gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.state.json`), log: gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.engine.jsonl`) };
   const input = { ticket, runId, files, S: null, raw: null, statusOut: null, logText: '', candidate: null, last: null };
   const before = existsSync(files.state) ? readFileSync(files.state, 'utf8') : null;
   try { input.statusOut = await statusFn({ repoRoot, ticket, runId }); } catch (e) { input.statusError = { code: e.code ?? 'status_failed', message: e.message }; }

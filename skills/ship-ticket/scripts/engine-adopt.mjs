@@ -42,8 +42,12 @@ export const RETIRE_RECORD = 'retire.json';
 
 /** Canonical JSON (object keys sorted at every depth), so key order is never a difference. */
 const canon = (v) => JSON.stringify(v, (k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x)) ?? 'undefined';
-/** Semantics flags that may differ between the archived and the adopting run (R3). */
-const OWN_FLAGS = ['pinnedBase', 'repoIdentity'];
+/**
+ * Semantics flags that may differ between the archived and the adopting run (R3): properties of the adopting run itself. S1:
+ * `durableRun` (where the run's files live) is one of them, so a pre-S1 or escape-hatch archive (1-12) is adoptable into a
+ * default durable run (13-24) and back; adopted work is still re-verified against the tree.
+ */
+const OWN_FLAGS = ['pinnedBase', 'repoIdentity', 'durableRun'];
 const semanticsKey = (sem) => canon(Object.fromEntries(Object.entries(sem).filter(([k]) => !OWN_FLAGS.includes(k))));
 const withUnits = (S) => S.unit_checks !== undefined || Object.values(S.nodes ?? {}).some(n => n?.unit !== undefined);
 const liveAttempts = (S) => [...new Set([...(S.attempts ?? []).filter(a => LIVE.includes(a?.status)), ...unretired(S)])].map(a => a?.attempt_id);
@@ -282,7 +286,7 @@ export function retireRefusal(S) {
  * file appeared that was not archived), then RENAME (never delete) the live files into <dir>/retired/, the state last. A crash
  * in between leaves the state live (retry: a new archive of what is left) or retired, never neither. Returns the retired names.
  */
-export async function retireLive({ dir, files, sources, hooks, record }) {
+export async function retireLive({ dir, files, sources, hooks, record, moveFirst = [] }) {
   await io.boundary(hooks, 'retire-check', { dir });
   for (const name of ARCHIVE_FILES) {
     const live = regularBytes(sources[name]), copy = Object.hasOwn(files, name) ? regularBytes(join(dir, name)) : null;
@@ -292,6 +296,9 @@ export async function retireLive({ dir, files, sources, hooks, record }) {
   mkdirSync(join(dir, 'retired'));
   // written before any rename: a retire record without its retired state is not final (archiveFinality), and the state stays live
   writeFileSync(join(dir, 'retired', RETIRE_RECORD), JSON.stringify({ retired: true, ...record, state_sha256: files['state.json'] }, null, 2) + '\n');
+  // S1 (m8): a durable run's attempts/ moves before any engine file, so a crash can never leave a retired run's attempts in
+  // the live run directory while its state is retired (moved first: the state stays live and a new archive completes it).
+  for (const [from, name] of moveFirst) renameSync(from, join(dir, 'retired', name));
   const names = RETIRE_ORDER.filter(n => Object.hasOwn(files, n));
   for (const name of names) {
     await io.boundary(hooks, 'retire-rename', { name });

@@ -109,6 +109,7 @@ import { fileURLToPath } from 'node:url';
 import { validateEngineDag, planNarrativeDigest, runStateEvents, sha, normDigest, BEGIN, END } from './engine-dag.mjs';
 import { parseRunState, malformedReason } from './run-state.mjs';
 import { gitPath, writeStateAtomic } from './lib/durable-io.mjs';
+import { enginePaths } from './lib/run-placement.mjs';
 import { isEntrypoint } from './harness.mjs';
 
 export const SCHEMA = 'ship-ticket-scope-v1';
@@ -500,8 +501,10 @@ function bindMode(c, { repo, ticket, runId, events, dag }) {
   if (c.mode === 'manual') {
     if (dag !== undefined) refuse('contract_mode_mismatch', 'the approved contract is manual mode; --dag is for an engine-mode contract');
     const base = `ai-skills/ship-ticket/${ticket}`;
-    const evidence = bound.length ? 'a DAG_BOUND of this run' : existsSync(gitPath(repo, `${base}.state.json`)) ? `${base}.state.json`
-      : existsSync(gitPath(repo, `${base}.engine.jsonl`)) ? `${base}.engine.jsonl` : null;
+    // S1: a durable run's state is in its common-dir run directory (lib/run-placement.mjs); both placements count as evidence
+    const placed = (() => { try { return enginePaths(repo, ticket); } catch { return { state: 'ambiguous' }; } })();
+    const evidence = bound.length ? 'a DAG_BOUND of this run' : placed?.state === 'ambiguous' ? 'engine state in two placements'
+      : placed ? placed.state : existsSync(gitPath(repo, `${base}.engine.jsonl`)) ? `${base}.engine.jsonl` : null;
     if (evidence) refuse('manual_with_engine_evidence', `the contract is manual mode but ${evidence} exists; an engine run needs an engine-mode contract (re-approve through ExitPlanMode)`);
     return;
   }

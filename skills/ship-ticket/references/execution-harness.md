@@ -258,7 +258,8 @@ node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-codex <relay-result.json> --ru
 The budget metric
 is `processed_tokens = input + output + cache_read + cache_write` (or
 `output_tokens`); see Budgets below. With the run engine, import into
-`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.usage.jsonl`: the engine reads
+`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.usage.jsonl` (a legacy run; a durable run, the default:
+`<git-common-dir>/ai-skills/ship-ticket/runs/<TICKET>/usage.jsonl`): the engine reads
 that file before every dispatch.
 
 ## Run engine
@@ -272,6 +273,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs reconcile --deadlines true --repo <R> --ticket <T> --run-id <ID>   # durable run only: the persisted-deadline sweep (measurement UNQUALIFIED: it measures and signals nothing yet)
 ```
 
 The engine runs the process (dispatch, retries, staleness, resume) and leaves
@@ -279,11 +281,28 @@ judgments to the orchestrator and the user. It adds no policy: approval,
 reviewer independence, billing and ownership checks are the carrier's and
 `SKILL.md`'s. `drive` exits 2 on a judgment point; any other failure exits 1.
 
-**Files**, all under `git rev-parse --git-path ai-skills/ship-ticket/` and never
-committed: `<TICKET>.state.json` (the ledger), `<TICKET>.engine.jsonl` (the
-engine's event file), `<TICKET>.lock`, `<TICKET>.attempts/` (per-attempt
-envelopes) and `<TICKET>.usage.jsonl` (imported orchestrator/reviewer usage, read by
-budgets). The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
+**Files**, never committed. Every NEW run (S1) is a **durable run** (policy versions 13-24): its ledger `state.json`, the
+engine's event file `engine.jsonl`, `lock`, `attempts/` (per-attempt envelopes and outputs) and `usage.jsonl` (imported
+orchestrator/reviewer usage, read by budgets) live in one run directory of the git COMMON dir,
+`<git-common-dir>/ai-skills/ship-ticket/runs/<TICKET>/`, so `git worktree remove` loses none of them. A run started before
+S1 (policy versions 1-12), or a new run under the documented escape hatch (the DAG's `config.durableRun: false`, or
+`SHIP_TICKET_PLACEMENT=legacy` in the engine's environment), keeps the legacy placement under
+`git rev-parse --git-path ai-skills/ship-ticket/` (in a linked worktree that is its private gitdir): `<TICKET>.state.json`,
+`<TICKET>.engine.jsonl`, `<TICKET>.lock`, `<TICKET>.attempts/` and `<TICKET>.usage.jsonl`. Existing runs are never migrated.
+The placement of an existing run is read from the filesystem (`scripts/lib/run-placement.mjs`, the one resolver every
+reader uses); state in both placements for one ticket is refused (`state_placement_ambiguous`), and `init` reserves the
+placement under the common run-directory lock and refuses (`state_exists`) when the ticket already has a state in the
+other placement in ANY worktree. A durable run records the worktree that started it: every command except `status`,
+`archive` and `reconcile --deadlines` is refused from another worktree (`worktree_mismatch`, before anything is observed or
+written); `archive --retire true` is allowed from another worktree only once the owning worktree no longer exists (and then
+observes no plan); `reconcile --deadlines` from another worktree never observes the caller's plan and records no result
+against the caller's tree. Recovery in a durable run (resume, a later gate, the sweep) signals only a positively verified
+group (leader alive with the recorded start time); otherwise the attempt stays `unknown` with its locks
+(`quiescence_unknown`), including a dead leader whose group still has members, which then needs ending by hand. Start
+times are read time-zone and locale independently. Each launched attempt of a durable run carries a persisted `deadline`
+(limit and clock origin, `scripts/lib/deadline.mjs`); the consumed-execution measurement is UNQUALIFIED (its G0 fixtures
+have not all passed), so `reconcile --deadlines` measures nothing and sends no signal, and the launcher's in-process timers
+remain the only enforcer. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
 
 **DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields
 are refused, never dropped.
@@ -303,7 +322,9 @@ are refused, never dropped.
   direct Vitest RED accepted, Nx RED refused, Nx PROVE accepted). Choose it before
   approval, because `DAG_BOUND` fixes the runner.), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
-  node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)). Billing is
+  node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)),
+  `durableRun` (S1: absent or `{ version: 1 }` is the default durable run; `false` is the escape hatch to the legacy
+  per-worktree placement, see Files). Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
   `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
   `allowApiBilling` exists only for a library caller the user authorized.
@@ -364,6 +385,15 @@ To roll back, revert the PR and check out the earlier commit in the installed ch
 (`git -C ~/.ai-skills checkout <prior main>`). Runs that the newer engine stamped with a version
 the older engine lacks are then refused, not resumed.
 
+S1 rollback boundary (durable runs, policy versions 13-24): an engine without S1 (for example 705ae1b) does not refuse a
+durable run; it cannot see it. It looks only at the legacy `--git-path` placement, so it reports `no_state` and would `init`
+a second, legacy run of the same START beside the durable one (duplicate dispatch); back on S1 the ticket is then refused
+as `state_placement_ambiguous`. Before rolling S1 back, finish or `archive --retire true` every durable run, and never
+re-`init` one on the older engine. A run that must stay readable by an engine without S1 is started under the escape hatch
+(`config.durableRun: false` in the DAG, or `SHIP_TICKET_PLACEMENT=legacy`). Lock and recovery-marker records keep the
+705ae1b representation of `process_start_time` and carry the S1 canonical start time in a separate `start_identity`, so an
+engine without S1 contending for the same lock still sees a live S1 holder as live.
+
 Reverting this change itself removes the check, and the extra fields become inert. Before a later
 slice adds version 2, that revert is safe. After it, the revert would let an engine that knows
 nothing of version 2 resume a version 2 run. Never revert a version table that is already in use.
@@ -371,6 +401,8 @@ nothing of version 2 resume a version 2 run. Never revert a version table that i
 Limits:
 - A same-user edit of `policy_version` in `state.json` is neither detected nor prevented. The state
   file is the trust anchor, and any process of the user can rewrite it.
+- S1: versions 13-24 are 1-12 plus `durableRun` (every new run; the escape hatch records 1-12). A run's `durableRun` flag,
+  its `S.durable` record and its placement must agree at every load (`durable_state_missing` otherwise).
 - The resolved semantics (`E.policy`) are consumed by the test-kind activation (`testKinds`) and by
   the check that a run's §3a block format matches `securityObligations`. Tests cover recording,
   preservation and enforcement, including commands that refuse when the recorded version's
@@ -577,12 +609,16 @@ came before the final review (the review froze the drifted tree), the reverted t
 the reviewed candidate, so ship-ready refuses `candidate_mismatch`: the owner appends a RUN-STATE
 `RETRY` and a new original final review is recorded on the reverted tree. A final review FAIL does
 not recover it by itself: while the judgment stands `drive` dispatches nothing, the repair included.
-**Before removing the ticket worktree: `archive`.** The state file, engine log and usage ledger live
-in the work tree's own git dir, so `git worktree remove` deletes them (TICKET-A lost its token and
-timing data that way). Run `run-engine.mjs archive` first: it copies them with a `manifest.json`
+**Before removing the ticket worktree: `archive`.** For a legacy run (before S1, or under the escape hatch) the state
+file, engine log and usage ledger live in the work tree's own git dir, so `git worktree remove` deletes them (TICKET-A
+lost its token and timing data that way; a durable run's files are in the common dir and survive it). Run `run-engine.mjs archive` first: it copies them with a `manifest.json`
 (sha256 per file) to `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>/`, never
 overwriting an earlier archive. It is owner-invoked, takes the lock but changes nothing in engine state, refuses another run's id (`run_mismatch`), and does not copy
-`.attempts/` (envelopes and outputs). `usage.jsonl` is copied as it stands: run `archive` when nothing is dispatching or importing usage,
+`.attempts/` (envelopes and outputs) of a legacy run; for a durable run it also copies `attempts/` to
+`<archive>/outputs/attempts/` with an `outputs.json` sha256 list (`manifest.json` is unchanged), and `--retire true` moves the
+live `attempts/` into `<archive>/retired/attempts/` before any engine file. Retention: these copies include every worker's
+raw stdout (`.out`), which may contain secrets; they stay under the git common dir (never committed) until removed by hand,
+like the rest of the archive. `usage.jsonl` is copied as it stands: run `archive` when nothing is dispatching or importing usage,
 or its last line may be a partial record (the manifest hashes the copy, not a repaired file).
 `archive --retire true` (S-13a) is the one exception to "changes nothing": after the copy it refuses while any attempt is
 live or not proven quiescent (`retire_live_attempts`) or when the live bytes differ from the archived copy (`retire_mismatch`),
@@ -594,7 +630,8 @@ state, the state last, into `<archive>/retired/`, so a new run of the ticket can
 **Run adoption (`adopt`, S-13a, same base).** A new run can take over the still-valid work of an archived run of the same
 ticket and approved plan instead of re-dispatching it. Flow: `archive --retire true` the old run; the owner appends a new
 `START` of the new run for the same narrative (that START is the approval: `adopt` has no authority of its own); `init` the
-new run; `run-engine.mjs adopt --from <archive dir>`; then `drive`. `adopt` runs only right after `init` (zero attempts, every
+new run; `run-engine.mjs adopt --from <archive dir>`; then `drive`. Placement is the adopting run's own property (S1): a pre-S1
+or escape-hatch archive (policy 1-12) is adoptable into a default durable run (13-24) and back. `adopt` runs only right after `init` (zero attempts, every
 node pending, no RED, freeze, review or earlier adoption: else `adoption_window_closed`, also what a second or concurrent
 `adopt` gets) and writes one atomic commit or nothing. The source must be FINAL: the completed `archive --retire true` of its
 run (retire record and retired state present) holding that run's latest state; an earlier or plain `archive`, a retire that

@@ -36,6 +36,10 @@ import { createHash } from 'node:crypto';
 import * as SP from './security-plan.mjs';
 import * as OB from './security-obligations.test-helper.mjs';
 import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
+import { legacyPlacement } from './engine-test-fixture.mjs';
+// S1: this file pins frozen bytes (goldens, policy version numbers, origin/main differentials): its runs use the
+// documented legacy escape hatch (config.durableRun: false). The durable default is covered by run-engine-substrate.test.mjs.
+legacyPlacement();
 import * as DAG from './engine-dag.mjs';
 import { preflight } from './run-engine.mjs';
 import { securityRowsRefusal, disputedRefusal } from './engine-gates.mjs';
