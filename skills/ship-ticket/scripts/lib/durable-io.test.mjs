@@ -1143,6 +1143,37 @@ test('N4 the published lock keeps the pre-N4 bytes: one JSON object in the froze
   await h.release();
 });
 
+test('N4 a temp file the staging write left partly written (ENOSPC) is removed, and the fallback still takes the lock', (t) => {
+  const dir = scratch(t), lockFile = join(dir, 'document.lock');
+  const src = `
+const [lib, lockFile] = process.argv.slice(1);
+const { createRequire, syncBuiltinESMExports } = await import('node:module');
+const fs = createRequire(import.meta.url)('node:fs');
+const { acquireLock } = await import(lib);
+const real = fs.writeFileSync;
+let failed = 0;
+fs.writeFileSync = function (file, data, opts) {
+  if (String(file).startsWith(lockFile + '.') && String(file).endsWith('.tmp')) {
+    failed++; fs.closeSync(fs.openSync(file, 'wx', 0o600)); // created, then the write runs out of space
+    throw Object.assign(new Error('ENOSPC: injected'), { code: 'ENOSPC' });
+  }
+  return real.apply(this, arguments);
+};
+syncBuiltinESMExports();
+const h = await acquireLock({ lockFile, runId: 'A' });
+fs.writeFileSync = real; syncBuiltinESMExports();
+process.stdout.write(JSON.stringify({ failed, files: fs.readdirSync((await import('node:path')).dirname(lockFile)), pid: JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid }));
+await h.release();
+`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', src, new URL('./durable-io.mjs', import.meta.url).href, lockFile], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  const got = JSON.parse(r.stdout);
+  assert.equal(got.failed, 1, 'the staging write failed once');
+  assert.deepEqual(got.files, ['document.lock'], 'the partly written temp file is gone while the lock is held');
+  assert.equal(got.pid, r.pid);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
 for (const code of ['ENOTSUP', 'EPERM', 'EXDEV', 'EIO']) {
   test(`N4 when the lock cannot be hard-linked (${code}) the acquire falls back to the exclusive create and still succeeds once`, async (t) => {
     const dir = scratch(t);
@@ -1160,7 +1191,7 @@ for (const code of ['ENOTSUP', 'EPERM', 'EXDEV', 'EIO']) {
 
 /**
  * N4 stress (bounded): N4_ROUNDS rounds of 6 processes racing one acquire with no waitMs, alternating a fresh path and a
- * stale lock (exited holder) that all six try to recover. Each round: ready barrier, go, every decision collected while the
+ * stale lock (exited holder) that all six try to recover. Each round: ready barrier, go, every decision (published by rename, read only once all are non-empty) collected while the
  * winner still holds, then done. Every round must have exactly one winner and five lock_held losers (never lock_malformed,
  * never ENOENT from a recoverer's unlink-then-publish gap). The partial-write window is narrow
  * (about 2 hits in 360 contenders measured on the pre-N4 code), so this run is a guard, not a reliable RED; the
@@ -1169,7 +1200,7 @@ for (const code of ['ENOTSUP', 'EPERM', 'EXDEV', 'EIO']) {
 const N4_ROUNDS = 12;
 const N4_STRESS = `
 const [lib, quiesce, dir, id] = process.argv.slice(1);
-const { existsSync, writeFileSync } = await import('node:fs');
+const { existsSync, renameSync, writeFileSync } = await import('node:fs');
 const { join } = await import('node:path');
 const { acquireLock } = await import(lib);
 const { processInfo } = await import(quiesce);
@@ -1179,7 +1210,9 @@ writeFileSync(join(dir, 'ready-' + id), '');
 await until('go');
 let out, h;
 try { h = await acquireLock({ lockFile: join(dir, 'lock'), runId: 'n4', processInfo: info }); out = 'won'; } catch (e) { out = 'lost:' + e.code; }
-writeFileSync(join(dir, 'result-' + id), out);
+// published complete (temp + rename): the parent never reads a created-but-unwritten result
+writeFileSync(join(dir, 'tmp-result-' + id), out);
+renameSync(join(dir, 'tmp-result-' + id), join(dir, 'result-' + id));
 await until('done');
 await h?.release();
 `;
@@ -1198,8 +1231,11 @@ test(`N4 stress: ${N4_ROUNDS} rounds of 6 processes racing one acquire, fresh an
       const wait = async (p) => { const end = performance.now() + 30_000; while (!all(p)) { assert.ok(performance.now() < end, `round ${round}: not every ${p} in time`); await new Promise(r => setTimeout(r, 2)); } };
       await wait('ready');
       writeFileSync(join(dir, 'go'), '');
-      await wait('result');
-      const results = ids.map((id) => readFileSync(join(dir, `result-${id}`), 'utf8'));
+      // every result exists and is non-empty before any is collected (they are renamed into place, so this is belt and braces)
+      const read = () => ids.map((id) => { try { return readFileSync(join(dir, `result-${id}`), 'utf8'); } catch { return ''; } });
+      const end = performance.now() + 30_000;
+      let results;
+      while ((results = read()).some((o) => o === '')) { assert.ok(performance.now() < end, `round ${round}: not every result in time`); await new Promise(r => setTimeout(r, 2)); }
       writeFileSync(join(dir, 'done'), '');
       for (const o of results) tally[o] = (tally[o] ?? 0) + 1;
       const kind = round % 2 ? 'stale' : 'fresh';
