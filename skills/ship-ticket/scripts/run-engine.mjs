@@ -44,7 +44,9 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
-import { repoIdentityOn, earlyChecksOn } from './engine-dag.mjs';
+import { repoIdentityOn, earlyChecksOn, hostClaimRequiredOn } from './engine-dag.mjs';
+import { hostClaimVersion } from './engine-policy.mjs';
+import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2: the CLI entry check only (main), never the library
 import { repoIdentityVersion, earlyChecksVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
@@ -185,6 +187,9 @@ function open(ctx, prefer) {
       // S5: the earlyChecks flag of the run's version and config.earlyChecks come together or not at all
       if ((E.policy.semantics.earlyChecks === true) !== earlyChecksOn(E.S))
         throw coded('early_checks_state_missing', `policy_version ${E.S.policy_version} and config.earlyChecks disagree: a partial early-checks run is never resumed`);
+      // PR-2: the hostClaimRequired flag of the run's version and config.hostClaimRequired come together or not at all
+      if ((E.policy.semantics.hostClaimRequired === true) !== hostClaimRequiredOn(E.S))
+        throw coded('host_claims_state_missing', `policy_version ${E.S.policy_version} and config.hostClaimRequired disagree: a partial host-claim run is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -424,7 +429,7 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false, hostClaims = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
@@ -438,7 +443,10 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false, 
   // S5: config.earlyChecks records the early-checks twin (engine-policy.mjs EARLY_CHECKS_OFFSET); an engine without one cannot start it
   const final = early ? earlyChecksVersion(recorded, engine.semantics) : recorded;
   if (final === null) throw coded('policy_version_unsupported', `no early-checks policy version for policy_version ${recorded}`);
-  return { policy_version: runPolicy({ policy_version: final }, engine).version,
+  // PR-2: config.hostClaimRequired records the host-claim twin (engine-policy.mjs HOST_CLAIM_OFFSET); an engine without one cannot start it
+  const claimed = hostClaims ? hostClaimVersion(final, engine.semantics) : final;
+  if (claimed === null) throw coded('policy_version_unsupported', `no host-claim policy version for policy_version ${final}`);
+  return { policy_version: runPolicy({ policy_version: claimed }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -526,7 +534,7 @@ async function initLocked(ctx, placement) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag), hostClaimRequiredOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}),
       ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
@@ -882,7 +890,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'host_claims_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -950,6 +958,24 @@ export async function gate(ctx) {
   }
 }
 
+/**
+ * PR-2 (S2-min): the CLI-entry host-claim check. Only a heavy command (drive, gate red|prove|ship-ready) of an EXISTING run
+ * whose recorded policy carries hostClaimRequired is checked (engine-host-claim.mjs checkHostClaim: a read-only check, never
+ * an await); any other run, command or an unreadable state returns null before the claim store is touched, so the command
+ * itself behaves (and refuses) exactly as before. The exported library entry points (drive(), gate()) are not checked.
+ */
+function hostClaimRefusal(ctx, cmd, gateKind) {
+  if (!heavyCommand(cmd, gateKind)) return null;
+  let P, S;
+  try {
+    P = locate(ctx);
+    if (!existsSync(P.state)) return null;
+    S = JSON.parse(readFileSync(P.state, 'utf8'));
+    if (runPolicy(S).semantics.hostClaimRequired !== true) return null;
+  } catch { return null; }
+  return checkHostClaim({ S, statePath: P.state, cmd, gateKind });
+}
+
 async function main(argv) {
   const [cmd, ...rest] = argv;
   const gateKind = cmd === 'gate' ? rest.shift() : undefined;
@@ -968,6 +994,12 @@ async function main(argv) {
   if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess|prove --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
+  // PR-2: a heavy command of a run whose policy requires a host claim is refused here, at the CLI entry, without one.
+  const refusal = hostClaimRefusal(ctx, cmd, gateKind);
+  if (refusal) {
+    if (cmd === 'gate') return { gate: gateKind, ...gateNo(refusal.code, [refusal.reason], { judgment_point: false }) };
+    throw coded(refusal.code, refusal.reason);
+  }
   const commands = { init, status, drive, resume,
     reconcile: () => { if (flags.deadlines !== 'true') throw new Error('Usage: run-engine.mjs reconcile --deadlines true --repo <dir> --ticket <key> --run-id <id>');
       return reconcileDeadlines(ctx); },

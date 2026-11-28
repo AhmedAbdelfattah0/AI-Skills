@@ -5,7 +5,7 @@
  */
 import { createHash } from 'node:crypto';
 import { posix, isAbsolute } from 'node:path';
-import { validateNodes, schedule, RISK_EVIDENCE, CONTROL_ID } from './harness.mjs';
+import { validateNodes, schedule, RISK_EVIDENCE, CONTROL_ID, HOST_POLICY } from './harness.mjs';
 import { exactExclusions } from './gate.mjs';
 import { BEGIN, END } from './run-state.mjs';
 export { BEGIN, END, runStateEvents } from './run-state.mjs';
@@ -42,7 +42,8 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks',
+  'hostClaimRequired'];
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -194,6 +195,26 @@ export function entryAncestors(cmds, name, seen = new Set()) {
   for (const a of cmds[name]?.after ?? []) if (!seen.has(a)) { seen.add(a); entryAncestors(cmds, a, seen); }
   return seen;
 }
+/**
+ * PR-2 (S2-min host admission): `config.hostClaimRequired` (exactly { version: 1 }, opt-in, never defaulted, bound by the DAG
+ * digest) makes the run-engine CLI ENTRY refuse a heavy command (drive, gate red|prove|ship-ready) that runs without an active
+ * host claim (`host-admit.mjs run -- <engine command>`, engine-host-claim.mjs). Nothing inside the engine changes: no await,
+ * no hold, no counter. It needs the durable placement (the claim is bound to the run's durable state file) and an explicit
+ * `config.width` (the drive's claim weight is min(width, nodes): never a CPU-dependent default), and that weight must fit the
+ * host's maximum heavy slots, or the drive could never be admitted (`width_exceeds_host_capacity`).
+ */
+export const hostClaimRequiredOn = (S) => S?.config?.hostClaimRequired?.version === 1;
+/** The host-claim weight of a `drive` of this run: min(config.width, DAG nodes). Every node counts as heavy (no per-node class). */
+export const driveWeight = (config, nodeCount) => Math.max(1, Math.min(config.width, nodeCount));
+function validateHostClaimRequired(c, nodeCount, bad) {
+  if (c.hostClaimRequired === undefined) return;
+  if (!(isObj(c.hostClaimRequired) && Object.keys(c.hostClaimRequired).join() === 'version' && c.hostClaimRequired.version === 1))
+    bad('config.hostClaimRequired must be exactly { version: 1 }');
+  if (c.durableRun === false) bad('config.hostClaimRequired needs the durable placement (config.durableRun false is the legacy one)');
+  if (!Number.isInteger(c.width)) bad('config.hostClaimRequired needs an explicit config.width (the drive claim weight is min(width, nodes))');
+  const w = driveWeight(c, nodeCount);
+  if (w > HOST_POLICY.heavy_slots_healthy) bad(`width_exceeds_host_capacity: config.hostClaimRequired: the drive weight min(config.width ${c.width}, nodes ${nodeCount}) = ${w} exceeds the host maximum of ${HOST_POLICY.heavy_slots_healthy} heavy slots, so it could never be admitted; lower config.width`);
+}
 function validateEarlyChecks(c, bad) {
   if (c.earlyChecks === undefined) return;
   if (!(isObj(c.earlyChecks) && Object.keys(c.earlyChecks).join() === 'version' && c.earlyChecks.version === 1)) bad('config.earlyChecks must be exactly { version: 1 }');
@@ -304,6 +325,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   } catch (e) { bad(e.message); }
   validateUnits(nodes, c, bad);
   validateSecurity(nodes, c, bad);
+  validateHostClaimRequired(c, nodes.length, bad);
   if (c.auditRecord !== undefined && typeof c.auditRecord !== 'boolean') bad('config.auditRecord must be a boolean');
   if (c.pinnedBase !== undefined && !(isObj(c.pinnedBase) && Object.keys(c.pinnedBase).join() === 'remote' && typeof c.pinnedBase.remote === 'string'
     && SAFE_REMOTE.test(c.pinnedBase.remote))) bad('config.pinnedBase must be exactly { remote: <remote name> }');

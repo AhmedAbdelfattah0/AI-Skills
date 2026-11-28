@@ -419,3 +419,12 @@ test('wave: readTicket reads the engine status through the CLI only (fake engine
   } finally { rmSync(w.root, { recursive: true, force: true }); }
 });
 const pick = ({ state, reason }) => ({ state, reason });
+
+test('PR-2 (wave.mjs:401): a wave ticket node is never ticket-wide heavy; heavy is per operation (host-admit run)', async () => {
+  const w = await import('./wave.mjs');
+  assert.equal(typeof w.waveNodes, 'function');
+  const m = { tickets: [{ key: 'T1', deps: [], dep_mode: 'merged' }, { key: 'T2', deps: ['T1'], dep_mode: 'merged', priority: 2, owns: ['x'] }] };
+  const nodes = w.waveNodes(m, { T1: { state: 'pending' }, T2: { state: 'pending' } });
+  assert.deepEqual(nodes.map(n => n.class), ['light', 'light']);
+  assert.deepEqual(nodes.map(n => [n.id, n.priority, n.owns]), [['T1', 0, []], ['T2', 2, ['x']]]);
+});

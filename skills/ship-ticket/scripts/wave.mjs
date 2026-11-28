@@ -396,6 +396,16 @@ export function verifyWave(manifestPath) {
   return { ok: b.ok, code: b.code, digest, wave_id: manifest.wave_id, release_mode: manifest.release_mode ?? DEFAULT_RELEASE_MODE, tickets: b.tickets, unlisted: b.unlisted, problems: [] };
 }
 
+/**
+ * The readiness nodes of a wave's tickets. PR-2 (S2-min): a ticket is never ticket-wide heavy (frozen: `class: 'heavy'` for
+ * every ticket, which charged a heavy slot for a ticket's whole life, LLM think time included); heavy is a per-OPERATION class,
+ * admitted when the operation starts through the host claim store (`host-admit.mjs run`), so a ticket node is `light` here.
+ */
+export function waveNodes(manifest, states) {
+  return manifest.tickets.map((t) => ({ id: t.key, deps: t.deps, dep_mode: t.dep_mode, state: states[t.key].state, owner_required: t.owner_required === true,
+    class: 'light', priority: t.priority ?? 0, owns: t.owns ?? [] }));
+}
+
 /** `wave status`: verify, then per-ticket state + readiness. Launches nothing. */
 export function waveStatus(manifestPath, opts = {}) {
   const v = verifyWave(manifestPath);
@@ -403,8 +413,7 @@ export function waveStatus(manifestPath, opts = {}) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   const states = {};
   for (const t of manifest.tickets) { const { plan_text: _p, ...s } = readTicket(t, opts); states[t.key] = s; }
-  const nodes = manifest.tickets.map((t) => ({ id: t.key, deps: t.deps, dep_mode: t.dep_mode, state: states[t.key].state, owner_required: t.owner_required === true,
-    class: 'heavy', priority: t.priority ?? 0, owns: t.owns ?? [] }));
+  const nodes = waveNodes(manifest, states);
   const { decisions, ready } = evaluateReadiness(nodes);
   return { ok: true, code: null, wave_id: manifest.wave_id, digest: v.digest, release_mode: v.release_mode, release: 'manual, pending owner', states, decisions,
     ready: admissionOrder(nodes, ready), verdict: waveVerdict(decisions) };

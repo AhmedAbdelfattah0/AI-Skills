@@ -119,12 +119,27 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   one common integer unit (hundredths of KB), `used <= total` and `total == used + free` are compared exactly (no
   tolerance; values beyond the safe-integer range are rejected, never rounded), growth is an exact integer difference
   compared with the exact 2 MB tolerance, and load is compared as `5*load >= 3*cores`.
-- `scripts/host-admit.mjs --class heavy|light [--running N]` is the CLI over `admitHost`/`hostSnapshot`
-  for the orchestrator, run before HEAVY work. One invocation takes up to two `hostSnapshot` windows
-  (about 20 s per window, so up to about 40 s), carries the history in memory and persists nothing.
-  `--running N` is the number of tasks already running (for `heavy` it is the heavy-slot count passed to
-  `admitHost`; default 0). It prints ONE JSON line `{admit, reason, reasons, class, running, signals}`
-  and exits 0 admit, 1 hold, 2 usage error, unsupported platform or an internal failure (`reason:"error"`). Non-macOS prints
+- `scripts/host-admit.mjs` is the CLI over `admitHost`/`hostSnapshot` and the host claim store
+  (`host-claims.mjs`, `~/.ai-skills-state/host-resources/`, override `AI_SKILLS_HOST_RESOURCES_DIR`). One invocation
+  takes up to two `hostSnapshot` windows (about 20 s per window, so up to about 40 s). Occupancy is the sum of the
+  weights of the live and unknown claims in the store, never a caller-supplied count (the former `--running N` is
+  refused). `--class heavy|light` alone is an ADVISORY check that takes no claim and prints ONE JSON line
+  `{admit, reason, reasons, class, occupancy, unknown, claimed, signals}`. `run [--class heavy|light [--weight N]]
+  [--op-id <id>] [--resource <path>:R|W]... [--container-owner <o> --container-run <r>] -- <command>` is the
+  claiming path, run for HEAVY work: it claims before the command starts (exit 1 on a hold, nothing started), binds
+  the claim to the command's process group before the launcher's release byte, mirrors the command's exit code, and
+  releases the claim only once the group is gone, no container with the given labels remains and, for an engine
+  run, every attempt in the run's existing attempt records is settled or its detached group gone; otherwise the
+  claim stays charged and a later claim reclaims it on proof (an unknown holder stays charged and raises one
+  host-scoped `blocked.json`). Each admission and each post-admission peak is appended to `samples.jsonl`. An
+  engine command (`run -- node .../run-engine.mjs <cmd> ...`) derives its class and weight (`drive`:
+  min(`config.width`, DAG nodes); `gate red|prove|ship-ready`: 1; every other command light), so `--class`/`--weight`
+  are refused for it. A run whose DAG sets `config.hostClaimRequired: { version: 1 }` (durable placement and an
+  explicit `config.width` required; the drive weight must fit the host maximum of 2 heavy slots) records a
+  host-claim policy version (`engine-policy.mjs` `HOST_CLAIM_OFFSET`), and the run-engine CLI entry refuses its heavy
+  commands with `host_claim_required` unless they run inside an active claim of sufficient weight bound to that run.
+  Exit codes: 0 admit, 1 hold, 2 usage error, unsupported platform, a weight above the host maximum
+  (`weight_exceeds_host_capacity`) or an internal failure (`reason:"error"`). Non-macOS prints
   `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
   parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
