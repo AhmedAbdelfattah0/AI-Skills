@@ -594,3 +594,33 @@ test('C-M1: a pre-S1 / escape-hatch archive (policy 1-12) is adoptable into a ne
   assert.equal(a.out.outcome, 'adopted');
   assert.deepEqual(a.out.adoption.adopted, ['a']);
 });
+
+// ---------------------------------------------------------------- groupIdentity: a leader that exits mid-probe (AC4 flake)
+
+test('groupIdentity: a group that dies between the group probe and the start-time read is gone, not unknown; nothing unproven is verified', async () => {
+  const { groupIdentity } = await import('./engine-quiesce.mjs');
+  const START = 'Thu Nov 26 10:00:00 2026';
+  const a = { pgid: 4242, leader_start: START };
+  /** isAlive answering `answers` in turn (the last one repeats); counts the probes. */
+  const probes = (...answers) => { const f = () => { f.n++; return answers[Math.min(f.n - 1, answers.length - 1)]; }; f.n = 0; return f; };
+  const dead = () => ({ alive: false, startTime: null });
+  // the AC4 race: the group probe sees it alive, the leader exits, the start-time read finds nothing, a fresh group probe proves ESRCH
+  let isAlive = probes(true, false);
+  assert.equal(groupIdentity(a, isAlive, () => ({ alive: true, startTime: null })), 'gone', 'kill(0) ok, then ps empty, then the whole group is gone');
+  assert.equal(isAlive.n, 2, 'gone rests on a fresh positive group probe');
+  assert.equal(groupIdentity(a, probes(true, false), dead), 'gone', 'the leader is already dead at the read and the group is gone');
+  // still alive (or unknowable) after an unreadable start time: unproven, stays unknown
+  assert.equal(groupIdentity(a, probes(true, true), () => ({ alive: true, startTime: null })), 'unknown');
+  assert.equal(groupIdentity(a, probes(true, null), () => ({ alive: true, startTime: null })), 'unknown', 'an unknowable group probe proves nothing');
+  assert.equal(groupIdentity(a, probes(true, true), dead), 'unknown', 'a dead leader whose group still has members is not attributable');
+  // a live leader with exactly the recorded start: verified, with no second probe
+  isAlive = probes(true);
+  assert.equal(groupIdentity(a, isAlive, () => ({ alive: true, startTime: START })), 'verified');
+  assert.equal(isAlive.n, 1);
+  // a different start time is a reused pid, never verified, never gone while the group lives
+  assert.equal(groupIdentity(a, probes(true, true), () => ({ alive: true, startTime: 'Fri Nov 27 10:00:00 2026' })), 'unknown');
+  // unchanged edges
+  assert.equal(groupIdentity(a, probes(false), () => { throw new Error('no read when the group is gone'); }), 'gone');
+  assert.equal(groupIdentity({ pgid: 4242 }, probes(true), dead), 'unknown', 'no recorded start time');
+  assert.equal(groupIdentity({ pgid: 0, leader_start: START }, probes(false), dead), 'unknown', 'no valid pgid');
+});
