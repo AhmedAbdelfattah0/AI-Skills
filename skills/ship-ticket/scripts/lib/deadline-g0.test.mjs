@@ -53,12 +53,15 @@ function world(t, { platform = 'darwin', hrFollowsWall = false, sleepCharged = t
     stall(ms) { s.hr += BigInt(ms) * 1000000n; s.wall += ms; s.mono += ms; }, // no tick, no host sleep evidence
 
     stepWall: (ms) => { s.wall += ms; },
-    sleepHost(ms) { // the whole host is suspended: no tick; wall moves; hr moves only when the clock counts sleep (darwin)
+    // the whole host is suspended: no tick; wall moves; hr moves only when the clock counts sleep (darwin). Options model
+    // broken evidence: hrFraction (the clock counts only part of the sleep), countUp (pmset count), wakeShiftMs (kern.waketime)
+    sleepHost(ms, { hrFraction = sleepCharged ? 1 : 0, countUp = true, wakeShiftMs = 0 } = {}) {
       s.sleep.sleeptime_s = s.wall / 1000;
-      if (sleepCharged) s.hr += BigInt(ms) * 1000000n;
+      s.hr += BigInt(Math.round(ms * hrFraction)) * 1000000n;
       s.wall += ms;
-      s.sleep.waketime_s = s.wall / 1000; s.sleep.sleep_count++;
+      s.sleep.waketime_s = (s.wall + wakeShiftMs) / 1000; if (countUp) s.sleep.sleep_count++;
     },
+    killWorker() { for (const w of s.workers.values()) w.alive = false; },
     reboot({ reuse = false } = {}) {
       for (const w of s.workers.values()) w.alive = false;
       s.boot = 'BOOT-2'; s.hr = 7000000000n; s.wall += 90000; s.bootTime = s.wall - 30000;
@@ -349,4 +352,128 @@ test('exit code: 0 only when all six fixtures PASS; any NOT_RUN/PARTIAL/ARMED/mi
   const rep = await quietMain(['report'], env);
   assert.deepEqual(rep.lines.slice(0, 3).map(l => [l.fixture, l.result]), [['c', 'NOT_RUN'], ['d', 'NOT_RUN'], ['e', 'PASS']]);
   assert.equal(rep.code, G0.EXIT.INCOMPLETE);
+});
+
+// ---- negatives for the checks that guard against a FALSE qualification (each fails if its check is removed) --------
+
+/** Arm d, run, sleep with `opts`, observe. */
+async function sleepCase(t, opts, worldOpts = {}, envExtra = {}) {
+  const w = world(t, worldOpts);
+  Object.assign(w.env, envExtra);
+  await G0.armFixture('d', w.env);
+  w.ctl.run(2000); w.ctl.sleepHost(120000, opts); w.ctl.run(2000);
+  return G0.observeFixture('d', w.env);
+}
+
+test('d negatives: undocumented charge, partial charge, wake outside the gap, no sleep count, short kernel span: never PASS', async (t) => {
+  const undocumented = await sleepCase(t, {}, {}, { sleepChargeDocumented: () => false });
+  assert.equal(undocumented.result, 'FAIL', 'a conservative charge the mechanism does not document is not a pass');
+  const partial = await sleepCase(t, { hrFraction: 0.5 });
+  assert.equal(partial.result, 'FAIL', 'a clock that counts only part of the sleep (hr != wall) is not a full conservative charge');
+  const outside = await sleepCase(t, { wakeShiftMs: 600000 });
+  assert.equal(outside.result, 'NOT_RUN');
+  assert.match(outside.reason, /does not fall inside a gap/);
+  const noCount = await sleepCase(t, { countUp: false });
+  assert.equal(noCount.result, 'NOT_RUN');
+  assert.match(noCount.reason, /no host sleep since arm/);
+  // the log gap is long (dark wakes are summed) but the kernel's own span is short: NOT_RUN
+  const w = world(t);
+  await G0.armFixture('d', w.env);
+  w.ctl.run(2000); w.ctl.stall(100000); w.ctl.sleepHost(20000); w.ctl.run(2000);
+  const short = await G0.observeFixture('d', w.env);
+  assert.equal(short.result, 'NOT_RUN', JSON.stringify(short));
+  assert.match(short.reason, /kernel's last sleep span/);
+});
+
+test('c negatives: a displacement outside the 1 h +- 10 min band, or not restored within 10 s, never counts', async (t) => {
+  const { env, ctl } = world(t);
+  await G0.armFixture('c', env);
+  ctl.run(2000); ctl.stepWall(-30 * 60000); ctl.run(1000);
+  let r = await G0.observeFixture('c', env);
+  assert.equal(r.result, 'NOT_RUN', '-30 min is not the -1 h step');
+  ctl.stepWall(-45 * 60000); ctl.run(1000); // -75 min
+  assert.equal((await G0.observeFixture('c', env)).result, 'NOT_RUN', '-75 min is not the -1 h step');
+  ctl.stepWall(15 * 60000); ctl.run(1000); // -60 min
+  assert.equal((await G0.observeFixture('c', env)).result, 'PARTIAL');
+  ctl.stepWall(90 * 60000); ctl.run(1000); // +30 min: not the +1 h step
+  r = await G0.observeFixture('c', env);
+  assert.equal(r.result, 'PARTIAL');
+  assert.match(r.reason, /-1 h only/);
+  ctl.stepWall(30 * 60000); ctl.run(1000); // +60 min
+  r = await G0.observeFixture('c', env);
+  assert.match(r.reason, /both displacements observed/);
+  ctl.stepWall(-H + 30000); ctl.run(1000); // +30 s: not restored
+  r = await G0.observeFixture('c', env);
+  assert.equal(r.result, 'PARTIAL', JSON.stringify(r));
+  ctl.stepWall(-30000); ctl.run(1000);
+  assert.equal((await G0.observeFixture('c', env)).result, 'PASS');
+});
+
+test('c: after an emergency restoration the resume hint is derived from the current displacement', async (t) => {
+  const { env, ctl } = world(t);
+  await G0.armFixture('c', env);
+  ctl.run(2000); ctl.stepWall(-H); ctl.run(1000);
+  let r = await G0.observeFixture('c', env);
+  assert.equal(r.step_min, 120, 'from -1 h the +1 h target is +120 min away');
+  ctl.stepWall(H); ctl.run(1000); // the owner restored the clock in an emergency
+  r = await G0.observeFixture('c', env);
+  assert.equal(r.result, 'PARTIAL');
+  assert.equal(r.step_min, 60, 'after restoration the +1 h target is +60 min away');
+  assert.match(r.next, /-v\+60M/);
+  assert.match(G0.statusFixture('c', env).hint_note, /run `observe`/);
+});
+
+test('e negatives: a charge above the ground truth, a wrong to_boot, a log past the boot, a worker that died long before the reboot: FAIL', async (t) => {
+  const tamper = async (edit, before = () => {}) => {
+    const w = world(t);
+    await G0.armFixture('e', w.env);
+    w.ctl.run(2000);
+    const f = join(w.env.stateDir, 'e', 'state.json');
+    const st = JSON.parse(readFileSync(f, 'utf8'));
+    edit(st);
+    writeFileSync(f, JSON.stringify(st));
+    before(w);
+    w.ctl.reboot();
+    return G0.observeFixture('e', w.env);
+  };
+  const over = await tamper((st) => { st.deadline.charged_ms = 999999; });
+  assert.equal(over.result, 'FAIL'); assert.match(over.reason, /charge_is_lower_bound/);
+  const toBoot = await tamper((st) => { st.deadline.unmeasured = [{ reason: 'boot_changed', after_ms: st.deadline.charged_ms, to_boot: 'SOME-OTHER-BOOT' }]; });
+  assert.equal(toBoot.result, 'FAIL'); assert.match(toBoot.reason, /unmeasured_explicit/);
+  const w = world(t);
+  await G0.armFixture('e', w.env);
+  w.ctl.run(2000); w.ctl.reboot(); w.s.bootTime -= 120000; // the log's last tick is after the new boot's start
+  const late = await G0.observeFixture('e', w.env);
+  assert.equal(late.result, 'FAIL'); assert.match(late.reason, /worker_log_ended_before_boot/);
+  const dead = await tamper(() => {}, (x) => { x.ctl.killWorker(); x.ctl.run(15 * 60000); });
+  assert.equal(dead.result, 'FAIL'); assert.match(dead.reason, /worker_alive_until_reboot/);
+});
+
+test('a second concurrent observe is REFUSED and cannot overwrite a recorded verdict; a stale lock is taken over', async (t) => {
+  const { env, ctl } = world(t);
+  await G0.armFixture('e', env);
+  ctl.run(1000); ctl.reboot();
+  const lock = join(env.stateDir, 'e', '.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, boot: 'BOOT-2' })); // a live holder on this boot
+  const busy = await G0.observeFixture('e', env);
+  assert.equal(busy.result, 'REFUSED'); assert.match(busy.reason, /busy/);
+  assert.equal(stateOf(env, 'e').phase, 'armed', 'the refused run changed nothing');
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, boot: 'BOOT-1' })); // a holder from the previous boot: stale
+  const r = await G0.observeFixture('e', env);
+  assert.equal(r.result, 'PASS', JSON.stringify(r));
+  assert.equal(existsSync(lock), false, 'the lock is released');
+  assert.equal((await G0.observeFixture('e', env)).result, 'PASS', 'a later observe re-reads the final verdict under the lock');
+});
+
+test('c: an observe right after arm (no tick since the origin yet) stays armed, it is not "the worker stopped"', async (t) => {
+  const { env } = world(t);
+  await G0.armFixture('c', env);
+  const f = join(env.stateDir, 'c', 'state.json'); // the real arm reads its origin just AFTER the worker's first tick
+  const st = JSON.parse(readFileSync(f, 'utf8'));
+  st.deadline.start_ns = String(BigInt(st.deadline.start_ns) + 1000000n);
+  writeFileSync(f, JSON.stringify(st));
+  env.host.nowNs = ((n) => () => n() + 50000000n)(env.host.nowNs); // 50 ms later, before the next 100 ms tick
+  const r = await G0.observeFixture('c', env);
+  assert.equal(r.result, 'NOT_RUN', JSON.stringify(r));
+  assert.equal(stateOf(env, 'c').phase, 'armed');
 });

@@ -73,7 +73,8 @@ export const LIMITS = {
   worker_max_ms: 4 * 3600000, // the worker exits by itself after 4 h of hr time (bounded host resource)
   stop_wait_ms: 3000,
   kill_wait_ms: 2000,
-  e_settle_ms: 3000, // fixture e phase 1 observes once after 3 s, so a non-zero charge exists before the reboot
+  e_settle_ms: 3000,
+  reboot_window_ms: 10 * 60000, // fixture e: the worker's last tick must be within 10 min before the new boot (alive until the reboot) // fixture e phase 1 observes once after 3 s, so a non-zero charge exists before the reboot
 };
 const DEADLINE_SRC = new URL('./deadline.mjs', import.meta.url);
 /** The mechanism's own documentation of the darwin sleep semantics (static evidence for fixture d). */
@@ -287,7 +288,7 @@ export function readTicks(log, startNs) {
     try { const t = JSON.parse(l); all.push({ hr: BigInt(t.hr), wall: Number(t.wall) }); } catch { malformed++; }
   }
   const from = all.findIndex(t => t.hr >= startNs);
-  return { ticks: from < 0 ? [] : all.slice(from), malformed };
+  return { ticks: from < 0 ? [] : all.slice(from), malformed, lastAny: all.at(-1) ?? null };
 }
 /** Consecutive-tick deltas: { pairs: [{ dhr, dwall, fromWall, toWall }], negative_hr }. */
 function deltas(ticks) {
@@ -344,7 +345,7 @@ const NEXT = {
 };
 
 /** Phase 1: start a worker, arm its deadline on the real (or injected) clock and persist everything phase 2 needs. */
-export async function armFixture(fx, env) {
+async function armUnlocked(fx, env) {
   const { host } = env, dir = fxDir(env, fx);
   if (!TWO_PHASE.includes(fx)) return { fixture: fx, result: 'REFUSED', reason: `${fx} is not a two-phase fixture` };
   if (existsSync(stateFile(env, fx))) {
@@ -394,7 +395,12 @@ export async function armFixture(fx, env) {
 /** Phase 2 (repeatable): observe the persisted attempt after the owner's host act and record the verdict. */
 export async function observeFixture(fx, env) {
   if (!TWO_PHASE.includes(fx)) return { fixture: fx, result: 'REFUSED', reason: `${fx} is not a two-phase fixture` };
-  const loaded = loadState(env, fx);
+  const first = loadState(env, fx);
+  if (first.refused) return { fixture: fx, result: 'REFUSED', reason: first.refused };
+  return locked(env, fx, () => observeUnlocked(fx, env));
+}
+async function observeUnlocked(fx, env) {
+  const loaded = loadState(env, fx); // re-read under the lock: a verdict another run recorded is never overwritten
   if (loaded.refused) return { fixture: fx, result: 'REFUSED', reason: loaded.refused };
   const st = loaded.st;
   if (st.phase === 'final') return verdictOf(st);
@@ -408,11 +414,11 @@ function measure(env, st) {
   const { host } = env;
   const wall = host.wallMs(), hr = host.nowNs();
   const m = observe(st.deadline, clockOf(host));
-  const { ticks, malformed } = readTicks(st.worker.log, BigInt(st.deadline.start_ns));
+  const { ticks, malformed, lastAny } = readTicks(st.worker.log, BigInt(st.deadline.start_ns));
   const truth = span(ticks), last = ticks.at(-1);
   const offset = (wall - st.ref.wall_ms) - ms(hr - BigInt(st.ref.hr_ns));
   return { m, ticks, malformed, truth, wall, hr, offset_ms: offset,
-    worker_ticking: Boolean(last) && ms(hr - last.hr) <= LIMITS.ticking_ms,
+    worker_ticking: Boolean(lastAny) && ms(hr - lastAny.hr) <= LIMITS.ticking_ms, // any tick: an observe right after arm has none since the origin yet
     worker_offset_ms: last ? (last.wall - st.ref.wall_ms) - ms(last.hr - BigInt(st.ref.hr_ns)) : null };
 }
 /** 'moved' (another boot), 'unknown' (unreadable now: a transient sysctl failure is not a reboot) or 'same'. */
@@ -446,9 +452,15 @@ async function observeC(env, st) {
   if (minus && plus && obs.kind === 'restored') return finalize(env, st, { ...evidence, result: 'PASS', reason: 'charged within tolerance of true execution at -1 h, at +1 h and after restoration' });
   const restore = 'restore the clock (runbook step C5: re-enable network time, check `date` against a reliable source), then run `c observe` again';
   if (minus && plus) return pending(env, st, { result: 'PARTIAL', reason: `both displacements observed; the clock is not restored (displacement ${obs.offset_ms} ms)`, next: restore });
+  // the step still needed is derived from the CURRENT displacement, so the hint stays right after an emergency restoration
+  const stepTo = (target, label) => {
+    const min = Math.round((target - obs.offset_ms) / 60000);
+    const command = `sudo date -u "$(date -u -v${min >= 0 ? '+' : ''}${min}M +%m%d%H%M%Y.%S)"`;
+    return { step_min: min, command, next: `step the wall clock by ${min >= 0 ? '+' : ''}${min} min to about ${label} from true time: ${command}; then run \`c observe\`` };
+  };
   if (minus || plus) return pending(env, st, { result: 'PARTIAL', reason: `observed at ${minus ? '-1 h' : '+1 h'} only (current displacement ${obs.offset_ms} ms)`,
-    next: minus ? 'step the wall clock to about +1 h from true time (runbook step C4: +2 h from now), then run `c observe`' : 'step the wall clock to about -1 h from true time, then run `c observe`' });
-  return pending(env, st, { result: 'NOT_RUN', reason: `no wall-clock displacement observed yet (displacement ${obs.offset_ms} ms)`, next: NEXT.c });
+    ...(minus ? stepTo(LIMITS.hour_ms, '+1 h') : stepTo(-LIMITS.hour_ms, '-1 h')) });
+  return pending(env, st, { result: 'NOT_RUN', reason: `no wall-clock displacement observed yet (displacement ${obs.offset_ms} ms)`, ...stepTo(-LIMITS.hour_ms, '-1 h') });
 }
 
 async function observeD(env, st) {
@@ -471,6 +483,9 @@ async function observeD(env, st) {
     worker_ticking: x.worker_ticking, wake_in_gap: wakeInGap, wall_ms: x.wall };
   st.observations.push(obs);
   if (!slept) return pending(env, st, { result: 'NOT_RUN', reason: 'no host sleep since arm (kern.sleeptime/kern.waketime/pmset sleep count unchanged)', next: NEXT.d });
+  const kernelSleepMs = Math.round((ev.waketime_s - ev.sleeptime_s) * 1000); // the kernel's own last sleep -> wake span
+  obs.kernel_sleep_ms = kernelSleepMs;
+  if (kernelSleepMs < LIMITS.min_sleep_ms) return pending(env, st, { result: 'NOT_RUN', reason: `the kernel's last sleep span (kern.sleeptime -> kern.waketime) is ${kernelSleepMs} ms, under ${LIMITS.min_sleep_ms} ms (a dark wake can shorten it: sleep again, longer)`, next: NEXT.d });
   if (sleepWall < LIMITS.min_sleep_ms) return pending(env, st, { result: 'NOT_RUN', reason: `host sleep in the worker's log totals ${sleepWall} ms, under ${LIMITS.min_sleep_ms} ms`, next: NEXT.d });
   if (!wakeInGap) return pending(env, st, { result: 'NOT_RUN', reason: 'the host wake time does not fall inside a gap of the worker log: the gap is not proven to be the sleep', next: NEXT.d });
   if (!x.worker_ticking) return finalize(env, st, { result: 'NOT_RUN', reason: 'the worker stopped ticking after the wake: the ground truth is incomplete; re-arm d', observation: obs });
@@ -480,7 +495,7 @@ async function observeD(env, st) {
   const chargedInFull = Math.abs(sleepHr - sleepWall) <= tol && Math.abs(x.m.charged_ms - (execution + sleepHr)) <= tol && x.m.charged_ms >= execution;
   const expected = host.platform === 'darwin' ? 'sleep_charged_conservatively' : 'sleep_not_charged';
   const mode = notCharged ? 'sleep_not_charged' : chargedInFull ? 'sleep_charged_conservatively' : 'neither';
-  const documented = sleepChargeDocumented();
+  const documented = (env.sleepChargeDocumented ?? sleepChargeDocumented)(); // a seam only for the unit tests' negative case
   const evidence = { tolerance_ms: tol, mode, expected_mode: expected, sleep_charge_documented: documented, observation: obs,
     overcharge_ms: x.m.charged_ms - execution };
   if (x.m.measured && mode === expected && (mode === 'sleep_not_charged' || documented))
@@ -520,6 +535,9 @@ async function observeE(env, st) {
     lock_released: S.locks['g0-slot'] === undefined,
     no_probe_of_old_pgid: probes === 0, no_signal: signals.length === 0,
     worker_log_ended_before_boot: lastWall !== null && bootTime !== null && lastWall <= bootTime + LIMITS.tolerance_ms,
+    // the worker was alive until the reboot: ticking at the last pre-reboot observation and within 10 min of the new boot
+    worker_alive_until_reboot: lastWall !== null && bootTime !== null && lastWall >= bootTime - LIMITS.reboot_window_ms
+      && lastWall >= (st.observations.at(-1)?.wall_ms ?? Infinity) - LIMITS.ticking_ms,
     kill_restart_half_pass: st.kill_restart?.result === 'PASS',
   };
   const evidence = { tolerance_ms: LIMITS.tolerance_ms, from_boot: st.deadline.boot_id, to_boot: now, charged_before_reboot_ms: preCharged,
@@ -532,16 +550,46 @@ async function observeE(env, st) {
 
 /** Abandon an armed two-phase fixture: stop its worker (bounded) and record NOT_RUN (aborted). */
 export async function abortFixture(fx, env) {
-  const loaded = loadState(env, fx);
-  if (loaded.refused) return { fixture: fx, result: 'REFUSED', reason: loaded.refused };
-  if (loaded.st.phase === 'final') return verdictOf(loaded.st);
-  return finalize(env, loaded.st, { result: 'NOT_RUN', reason: 'aborted by the owner before a verdict' });
+  if (loadState(env, fx).refused) return { fixture: fx, result: 'REFUSED', reason: loadState(env, fx).refused };
+  return locked(env, fx, async () => {
+    const loaded = loadState(env, fx);
+    if (loaded.refused) return { fixture: fx, result: 'REFUSED', reason: loaded.refused };
+    if (loaded.st.phase === 'final') return verdictOf(loaded.st);
+    return finalize(env, loaded.st, { result: 'NOT_RUN', reason: 'aborted by the owner before a verdict' });
+  });
+}
+/** Phase 1 under the fixture lock. */
+export async function armFixture(fx, env) {
+  if (!TWO_PHASE.includes(fx)) return { fixture: fx, result: 'REFUSED', reason: `${fx} is not a two-phase fixture` };
+  return locked(env, fx, () => armUnlocked(fx, env));
+}
+
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+/**
+ * One arm/observe/abort at a time per fixture: an exclusive-create lock file `<fx>/.lock` holding { pid, boot }. A holder
+ * that is dead or from another boot is stale and taken over once; a live one makes this run REFUSED (nothing changed).
+ */
+export async function locked(env, fx, fn) {
+  const dir = fxDir(env, fx), f = join(dir, '.lock');
+  mkdirSync(dir, { recursive: true });
+  const me = JSON.stringify({ pid: process.pid, boot: env.host.bootId() });
+  for (let i = 0; ; i++) {
+    try { writeFileSync(f, me, { flag: 'wx' }); break; } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let h = null;
+      try { h = JSON.parse(readFileSync(f, 'utf8')); } catch { /* half-written by a crashed holder: stale */ }
+      if ((h && h.boot === env.host.bootId() && pidAlive(h.pid)) || i > 0)
+        return { fixture: fx, result: 'REFUSED', reason: `busy: ${f} is held by pid ${h?.pid ?? '?'}; wait for that run, or remove the file if no helper is running` };
+      rmSync(f, { force: true });
+    }
+  }
+  try { return await fn(); } finally { rmSync(f, { force: true }); }
 }
 export function statusFixture(fx, env) {
   const loaded = loadState(env, fx);
   if (loaded.refused) return { fixture: fx, result: 'NOT_RUN', reason: loaded.refused };
   const st = loaded.st;
-  return st.phase === 'final' ? verdictOf(st) : { fixture: fx, phase: 'armed', result: st.pending?.result ?? 'ARMED', reason: st.pending?.reason, next: st.pending?.next ?? NEXT[fx], observation_count: st.observations.length };
+  return st.phase === 'final' ? verdictOf(st) : { fixture: fx, phase: 'armed', result: st.pending?.result ?? 'ARMED', reason: st.pending?.reason, next: st.pending?.next ?? NEXT[fx], hint_note: 'as of the last observation; run `observe` for a hint from the current state', observation_count: st.observations.length };
 }
 /** The persisted verdicts of c, d, e (an armed or missing fixture is NOT_RUN, never PASS). */
 export const reportTwoPhase = (env) => TWO_PHASE.map(fx => { const s = statusFixture(fx, env); return s.phase === 'final' ? s : { ...s, result: 'NOT_RUN', armed_state: s.result }; });
