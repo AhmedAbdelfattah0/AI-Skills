@@ -94,3 +94,16 @@ test('A2 runtime, load, skip and missing stay refused under v2', async () => {
   assert.equal((await red(ELISION, 2, [{ file: 'spec/a.test.mjs', name: 'absent' }])).code, 'spec_missing');
   assert.equal(parse(ELISION, 3).supported, false, 'an unknown parser version is unsupported, never the default');
 });
+
+test('review R1: v2 refuses a truncated run; a repeated key makes the block malformed; explicit null options do not throw', async () => {
+  const trunc = (stdout, parser) => G.gateRed({ state: { nodes: { n: { deps: [] } }, events: [] }, node: 'n', command: { cmd: 'node', args: ['--test'] },
+    format: 'tap', specs: [SPEC], baselineCandidate: 'sha256:c', timeoutMs: 120000, parser }, (() => { const d = fakeDeps(stdout); const sp = d.spawnRunner;
+      d.spawnRunner = (...a) => { const r = sp(...a); return { ...r, done: r.done.then((x) => ({ ...x, truncated: true, stdout_bytes: 1 })) }; }; return d; })());
+  assert.equal((await trunc(ELISION, 2)).code, 'output_truncated');
+  assert.equal((await trunc(ELISION, 1)).code, 'non_assertion_failure', 'v1 behaviour unchanged');
+  const dup = ['TAP version 13', '# Subtest: suite', 'not ok 1 - suite', '  ---', "  failureType: 'hookFailed'", "  failureType: 'testCodeFailure'",
+    "  code: 'ERR_ASSERTION'", "  name: 'AssertionError'", '  ...', '1..1', ''].join('\n');
+  assert.deepEqual(kinds(dup, 2), [['suite', 'fail', 'runtime']]);
+  assert.equal(G.parseRunnerOutput('tap', ELISION, null).supported, true);
+  assert.equal(G.specResults([SPEC], [{ format: 'tap', stdout: ELISION }], null)[0].status, 'fail');
+});

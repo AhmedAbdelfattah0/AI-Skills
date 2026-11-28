@@ -38,6 +38,10 @@ const unquote = (v) => {
  *   proves the setup failed, not the intended control (D-RED). Version 1 read it as `assertion` when its code was ERR_ASSERTION.
  * Newly ACCEPTED inputs (enumerated, R1 row 8): a `not ok` result whose YAML block holds, inside a block scalar, a line of
  * `...` indented deeper than the pad, followed by its assertion keys. Nothing else is newly accepted (tap-parser-v2 tests).
+ * Also newly read (MINOR, accepted): a well-formed closed `not ok` result that follows a malformed block (v1 swallowed it into the
+ * earlier block). Residual: the discarded malformed block loses its own keys, including its `location`. A key repeated inside one
+ * block (e.g. failureType twice) makes the block malformed, so a later value cannot erase hookFailed. A truncated run is refused in gateRed
+ * under v2 (output_truncated).
  * Newly REFUSED inputs: a `hookFailed` result; a block with no exact-pad terminator.
  */
 export const PARSER_VERSIONS = Object.freeze([1, 2]);
@@ -75,15 +79,15 @@ function parseTap(text, version = 1) {
         }
       } else {
         const end = ' '.repeat(pad) + '...';
-        let closed = false;
+        let closed = false, repeated = false;
         for (i += 2; i < lines.length; i++) {
           const l = lines[i];
           if (l === end) { closed = true; break; }
           if (l.trim() !== '' && l.match(/^ */)[0].length < pad) { i--; break; } // dedent: the outer loop reads this line again
           const kv = l.length > pad && l[pad] !== ' ' ? l.slice(pad).match(/^(\w+): ?(.*)$/) : null;
-          if (kv) yaml[kv[1]] = unquote(kv[2]);
+          if (kv) { if (Object.hasOwn(yaml, kv[1])) repeated = true; yaml[kv[1]] = unquote(kv[2]); }
         }
-        if (!closed) yaml = {}; // malformed block: no key of it counts
+        if (!closed || repeated) yaml = {}; // malformed block (unterminated, or a key repeated so a later value could erase an earlier one): no key of it counts
       }
     }
     let status = res[1] ? 'fail' : 'pass';
@@ -150,7 +154,8 @@ const ADAPTERS = { tap: parseTap, 'vitest-json': parseJestLike, 'jest-json': par
  * Parse runner output (`tap`, `vitest-json`, `jest-json`) into per-spec results. Never throws. `parser` (1 default, or 2:
  * PARSER_VERSIONS) selects the TAP parser; the jest-shaped adapters are the same in both.
  */
-export function parseRunnerOutput(format, text, { parser = 1 } = {}) {
+export function parseRunnerOutput(format, text, opts) {
+  const parser = opts?.parser ?? 1;
   const adapter = Object.hasOwn(ADAPTERS, format) ? ADAPTERS[format] : null;
   if (!adapter) return { supported: false, reason: `unsupported runner format: ${String(format)}` };
   if (typeof text !== 'string') return { supported: false, reason: 'runner output is not text' };
@@ -243,7 +248,8 @@ const SPEC_RANK = ['fail', 'skip', 'unparsed', 'pass', 'missing'];
  * so a spec is 'pass' only when at least one run shows its own file passing and none shows it failing,
  * skipped or unreadable.
  */
-export function specResults(specs, runs, { parser = 1 } = {}) {
+export function specResults(specs, runs, opts) {
+  const parser = opts?.parser ?? 1;
   const parsed = runs.map((r) => (r.truncated === true ? null : parseRunnerOutput(r.format, r.stdout ?? '', { parser })));
   return specs.map((s) => {
     const seen = parsed.map((p, i) => specStatus(s, p, runs[i]));
@@ -351,6 +357,7 @@ export async function gateRed(input, deps) {
   for (const f of Object.keys(spec_digests)) if ((await deps.digestFile(f)) !== spec_digests[f]) rewritten.push(f);
   const parsed = run.timedOut ? null : parseRunnerOutput(format, run.stdout ?? '', { parser: input.parser ?? 1 });
   if (rewritten.length) verdict = refuse(state, 'spec_rewritten', [`the RED runner changed spec file(s) ${rewritten.join(', ')}: a spec that never failed is not RED`]);
+  else if (run.truncated === true && (input.parser ?? 1) !== 1) verdict = refuse(state, 'output_truncated', ['the RED runner output was truncated: parser v2 does not read a cut-off stream (a missing tail could hide a failure)'], { judgment_point: true });
   else if (run.timedOut) verdict = refuse(state, 'runner_timeout', [`runner exceeded ${timeoutMs} ms; a timeout is never re-run automatically`], { judgment_point: true });
   else if (!parsed.supported) verdict = refuse(state, 'unsupported_output', [parsed.reason, 'RED cannot be established; use the documented manual flow (degraded)'], { judgment_point: true, degraded: true });
   else {
