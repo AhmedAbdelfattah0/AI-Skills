@@ -6,16 +6,19 @@
  * record`, op id `repo:ticket:op:generation` with generation `c<candidate_id>` (plus `.r<k>` after a proven nothing-ran):
  *
  *   commit  ADOPT-OR-PARK, never create. The SHIP commit is the one commit of ship.md "One commit" (made after its pre-commit
- *           confirmations, which the supervisor does not run). The op is a record, no effect: HEAD is on the ticket branch,
- *           has ONE parent equal to the recorded merge base, and the work tree has no delta outside the candidate's
- *           excluded recording files -> the commit OID, its tree and parent are recorded. Otherwise PARKED (recomputed
- *           every tick): never a blind recommit.
+ *           confirmations, which the supervisor does not run). A READ-ONLY child adopts HEAD only when it is on the ticket
+ *           branch, has ONE parent equal to the recorded merge base, the work tree has no delta outside S.pinned_exclusions,
+ *           AND the engine's candidate id of that content (bindContent: baseCandidate) equals the reviewed X; a different
+ *           content is refused `publish_candidate_mismatch`. No commit yet / dirty -> `parked` (bounded waits): never a
+ *           blind recommit.
  *   push    the exact commit OID to refs/heads/<branch> of the run's remote, after verifying the remote names the run's
  *           pinned repository identity (S.base.identity) and the local branch still is that OID. A plain NON-force
  *           `git push <remote> <oid>:refs/heads/<branch>` (owner rule SKILL.md "Never force-push without explicit owner
  *           authority": no --force, no --force-with-lease, no `+` refspec). Probe = `git ls-remote <url> refs/heads/<branch>`
- *           (the exact ref line): the OID -> adopted; another OID -> refused `push_requires_force`; absent -> act.
- *   pr      only after the push is recorded. Probe = `gh pr list --repo <o/r> --head <branch> --state all --json ...`;
+ *           (the exact ref line): the OID -> adopted; an ancestor of the OID -> a plain fast-forward push; another OID ->
+ *           refused `push_requires_force`; absent -> act. Immediately before the act the child re-binds the content (HEAD ==
+ *           OID, clean, candidate == X). Argv adds --no-follow-tags --recurse-submodules=no.
+ *   pr      only after the push is recorded. Probe = `gh pr list --repo github.com/<o>/<r> --head <branch> --state all --json ...`;
  *           adopt ONLY the one PR of the same repository (not cross-repository), head ref, base, state OPEN and (recorded
  *           number or headRefOid == the pushed OID); several -> refused `pr_multiple_matches`; an OPEN same head/base PR
  *           on another head OID -> refused `pr_conflict_open`; none -> `gh pr create` once. A post-create list miss is NOT
@@ -33,12 +36,12 @@
  *                               (`<op>.probe`, `<gen>.p<k>`, at most MAX_PROBES, one per tick); a direct-object match records it;
  *                               otherwise the ticket alone is Blocked `ambiguous_unresolved` naming the op, which stays ambiguous.
  *
- * EXACT HEAD (what is and is not bound). The engine binds the review PASS and the ship-ready gate to the candidate id (a digest
- * of the changed paths' content vs the merge base), not to a commit OID. Before the push intent the supervisor requires, in the
- * same tick: `next` is owner_publish (SHIP_READY accepted for the candidate computed from the work tree NOW), the engine state
- * names that candidate in the latest review PASS, the freeze, the local proof and SHIP_READY, the adopted commit is HEAD and
- * the work tree has no delta outside the excluded recording files (so the pushed tree is the reviewed candidate). The intent
- * records the OID, the candidate id and the ship-ready seq. A review bound to the commit OID itself is not built (PR-6b/D-b).
+ * EXACT HEAD (round 1). The engine binds the review PASS and the ship-ready gate to the candidate id (a digest of the changed
+ * paths' content vs the pinned merge base). Under the journal lock the supervisor checks only engine state (owner_publish, X in
+ * the latest PASS, the freeze, the local proof and SHIP_READY) and the journal; the commit child and again the push child
+ * compute the candidate of the adopted commit's content with the engine's own helper and require X. The intents record the OID,
+ * X and the ship-ready seq. A review bound to the commit OID itself is not built (PR-6b/D-b).
+ * BLOCK ATOMICITY: a refused outcome, or a spent probe budget, is committed in the SAME journal write as its ticket-local Block.
  *
  * THREAT MODEL: accidental races and crashes among cooperating same-user processes; the journal and run files are same-user
  * trusted. Candidate-generated text (the PR title from the plan heading) is an argv element (`--title=<t>`) and the body a file
@@ -56,6 +59,7 @@ import { authGit } from './engine-base.mjs';
 import { remoteIdentity, remoteUrl } from './remote-identity.mjs';
 import { strictGithub } from './github-identity.mjs';
 import { groupIdentity } from './engine-quiesce.mjs';
+import { baseCandidate } from './engine-base-read.mjs';
 import { opId, MAX_PROBES } from './supervisor-journal.mjs';
 
 export const PUBLISH_SCHEMA = 'ship-ticket-publish-v1';
@@ -63,8 +67,11 @@ export const PUBLISH_OPS = fileURLToPath(import.meta.url);
 /** The persisted bound of one publication child (the sweep enforces it like every launch op). */
 export const PUBLISH_BOUND_MS = 15 * 60 * 1000;
 export const PR_FIELDS = 'number,state,headRefName,headRefOid,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,url';
-/** Paths whose uncommitted delta does not change the candidate (ship.md "Candidate identity": the plan and the session log). */
-export const SESSION_LOG = 'session-log.md';
+/**
+ * Bounded nothing-ran / parked outcomes per publication op before the ticket alone is Blocked `retries_exhausted`. `parked` is a
+ * commit check that found no adoptable SHIP commit yet (awaiting_commit, ...): each wait is one read-only child (~2 ticks).
+ */
+export const PUBLISH_RETRY_LIMITS = Object.freeze({ nothing_ran: 4, held: 30, parked: 360 });
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const CANDIDATE = /^[0-9a-f]{64}$/;
 const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -174,14 +181,18 @@ export function statusPaths(stdout) {
   return out;
 }
 
-// ---------------------------------------------------------------------------------------------------- local reads (tick)
+// ---------------------------------------------------------------------------------------------------- local reads (child only)
+
+/** An exclusion names an exact path or a directory (everything under it), as candidate-id.mjs reads `--exclude`. */
+const excludedBy = (exclusions) => (p) => exclusions.some((e) => p === e || p.startsWith(String(e).replace(/\/$/, '') + '/'));
 
 /**
- * Bounded LOCAL git reads (no network, no effect): HEAD, its tree and parents, the current branch and the work-tree delta outside
- * `excluded`. -> { ok: true, head, tree, parents, on_branch, delta } | { ok: false, reason }
+ * Bounded LOCAL git reads (no network, no effect), run ONLY in the detached publication child, never under the journal lock:
+ * HEAD, its tree and parents, the current branch and the work-tree delta outside the run's pinned exclusions.
+ * -> { ok: true, head, tree, parents, on_branch, delta } | { ok: false, reason }
  */
-export function localHead(worktree, branch, excluded = []) {
-  const g = (args) => authGit(worktree, args, { timeout: 30000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+export function headFacts(worktree, branch, exclusions = []) {
+  const g = (args) => authGit(worktree, args, { timeout: 30000, env: CHILD_ENV() });
   const head = g(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
   if (head.status !== 0) return { ok: false, reason: 'HEAD does not resolve to a commit' };
   const sym = g(['symbolic-ref', '-q', 'HEAD']);
@@ -189,17 +200,62 @@ export function localHead(worktree, branch, excluded = []) {
   const par = g(['rev-list', '--parents', '-n', '1', 'HEAD']);
   const st = g(['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   if (tree.status !== 0 || par.status !== 0 || st.status !== 0) return { ok: false, reason: 'git could not read the work tree' };
-  const skip = new Set(excluded);
+  const skip = excludedBy(exclusions);
   return { ok: true, head: head.stdout.trim(), tree: tree.stdout.trim(), parents: par.stdout.trim().split(/\s+/).slice(1),
-    on_branch: sym.status === 0 && sym.stdout.trim() === `refs/heads/${branch}`, delta: statusPaths(st.stdout).filter((p) => !skip.has(p)) };
+    on_branch: sym.status === 0 && sym.stdout.trim() === `refs/heads/${branch}`, delta: statusPaths(st.stdout).filter((p) => !skip(p)) };
+}
+
+/**
+ * The CONTENT binding (round 1, Codex MAJOR): with HEAD == `oid` on the branch and no work-tree delta outside the pinned
+ * exclusions, the work tree IS the commit's content on every candidate path, so the engine's own candidate id of it
+ * (engine-base-read baseCandidate: candidate-id.mjs from the run's pinned merge base with S.pinned_exclusions; the same helper
+ * PR-6b's merge check uses) is the commit's candidate. It must equal the reviewed X.
+ * -> { ok: true, facts } | { ok: false, outcome, code, reason }
+ */
+export function bindContent(s, { oid = null } = {}) {
+  const h = headFacts(s.worktree, s.branch, s.exclusions);
+  if (!h.ok) return { ok: false, outcome: 'not_applied', code: 'head_unreadable', reason: h.reason };
+  if (oid !== null && h.head !== oid) return { ok: false, outcome: 'refused', code: 'publish_head_moved', reason: `HEAD is ${h.head}, not the adopted ${oid}` };
+  if (!h.on_branch) return { ok: false, outcome: oid ? 'refused' : 'parked', code: oid ? 'publish_head_moved' : 'publish_branch_mismatch', reason: `HEAD is not refs/heads/${s.branch}` };
+  if (oid === null && h.head === s.merge_base) return { ok: false, outcome: 'parked', code: 'awaiting_commit', reason: 'the SHIP commit does not exist yet: the supervisor adopts it, never creates it (ship.md "One commit")' };
+  if (h.parents.length !== 1 || h.parents[0] !== s.merge_base)
+    return { ok: false, outcome: oid ? 'refused' : 'parked', code: oid ? 'publish_head_moved' : 'commit_unrecognized', reason: `HEAD ${h.head} is not ONE commit on the recorded merge base ${s.merge_base}` };
+  if (h.delta.length) return { ok: false, outcome: oid ? 'refused' : 'parked', code: oid ? 'publish_head_moved' : 'awaiting_commit', reason: `uncommitted candidate paths: ${h.delta.slice(0, 5).join(', ')}` };
+  let c;
+  try { c = baseCandidate(s.worktree, s.candidate_state, s.exclusions); } catch (e) { c = { reason: e.message }; }
+  if (typeof c?.candidate_id !== 'string') return { ok: false, outcome: 'not_applied', code: 'candidate_unreadable', reason: String(c?.reason ?? 'unknown') };
+  if (c.candidate_id !== s.candidate) return { ok: false, outcome: 'refused', code: 'publish_candidate_mismatch', reason: `the commit ${h.head} has candidate ${c.candidate_id}, the reviewed candidate is ${s.candidate}: unreviewed content is never published` };
+  return { ok: true, facts: { commit: h.head, tree: h.tree, parent: h.parents[0], candidate: c.candidate_id } };
 }
 
 // ---------------------------------------------------------------------------------------------------- supervisor side
 
 /**
- * One publication step of a SHIP_READY ticket (called from the supervisor's owner_publish branch, under the journal lock). At most
- * one new op per call; every network command is a detached launch. `sup` = the supervisor's launch protocol { launch, launchGen,
- * opFiles }. Returns a stepTicket result.
+ * The generation of publication op `op` at `base`: the base, or `<base>.r<k>` after k recorded retryable outcomes
+ * (PUBLISH_RETRY_LIMITS: nothing_ran, held, parked), persisted and deterministic. `spent` names an exhausted cause.
+ */
+function publishGen(J, repo, key, op, base) {
+  const counts = { nothing_ran: 0, held: 0, parked: 0 };
+  let last = null;
+  for (let k = 0; ; k++) {
+    const gen = k ? `${base}.r${k}` : base;
+    const o = J.op(opId(repo, key, op, gen));
+    const out = o?.result?.outcome;
+    if (!Object.hasOwn(counts, out)) return { gen, last, spent: Object.keys(counts).find((c) => counts[c] >= PUBLISH_RETRY_LIMITS[c]) ?? null };
+    counts[out] += 1;
+    last = o;
+  }
+}
+
+/** Set the ticket-local Block in the journal document WITHOUT committing: the caller's next commit persists it together with the op outcome. */
+function blockIn(J, ticket, code, reason, extra = {}) {
+  if (!J.doc.blocked[ticket]) J.doc.blocked[ticket] = { code, reason, ...extra };
+}
+
+/**
+ * One publication step of a SHIP_READY ticket (called from the supervisor's owner_publish branch, under the journal lock). Under
+ * the lock it reads ONLY the journal and the engine state already read; every git/gh command (the commit check included) is a
+ * detached launch. At most one new op per call. `sup` = the supervisor's launch protocol { launch, opFiles }.
  */
 export async function publishStep(J, ctx, t, S, n, sup) {
   const pre = publishPreconditions(S, n);
@@ -207,38 +263,28 @@ export async function publishStep(J, ctx, t, S, n, sup) {
   const target = publishTarget(S, t);
   if (!target.ok) return { blocked: await J.block(t.key, 'publish_target_unbound', target.reason) };
   const repo = ctx.repo(t), gen = `c${pre.candidate}`;
-  const cur = (op) => { const g = sup.launchGen(J, repo, t.key, op, gen); return { g, prior: J.op(opId(repo, t.key, op, g.gen)) }; };
-  const spent = async (g, op) => ({ blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: ${op} did not run ${g.spent} times (${g.last.result?.cause ?? g.spent})`, { op_id: g.last.op_id }) });
-  const excluded = [t.plan, SESSION_LOG, ...(Array.isArray(S.pinned_exclusions) ? S.pinned_exclusions : [])];
-  const head = () => ctx.deps.localHead(t.worktree, target.branch, excluded);
+  const cur = (op) => { const g = publishGen(J, repo, t.key, op, gen); return { g, prior: J.op(opId(repo, t.key, op, g.gen)) }; };
+  const spent = async (g, op) => ({ blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: ${op} ${g.spent} ${PUBLISH_RETRY_LIMITS[g.spent]} times (last ${g.last.result?.code ?? g.last.result?.cause ?? g.spent})`, { op_id: g.last.op_id }) });
+  // the content binding every child re-checks: the engine's candidate inputs (pinned merge base, S.pinned_exclusions only)
+  const bind = { worktree: t.worktree, branch: target.branch, merge_base: target.merge_base, candidate: pre.candidate,
+    exclusions: Array.isArray(S.pinned_exclusions) ? S.pinned_exclusions : [],
+    candidate_state: { config: { pinnedBase: S.config?.pinnedBase, base: S.config?.base }, base: S.base } };
+  const go = (op, g, spec, body) => sup.launch(J, ctx, t, { op, gen: g.gen, bound: PUBLISH_BOUND_MS, publish: { mode: 'run', spec, ...(body !== undefined ? { body } : {}) } });
 
-  // 1. commit: adopt-or-park (a record; no effect)
+  // 1. commit: ADOPT-OR-PARK in a read-only child (HEAD on the branch, one parent = the merge base, clean, candidate == X)
   let { g, prior } = cur('commit');
   if (!prior) {
     if (g.spent) return spent(g, 'commit');
-    const h = head();
-    if (!h.ok) return { parked: 'publish_head_unreadable', reason: h.reason };
-    if (!h.on_branch) return { parked: 'publish_branch_mismatch', reason: `HEAD is not refs/heads/${target.branch}` };
-    if (h.head === target.merge_base) return { parked: 'awaiting_commit', reason: 'the SHIP commit does not exist yet: the supervisor adopts it, never creates it (ship.md "One commit")' };
-    if (h.parents.length !== 1 || h.parents[0] !== target.merge_base) return { parked: 'commit_unrecognized', reason: `HEAD ${h.head} is not ONE commit on the recorded merge base ${target.merge_base}` };
-    if (h.delta.length) return { parked: 'awaiting_commit', reason: `the work tree has uncommitted candidate paths: ${h.delta.slice(0, 5).join(', ')}` };
-    const id = opId(repo, t.key, 'commit', g.gen);
-    await J.intent({ op_id: id, ticket: t.key, kind: 'launch', spec_kind: 'publish', mode: 'record', op: 'commit', gen: g.gen, commit: h.head, tree: h.tree, parent: h.parents[0], candidate: pre.candidate });
-    prior = await J.move(id, 'recorded', { result: { outcome: 'published', commit: h.head, tree: h.tree, parent: h.parents[0] } }, 'after-commit-record');
+    return { publishing: await go('commit', g, { op: 'commit', ...bind }), ...(g.last?.result?.outcome === 'parked' ? { waiting: g.last.result.code } : {}) };
   }
   if (prior.result?.outcome !== 'published') return { parked: 'commit_not_recorded', op_id: prior.op_id };
   const commit = prior.result.commit;
 
-  // 2. push the exact OID (non-force)
+  // 2. push the exact OID (non-force); the child re-binds the content to X immediately before the act
   ({ g, prior } = cur('push'));
   if (!prior) {
     if (g.spent) return spent(g, 'push');
-    const h = head();
-    if (!h.ok) return { parked: 'publish_head_unreadable', reason: h.reason };
-    if (h.head !== commit || !h.on_branch || h.delta.length)
-      return { blocked: await J.block(t.key, 'publish_head_moved', `the adopted commit ${commit} is no longer the clean HEAD of ${target.branch}: the reviewed candidate cannot be bound to the push`) };
-    const spec = { op: 'push', worktree: t.worktree, remote: target.remote, identity: target.identity, branch: target.branch, oid: commit, candidate: pre.candidate, ship_ready_seq: pre.ship_ready_seq };
-    return { publishing: await sup.launch(J, ctx, t, { op: 'push', gen: g.gen, bound: PUBLISH_BOUND_MS, publish: { mode: 'run', spec } }) };
+    return { publishing: await go('push', g, { op: 'push', ...bind, remote: target.remote, identity: target.identity, oid: commit, ship_ready_seq: pre.ship_ready_seq }) };
   }
   if (prior.result?.outcome !== 'published') return { parked: 'push_not_recorded', op_id: prior.op_id };
   const pushed = prior.result.oid;
@@ -249,9 +295,8 @@ export async function publishStep(J, ctx, t, S, n, sup) {
     if (g.spent) return spent(g, 'pr');
     let title = t.key;
     try { title = publishTitle(readFileSync(join(t.worktree, t.plan), 'utf8'), t.key); } catch { /* the key alone */ }
-    const spec = { op: 'pr', worktree: t.worktree, remote: target.remote, identity: target.identity, owner: target.owner, repo: target.repo,
-      branch: target.branch, base: target.base, oid: pushed, title };
-    return { publishing: await sup.launch(J, ctx, t, { op: 'pr', gen: g.gen, bound: PUBLISH_BOUND_MS, publish: { mode: 'run', spec, body: publishBody(t, pre, target) } }) };
+    return { publishing: await go('pr', g, { op: 'pr', worktree: t.worktree, remote: target.remote, identity: target.identity, owner: target.owner, repo: target.repo,
+      branch: target.branch, base: target.base, oid: pushed, candidate: pre.candidate, title }, publishBody(t, pre, target)) };
   }
   if (prior.result?.outcome !== 'published') return { parked: 'pr_not_recorded', op_id: prior.op_id };
   J.doc.ship_ready[t.key] = { at_seq: S.seq ?? null,
@@ -272,6 +317,19 @@ function readOut(file) {
 function readJson(file) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } }
 
 /**
+ * One inconclusive probe of op `o`, and (when the budget is now spent) the ticket-local Block, in ONE journal commit: a crash
+ * can never persist a spent budget without its Block.
+ */
+async function probeOnce(J, o, note, code, reason) {
+  const x = J.doc.ops[o.op_id];
+  x.probes = (x.probes ?? 0) + 1;
+  x.last_probe = note;
+  if (x.probes >= MAX_PROBES) blockIn(J, o.ticket, code, reason, { op_id: o.op_id });
+  await J.commit('after-probe-record');
+  return x;
+}
+
+/**
  * Settle one live publication op (every tick, before any new effect). The ONE classifier of publication results: the child's
  * JSON result plus the act marker, never an exit code alone. A probe op only records what it saw; its ambiguous parent decides.
  */
@@ -283,8 +341,7 @@ export async function settlePublish(J, ctx, o, sup) {
   if (o.state === 'intent' && !o.pid) return J.move(o.op_id, 'recorded', { result: { outcome: 'nothing_ran', cause: 'never_released' } });
   const bounded = async (code, note) => {
     if ((o.probes ?? 0) >= MAX_PROBES) return o;
-    if (await J.probe(o.op_id, note)) await J.block(o.ticket, code, `op ${o.op_id}: ${note} after ${MAX_PROBES} probes`, { op_id: o.op_id });
-    return J.op(o.op_id);
+    return probeOnce(J, o, note, code, `op ${o.op_id}: ${note} after ${MAX_PROBES} probes`);
   };
   const env = readJson(o.files.envelope);
   if (env) {
@@ -298,13 +355,14 @@ export async function settlePublish(J, ctx, o, sup) {
   const out = readOut(o.files.out);
   const marker = existsSync(o.files.act);
   if (o.probe_of) return J.move(o.op_id, 'recorded', { result: out ? { outcome: out.outcome, code: out.code ?? null, facts: out.facts ?? {} } : { outcome: 'lost' } });
-  if (out && ['done', 'adopted'].includes(out.outcome)) return J.move(o.op_id, 'recorded', { result: { outcome: 'published', how: out.outcome, ...(out.facts ?? {}) } });
-  if (out?.outcome === 'refused') {
-    const r = await J.move(o.op_id, 'recorded', { result: { outcome: 'refused', code: out.code, reason: out.reason ?? null } });
-    await J.block(o.ticket, out.code ?? 'publish_refused', `${o.op_id}: ${out.reason ?? out.code}`, { op_id: o.op_id });
-    return r;
+  if (out && ['done', 'adopted'].includes(out.outcome))
+    return J.move(o.op_id, 'recorded', { result: { outcome: 'published', how: out.outcome, ...(out.facts ?? {}) } }, o.op === 'commit' ? 'after-commit-record' : undefined);
+  if (out?.outcome === 'refused') { // the outcome and the ticket-local Block are ONE commit
+    blockIn(J, o.ticket, out.code ?? 'publish_refused', `${o.op_id}: ${out.reason ?? out.code}`, { op_id: o.op_id });
+    return J.move(o.op_id, 'recorded', { result: { outcome: 'refused', code: out.code, reason: out.reason ?? null } }, 'after-publish-refused');
   }
-  if (!marker && (!out || out.outcome === 'not_applied')) return J.move(o.op_id, 'recorded', { result: { outcome: 'nothing_ran', cause: out?.code ?? 'no_result' } });
+  if (!marker && out?.outcome === 'parked') return J.move(o.op_id, 'recorded', { result: { outcome: 'parked', code: out.code ?? null, reason: out.reason ?? null } });
+  if (!marker && (!out || out.outcome === 'not_applied')) return J.move(o.op_id, 'recorded', { result: { outcome: 'nothing_ran', cause: out?.code ?? 'no_result', ...(out?.reason ? { reason: out.reason } : {}) } });
   return J.move(o.op_id, 'ambiguous', { why: out?.reason ?? 'the act started (marker present) and left no conclusive result', ...(out?.facts ? { facts: out.facts } : {}) });
 }
 
@@ -322,13 +380,11 @@ async function reprobe(J, ctx, o, sup) {
   if (p.state !== 'recorded') return o;
   const r = p.result ?? {};
   if (r.outcome === 'match') return J.move(o.op_id, 'recorded', { result: { outcome: 'published', how: 'probe', via: p.op_id, ...(r.facts ?? {}) } });
-  if (r.outcome === 'refused') {
-    await J.update(o.op_id, { probes: MAX_PROBES, last_probe: `${p.op_id}: refused ${r.code}` });
-    await J.block(o.ticket, r.code ?? 'publish_refused', `${o.op_id} stays ambiguous: its probe ${p.op_id} refused ${r.code}`, { op_id: o.op_id });
-    return J.op(o.op_id);
+  if (r.outcome === 'refused') { // spend the budget and Block in ONE commit; the op stays ambiguous
+    blockIn(J, o.ticket, r.code ?? 'publish_refused', `${o.op_id} stays ambiguous: its probe ${p.op_id} refused ${r.code}`, { op_id: o.op_id });
+    return J.update(o.op_id, { probes: MAX_PROBES, last_probe: `${p.op_id}: refused ${r.code}` }, 'after-probe-record');
   }
-  if (await J.probe(o.op_id, `probe ${p.op_id}: ${r.outcome}`)) await J.block(o.ticket, 'ambiguous_unresolved', `op ${o.op_id} stayed ambiguous after ${MAX_PROBES} direct-object probes`, { op_id: o.op_id });
-  return J.op(o.op_id);
+  return probeOnce(J, o, `probe ${p.op_id}: ${r.outcome}`, 'ambiguous_unresolved', `op ${o.op_id} stayed ambiguous after ${MAX_PROBES} direct-object probes`);
 }
 
 /** The intent fields and files of a publication launch op (called by the supervisor's launch at intent). */
@@ -391,19 +447,28 @@ function pushChild(mode, s) {
   }
   const local = git(s.worktree, ['rev-parse', '--verify', '--quiet', `refs/heads/${s.branch}^{commit}`], 30000);
   if (local.status !== 0 || local.stdout.trim() !== s.oid) return { outcome: 'refused', code: 'publish_head_moved', reason: `refs/heads/${s.branch} is not ${s.oid}` };
+  // round 1: the content of the commit about to be pushed is re-bound to the reviewed candidate X right before the act
+  const b = bindContent(s, { oid: s.oid });
+  if (!b.ok) return { outcome: b.outcome, code: b.code, reason: b.reason };
   const before = remoteRef(s, rc.url);
   if (before.state === 'present' && before.oid === s.oid) return { outcome: 'adopted', facts: { oid: s.oid } };
-  if (before.state === 'present') return { outcome: 'refused', code: 'push_requires_force', reason: `refs/heads/${s.branch} on ${s.identity} is ${before.oid}, not ${s.oid}: a non-force push cannot publish it, and force needs explicit owner authority` };
-  if (before.state !== 'absent') return { outcome: 'not_applied', code: 'remote_unavailable', reason: `ls-remote ${before.state}` };
-  writeDurable(s.act_file, { op: 'push', oid: s.oid, ref: `refs/heads/${s.branch}`, remote: s.remote });
-  const r = git(s.worktree, ['push', '--porcelain', s.remote, `${s.oid}:refs/heads/${s.branch}`], 300000);
+  if (before.state === 'present') {
+    // a remote branch at an ANCESTOR of the OID is a plain fast-forward (still no force); anything else is refused
+    const anc = git(s.worktree, ['merge-base', '--is-ancestor', before.oid, s.oid], 30000);
+    // every ancestor of the OID is a local object, so a remote OID missing locally is not an ancestor either
+    const known = anc.status === 0 || anc.status === 1 || git(s.worktree, ['cat-file', '-e', `${before.oid}^{commit}`], 30000).status === 0;
+    if (anc.status === 1 || !known) return { outcome: 'refused', code: 'push_requires_force', reason: `refs/heads/${s.branch} on ${s.identity} is ${before.oid}, not an ancestor of ${s.oid}: a non-force push cannot publish it, and force needs explicit owner authority` };
+    if (anc.status !== 0) return { outcome: 'not_applied', code: 'ancestry_unreadable', reason: `merge-base --is-ancestor exit ${anc.status}` };
+  } else if (before.state !== 'absent') return { outcome: 'not_applied', code: 'remote_unavailable', reason: `ls-remote ${before.state}` };
+  writeDurable(s.act_file, { op: 'push', oid: s.oid, ref: `refs/heads/${s.branch}`, remote: s.remote, from: before.oid ?? null });
+  const r = git(s.worktree, ['push', '--porcelain', '--no-follow-tags', '--recurse-submodules=no', s.remote, `${s.oid}:refs/heads/${s.branch}`], 300000);
   const after = remoteRef(s, rc.url);
   if (after.state === 'present' && after.oid === s.oid) return { outcome: 'done', facts: { oid: s.oid } };
   return { outcome: 'ambiguous', reason: `push exit ${r.status ?? r.signal ?? r.error?.code}; the remote ref reads ${after.state}${after.oid ? ` ${after.oid}` : ''}, not ${s.oid}`, facts: { remote: after } };
 }
 
 function listPrs(s) {
-  const r = gh(['pr', 'list', '--repo', `${s.owner}/${s.repo}`, '--head', s.branch, '--state', 'all', '--limit', '100', '--json', PR_FIELDS], s.worktree);
+  const r = gh(['pr', 'list', '--repo', `github.com/${s.owner}/${s.repo}`, '--head', s.branch, '--state', 'all', '--limit', '100', '--json', PR_FIELDS], s.worktree);
   if (r.status !== 0) return { ok: false };
   try { const v = JSON.parse(r.stdout); return Array.isArray(v) ? { ok: true, prs: v } : { ok: false }; } catch { return { ok: false }; }
 }
@@ -429,7 +494,7 @@ function prChild(mode, s) {
   const v = verdict(matchPrs(l.prs, target));
   if (v) return v;
   writeDurable(s.act_file, { op: 'pr', repo: `${s.owner}/${s.repo}`, head: s.branch, base: s.base, oid: s.oid });
-  const c = gh(['pr', 'create', '--repo', `${s.owner}/${s.repo}`, '--head', s.branch, '--base', s.base, `--title=${s.title}`, '--body-file', s.body_file], s.worktree);
+  const c = gh(['pr', 'create', '--repo', `github.com/${s.owner}/${s.repo}`, '--head', s.branch, '--base', s.base, `--title=${s.title}`, '--body-file', s.body_file], s.worktree);
   const number = Number(/\/pull\/(\d+)\s*$/m.exec(c.stdout)?.[1] ?? NaN);
   if (Number.isSafeInteger(number)) { try { writeDurable(s.created_file, { number }); } catch { /* the probe falls back to the head OID */ } }
   const after = listPrs(s);
@@ -439,8 +504,16 @@ function prChild(mode, s) {
     facts: { created_number: Number.isSafeInteger(number) ? number : null } };
 }
 
+/** The commit check (read-only, no marker, no effect): adopt HEAD only when its content is the reviewed candidate X. */
+function commitChild(mode, s) {
+  if (mode !== 'run' || !OID.test(s.merge_base ?? '')) return { outcome: 'not_applied', code: 'bad_spec' };
+  const b = bindContent(s);
+  return b.ok ? { outcome: 'adopted', facts: b.facts } : { outcome: b.outcome, code: b.code, reason: b.reason };
+}
+
 export function child(mode, spec) {
-  if (!['run', 'probe'].includes(mode) || !isObj(spec) || !['push', 'pr'].includes(spec.op)) return { outcome: 'not_applied', code: 'bad_spec' };
+  if (!['run', 'probe'].includes(mode) || !isObj(spec) || !['commit', 'push', 'pr'].includes(spec.op)) return { outcome: 'not_applied', code: 'bad_spec' };
+  if (spec.op === 'commit') return BRANCH.test(spec.branch ?? '') ? commitChild(mode, spec) : { outcome: 'refused', code: 'bad_spec', reason: 'the publication spec is malformed' };
   if (!OID.test(spec.oid ?? '') || !BRANCH.test(spec.branch ?? '') || (spec.op === 'pr' && !BRANCH.test(spec.base ?? ''))) return { outcome: 'refused', code: 'bad_spec', reason: 'the publication spec is malformed' };
   return spec.op === 'push' ? pushChild(mode, spec) : prChild(mode, spec);
 }

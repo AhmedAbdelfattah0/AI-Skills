@@ -73,7 +73,7 @@ import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { journalPaths, withJournal, readJournal, opId, repoId, coded, MAX_PROBES } from './supervisor-journal.mjs';
 import { GATE_FIELDS } from './engine-dag.mjs';
 import { ADMISSION_HELD_EXIT } from './host-admit.mjs';
-import { publishStep, settlePublish, publishIntent, publishCommand, localHead } from './publish-ops.mjs';
+import { publishStep, settlePublish, publishIntent, publishCommand } from './publish-ops.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SUPERVISOR_SCHEMA = 'ship-ticket-supervisor-v1';
@@ -153,7 +153,6 @@ const defaultDeps = () => ({
   secondOpinionRoute: (t, S) => (typeof S?.config?.modelMap?.review_second === 'string'
     ? { provider: S.config.provider, modelMap: { strong: S.config.modelMap.review_second }, billing: S.config.billing } : null),
   publishCommand, // PR-6a: the detached publication child (git/gh are light ops: not admitted)
-  localHead, // PR-6a: bounded local git reads of HEAD and the work tree (no network, no effect)
   hooks: undefined,
   env: process.env,
 });
@@ -550,7 +549,7 @@ async function stepTicket(J, ctx, t) {
 }
 const genSeq = (g) => Number(/^s(\d+)/.exec(String(g))?.[1] ?? -1);
 /** The launch protocol handed to the publication ops (publish-ops.mjs), so they reuse it instead of a second one. */
-const SUP = Object.freeze({ launch, launchGen, opFiles });
+const SUP = Object.freeze({ launch, opFiles });
 
 // ---------------------------------------------------------------------------------------------------- tick
 

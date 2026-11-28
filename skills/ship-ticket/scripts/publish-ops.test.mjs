@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { tick } from './supervisor.mjs';
 import { MAX_PROBES } from './supervisor-journal.mjs';
 import { parseLsRemote, matchPrs, publishPreconditions, publishTarget, publishTitle, statusPaths } from './publish-ops.mjs';
-import { pinBaseRecord } from './engine-base-read.mjs';
+import { pinBaseRecord, baseCandidate } from './engine-base-read.mjs';
 import { makeWorld, worldDeps, opts, effects, journal, readState, writeState } from './supervisor.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
 
@@ -38,6 +38,15 @@ const GIT_SHIM = (realGit) => `#!${process.execPath}
 const fs = require('node:fs'), path = require('node:path'), { spawnSync } = require('node:child_process');
 const W = process.env.SUP_WORLD, a = process.argv.slice(2);
 const sub = a.find((x) => !x.startsWith('-'));
+const pub0 = W ? (JSON.parse(fs.readFileSync(path.join(W, 'world.json'), 'utf8')).pub || {}) : {};
+if (W && (sub === 'push' || sub === 'ls-remote') && (pub0.fail || {})[sub]) {
+  fs.appendFileSync(path.join(W, 'effects.jsonl'), JSON.stringify({ kind: 'git:' + sub, argv: a, status: 128, failed: true, pid: process.pid }) + '\\n');
+  process.stderr.write('fatal: unable to access (fake outage)'); process.exit(128);
+}
+if (W && sub === 'push' && pub0.kill_before_push) { // the act marker is written, the push never runs: killed in between
+  fs.appendFileSync(path.join(W, 'effects.jsonl'), JSON.stringify({ kind: 'git:push', argv: a, killed_before: true, pid: process.pid }) + '\\n');
+  fs.writeFileSync(path.join(W, 'killed'), 'git:push:before'); process.kill(process.ppid, 'SIGKILL'); process.exit(137);
+}
 const r = spawnSync(${JSON.stringify(realGit)}, a, { stdio: ['inherit', 'pipe', 'pipe'] });
 if (W && (sub === 'push' || sub === 'ls-remote')) {
   fs.appendFileSync(path.join(W, 'effects.jsonl'), JSON.stringify({ kind: 'git:' + sub, argv: a, status: r.status, pid: process.pid }) + '\\n');
@@ -77,7 +86,7 @@ if (c2 === 'list') {
 }
 if (c2 === 'create') {
   log({ kind: 'gh:create', argv: a });
-  const [owner, name] = flag('repo').split('/'), head = flag('head'), base = flag('base');
+  const [owner, name] = flag('repo').split('/').slice(-2), head = flag('head'), base = flag('base');
   if (pub.a9 && st.prs.some((p) => p.state === 'OPEN' && p.headRefName === head && p.baseRefName === base && !p.isCrossRepository)) { process.stderr.write('a pull request for branch already exists'); process.exit(1); }
   const ls = spawnSync(${JSON.stringify(realGit)}, ['ls-remote', path.join(W, 'remote.git'), 'refs/heads/' + head], { encoding: 'utf8' });
   const number = st.next++;
@@ -101,43 +110,60 @@ function sh(cwd, ...args) {
 }
 
 /**
- * A wave of one ticket T1 at owner_publish with `publication: pull_request` and a real repository: main (the merge base) on a
- * bare remote behind the github.com URL, the ticket branch with the SHIP commit (unless `commit: false`). Returns { dir, wt, commit, base }.
+ * A wave of tickets (default T1) at owner_publish with `publication: pull_request` and real repositories: main (the merge base)
+ * on ONE bare remote behind the github.com URL, each ticket its own work tree and branch feat/<key> with the SHIP commit (unless
+ * `commit: false`). The reviewed candidate X is the ENGINE'S candidate id (baseCandidate) of that content. `drift: true` then
+ * commits DIFFERENT content after X was taken (a concurrent amend). Returns T1's { wt, commit, X } at top level plus `tickets`.
  */
-function pubWorld(t, { publication = 'pull_request', merge_strategy, commit = true, title = 'Widget: add a', pub = {}, prs = [], state = {} } = {}) {
+function pubWorld(t, { keys = ['T1'], publication = 'pull_request', merge_strategy, commit = true, drift = false, title = 'Widget: add a', pub = {}, prs = [], state = {} } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pub-')));
   t.after(() => { killWorld(dir); rmSync(dir, { recursive: true, force: true }); });
-  makeWorld(dir, [{ key: 'T1', phase: 'published' }], { publication: publication ?? undefined, merge_strategy });
-  const wt = join(dir, 'wt', 'T1'), bare = join(dir, 'remote.git');
+  makeWorld(dir, keys.map((key) => ({ key, phase: 'published' })), { publication: publication ?? undefined, merge_strategy });
+  const bare = join(dir, 'remote.git');
   sh(dir, 'init', '-q', '--bare', '-b', 'main', bare);
-  sh(wt, 'init', '-q', '-b', 'main');
-  for (const [k, v] of [['user.name', 't'], ['user.email', 't@example.com'], ['commit.gpgsign', 'false'], [`url.${bare}.insteadOf`, URL]]) sh(wt, 'config', k, v);
-  sh(wt, 'remote', 'add', 'origin', URL);
-  writeFileSync(join(wt, 'README.md'), 'base\n');
-  sh(wt, 'add', '-A'); sh(wt, 'commit', '-q', '-m', 'base');
-  sh(wt, 'push', '-q', 'origin', 'main');
-  const base = sh(wt, 'rev-parse', 'HEAD');
-  sh(wt, 'checkout', '-q', '-b', 'feat/T1');
-  mkdirSync(join(wt, 'src'), { recursive: true });
-  mkdirSync(join(wt, '.specs', 'plans'), { recursive: true });
-  writeFileSync(join(wt, 'src', 'a.txt'), 'the candidate\n');
-  writeFileSync(join(wt, '.specs', 'plans', 'T1.md'), `# ${title}\n\nthe plan\n`);
-  let head = base;
-  if (commit) { sh(wt, 'add', '-A'); sh(wt, 'commit', '-q', '-m', 'T1: the SHIP commit'); head = sh(wt, 'rev-parse', 'HEAD'); }
+  const seedDir = join(dir, 'seed');
+  sh(dir, 'init', '-q', '-b', 'main', seedDir);
+  for (const [k, v] of [['user.name', 't'], ['user.email', 't@example.com'], ['commit.gpgsign', 'false']]) sh(seedDir, 'config', k, v);
+  writeFileSync(join(seedDir, 'README.md'), 'base\n');
+  sh(seedDir, 'add', '-A'); sh(seedDir, 'commit', '-q', '-m', 'base');
+  sh(seedDir, 'push', '-q', bare, 'main');
+  const base = sh(seedDir, 'rev-parse', 'HEAD');
+  const tickets = {};
+  for (const key of keys) {
+    const wt = join(dir, 'wt', key);
+    sh(dir, 'clone', '-q', bare, wt);
+    for (const [k, v] of [['user.name', 't'], ['user.email', 't@example.com'], ['commit.gpgsign', 'false'], [`url.${bare}.insteadOf`, URL]]) sh(wt, 'config', k, v);
+    sh(wt, 'remote', 'set-url', 'origin', URL);
+    sh(wt, 'checkout', '-q', '-b', `feat/${key}`);
+    mkdirSync(join(wt, 'src'), { recursive: true });
+    mkdirSync(join(wt, '.specs', 'plans'), { recursive: true });
+    writeFileSync(join(wt, 'src', `${key}.txt`), `the candidate of ${key}\n`);
+    writeFileSync(join(wt, '.specs', 'plans', `${key}.md`), `# ${title}\n\nthe plan\n`);
+    const mb = { remote: 'origin', identity: IDENTITY, ref: 'main', sha: base, merge_base: base };
+    const exclusions = [`.specs/plans/${key}.md`, 'session-log.md'];
+    const cs = { config: { pinnedBase: { remote: 'origin' }, base: 'main' }, base: mb };
+    const X = baseCandidate(wt, cs, exclusions).candidate_id;
+    assert.match(X, /^[0-9a-f]{64}$/, 'the engine candidate of the reviewed content');
+    let head = base;
+    if (commit) { sh(wt, 'add', '-A'); sh(wt, 'commit', '-q', '-m', `${key}: the SHIP commit`); head = sh(wt, 'rev-parse', 'HEAD'); }
+    if (drift) { writeFileSync(join(wt, 'src', `${key}.txt`), 'UNREVIEWED content\n'); sh(wt, 'commit', '-q', '-a', '--amend', '-m', `${key}: amended`); head = sh(wt, 'rev-parse', 'HEAD'); }
+    const S = readState(dir, key);
+    writeState(dir, key, { ...S, seq: 9, events: [{ seq: 8, type: 'GATE', gate: 'ship-ready', ok: true, code: 'ship_ready' }],
+      config: { ...S.config, pinnedBase: { remote: 'origin' }, base: 'main' }, pinned_exclusions: exclusions,
+      review_chain: [{ review_execution: 'rx-1', kind: 'original', outcome: 'PASS', candidate_id: X }],
+      freeze: { candidate: X, base: mb, seq: 6 }, local_proof: { candidate_id: X }, ship_ready: { candidate_id: X, seq: 8, base: mb },
+      base: { ...mb, pinned_at_seq: 1 }, ...state });
+    tickets[key] = { wt, commit: head, X };
+  }
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   writeFileSync(join(bin, 'git'), GIT_SHIM(REAL_GIT)); chmodSync(join(bin, 'git'), 0o755);
   writeFileSync(join(bin, 'gh'), FAKE_GH(REAL_GIT)); chmodSync(join(bin, 'gh'), 0o755);
-  writeFileSync(join(dir, 'gh.json'), JSON.stringify({ prs: prs.map((p) => ({ headRepository: { id: 'R1', name: 'widget' }, headRepositoryOwner: { id: 'O1', login: 'acme' }, isCrossRepository: false, baseRefName: 'main', url: `https://github.com/acme/widget/pull/${p.number}`, ...p, headRefOid: p.headRefOid === 'HEAD' ? head : p.headRefOid })), next: 100, hidden: {} }));
+  const head1 = tickets[keys[0]].commit;
+  writeFileSync(join(dir, 'gh.json'), JSON.stringify({ prs: prs.map((p) => ({ headRepository: { id: 'R1', name: 'widget' }, headRepositoryOwner: { id: 'O1', login: 'acme' }, isCrossRepository: false, baseRefName: 'main', url: `https://github.com/acme/widget/pull/${p.number}`, ...p, headRefOid: p.headRefOid === 'HEAD' ? head1 : p.headRefOid })), next: 100, hidden: {} }));
   const w = JSON.parse(readFileSync(join(dir, 'world.json'), 'utf8'));
   writeFileSync(join(dir, 'world.json'), JSON.stringify({ ...w, pub }));
-  const S = readState(dir, 'T1');
-  const mb = { remote: 'origin', identity: IDENTITY, ref: 'main', sha: base, merge_base: base };
-  writeState(dir, 'T1', { ...S, seq: 9, events: [{ seq: 8, type: 'GATE', gate: 'ship-ready', ok: true, code: 'ship_ready' }],
-    review_chain: [{ review_execution: 'rx-1', kind: 'original', outcome: 'PASS', candidate_id: X }],
-    freeze: { candidate: X, base: mb, seq: 6 }, local_proof: { candidate_id: X }, ship_ready: { candidate_id: X, seq: 8, base: mb },
-    base: { ...mb, pinned_at_seq: 1 }, ...state });
-  return { dir, wt, bare, commit: head, base };
+  return { dir, bare, base, tickets, ...tickets[keys[0]] };
 }
 
 function killWorld(dir) {
@@ -160,6 +186,11 @@ async function settleAll(dir, over = {}, max = 40) {
     last = sig;
   }
   throw new Error('world did not settle');
+}
+async function runTicks(dir, n, over = {}) {
+  for (let i = 0; i < n; i++) { await waitLive(dir); await tick(opts(dir), worldDeps(dir, over)); }
+  await waitLive(dir);
+  return journal(dir);
 }
 const count = (dir, kind) => effects(dir).filter((e) => e.kind === kind).length;
 const pushes = (dir) => effects(dir).filter((e) => e.kind === 'git:push');
@@ -204,7 +235,7 @@ test('pure: no publication before exact-candidate review PASS and SHIP_READY on 
     assert.equal(publishPreconditions(S, nn).ok, false, why);
 });
 
-test('source: publication never forces, never merges, never runs a shell; supervisor wiring is the one owner_publish hook', () => {
+test('source: publication never forces, never merges, never runs a shell; no tags or submodules ride the push; gh is host-pinned', () => {
   const src = readFileSync(join(HERE, 'publish-ops.mjs'), 'utf8');
   const code = src.split('\n').filter((l) => !/^\s*(\*|\/\*|\/\/)/.test(l)).join('\n');
   for (const bad of ["'--force'", "'-f'", 'force-with-lease', "'--force-with-lease", "'merge'", 'shell: true', 'execSync', "'deploy'", 'appendFileSync'])
@@ -212,6 +243,10 @@ test('source: publication never forces, never merges, never runs a shell; superv
   assert.ok(!/`\+\$\{/.test(code) && !/'\+refs/.test(code), 'no + (forced) refspec');
   assert.ok(/`\$\{s\.oid\}:refs\/heads\/\$\{s\.branch\}`/.test(code), 'the push refspec is the exact OID to the exact ref');
   assert.ok(code.includes('`--title=${s.title}`') && code.includes("'--body-file'"), 'the title is one argv element; the body a file');
+  assert.ok(code.includes("'--no-follow-tags', '--recurse-submodules=no'"), 'tags and submodules never ride the push');
+  assert.equal((code.match(/'--repo', `github\.com\/\$\{s\.owner\}\/\$\{s\.repo\}`/g) ?? []).length, 2, 'gh list and create name the host: GH_HOST cannot redirect');
+  const sup = readFileSync(join(HERE, 'supervisor.mjs'), 'utf8');
+  assert.ok(!/localHead|authGit|spawnSync\(\s*'git'/.test(sup.slice(sup.indexOf('async function stepTicket'), sup.indexOf('// ---------------------------------------------------------------------------------------------------- tick'))), 'no git under the journal lock in stepTicket');
 });
 
 // ------------------------------------------------------------------------------------------------- happy path
@@ -225,11 +260,11 @@ test('Owner Merge + publication: adopt the SHIP commit, push it once (non-force)
   assert.equal(P.publication.commit, w.commit);
   assert.deepEqual(P.publication.pushed, { remote: 'origin', ref: 'refs/heads/feat/T1', oid: w.commit });
   assert.equal(P.publication.pr.number, 100);
-  assert.equal(P.publication.candidate, X);
+  assert.equal(P.publication.candidate, w.X);
   assert.equal(remoteRef(w.bare, 'refs/heads/feat/T1'), w.commit, 'the remote branch is the exact commit');
   const [push] = pushes(w.dir);
   assert.equal(pushes(w.dir).length, 1);
-  assert.deepEqual(push.argv.slice(-2), ['origin', `${w.commit}:refs/heads/feat/T1`]);
+  assert.deepEqual(push.argv.slice(-4), ['--no-follow-tags', '--recurse-submodules=no', 'origin', `${w.commit}:refs/heads/feat/T1`]);
   assert.ok(push.argv.includes(`${w.commit}:refs/heads/feat/T1`) && !push.argv.some((a) => /^(-f|--force.*|\+.*)$/.test(a)), `non-force exact refspec: ${push.argv}`);
   const creates = effects(w.dir).filter((e) => e.kind === 'gh:create');
   assert.equal(creates.length, 1);
@@ -242,12 +277,13 @@ test('Owner Merge + publication: adopt the SHIP commit, push it once (non-force)
   // the journal carries the exact-head binding of every op
   const ops = Object.values(J.ops);
   assert.deepEqual(ops.map((o) => o.op).sort(), ['commit', 'pr', 'push']);
-  assert.ok(ops.every((o) => o.op_id.endsWith(`:c${X}`)), 'every op id is fixed by the candidate');
+  assert.ok(ops.every((o) => o.op_id.endsWith(`:c${w.X}`)), 'every op id is fixed by the candidate');
   // the FULL target identity is in the journal intent record itself (not only in a sidecar file)
   const byOp = Object.fromEntries(ops.map((o) => [o.op, o]));
-  assert.deepEqual([byOp.commit.commit, byOp.commit.parent, byOp.commit.candidate], [w.commit, w.base, X]);
+  assert.deepEqual([byOp.commit.result.commit, byOp.commit.result.parent, byOp.commit.result.candidate, byOp.commit.publish_spec.candidate], [w.commit, w.base, w.X, w.X]);
   const ps = byOp.push.publish_spec, rs = byOp.pr.publish_spec;
-  assert.deepEqual([ps.remote, ps.identity, ps.branch, ps.oid, ps.candidate, ps.ship_ready_seq], ['origin', IDENTITY, 'feat/T1', w.commit, X, 8]);
+  assert.deepEqual([ps.remote, ps.identity, ps.branch, ps.oid, ps.candidate, ps.ship_ready_seq], ['origin', IDENTITY, 'feat/T1', w.commit, w.X, 8]);
+  assert.deepEqual(byOp.push.publish_spec.exclusions, ['.specs/plans/T1.md', 'session-log.md'], 'exactly S.pinned_exclusions: no manifest plan path or session log is added');
   assert.deepEqual([rs.owner, rs.repo, rs.branch, rs.base, rs.oid, rs.title, rs.identity], ['acme', 'widget', 'feat/T1', 'main', w.commit, 'T1: Widget: add a', IDENTITY]);
 });
 
@@ -296,13 +332,13 @@ test('Automatic Merge + publication: published, the merge is prevented (PR-6b); 
 
 test('no commit yet: parked awaiting_commit (never a blind commit), then adopted once the SHIP commit exists', { skip: SKIP }, async (t) => {
   const w = pubWorld(t, { commit: false });
-  const J = await settleAll(w.dir);
+  const J = await runTicks(w.dir, 6);
   assert.deepEqual(J.blocked, {});
   assert.equal(J.ship_ready.T1, undefined);
-  assert.equal(Object.keys(J.ops).length, 0, 'no op: the supervisor never creates the commit');
-  const r = await tick(opts(w.dir), worldDeps(w.dir));
-  assert.equal(r.out.tickets.T1.parked, 'awaiting_commit');
-  assert.equal(sh(w.wt, 'rev-parse', 'HEAD'), w.base, 'HEAD untouched');
+  const ops = Object.values(J.ops);
+  assert.ok(ops.filter((o) => o.result).length >= 3 && ops.every((o) => o.op === 'commit' && (!o.result || (o.result.outcome === 'parked' && o.result.code === 'awaiting_commit'))), JSON.stringify(ops.map((o) => [o.op, o.result])));
+  assert.equal(sh(w.wt, 'rev-parse', 'HEAD'), w.base, 'HEAD untouched: the supervisor never creates the commit');
+  assert.equal(pushes(w.dir).length, 0);
   sh(w.wt, 'add', '-A'); sh(w.wt, 'commit', '-q', '-m', 'T1: the SHIP commit');
   const J2 = await settleAll(w.dir);
   assert.equal(J2.ship_ready.T1.publication.commit, sh(w.wt, 'rev-parse', 'HEAD'));
@@ -473,4 +509,139 @@ test('candidate-generated text never reaches a shell: a plan heading with $(...)
   const create = effects(w.dir).find((e) => e.kind === 'gh:create');
   assert.ok(create.argv.includes(`--title=${evil}`), create.argv.join(' | '));
   assert.equal(ghState(w.dir).prs[0].title, evil);
+});
+
+// ------------------------------------------------------------------------------------------------- round 1 repair
+
+test('content binding: a commit of DIFFERENT content after the review is never published (publish_candidate_mismatch, 0 push)', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t, { drift: true });
+  const J = await settleAll(w.dir);
+  assert.equal(J.blocked.T1.code, 'publish_candidate_mismatch');
+  assert.match(J.blocked.T1.reason, /unreviewed content is never published/);
+  assert.equal(pushes(w.dir).length, 0);
+  assert.equal(count(w.dir, 'git:ls-remote'), 0, 'refused before any remote is contacted');
+  assert.equal(remoteRef(w.bare, 'refs/heads/feat/T1'), null);
+});
+
+test('content binding: an amend between the commit adoption and the push child is refused in the child, never pushed', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t);
+  let amended = false;
+  const hooks = { boundary: async (b) => {
+    if (b !== 'after-commit-record' || amended) return;
+    amended = true;
+    writeFileSync(join(w.wt, 'src', 'T1.txt'), 'UNREVIEWED content\n');
+    sh(w.wt, 'commit', '-q', '-a', '--amend', '-m', 'T1: amended');
+  } };
+  const J = await settleAll(w.dir, { hooks });
+  assert.ok(amended, 'the amend landed right after the adoption was recorded');
+  assert.equal(J.blocked.T1.code, 'publish_head_moved');
+  assert.equal(pushes(w.dir).length, 0);
+  assert.equal(remoteRef(w.bare, 'refs/heads/feat/T1'), null);
+  // a dirty work tree (uncommitted unreviewed content) after the adoption is refused the same way
+  const d = pubWorld(t);
+  let dirtied = false;
+  const J2 = await settleAll(d.dir, { hooks: { boundary: async (b) => { if (b === 'after-commit-record' && !dirtied) { dirtied = true; writeFileSync(join(d.wt, 'src', 'extra.txt'), 'x\n'); } } } });
+  assert.ok(dirtied);
+  assert.equal(J2.blocked.T1.code, 'publish_head_moved');
+  assert.equal(pushes(d.dir).length, 0);
+});
+
+test('content binding: the SAME content under a NEW commit OID (message amended) is accepted and published', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t);
+  sh(w.wt, 'commit', '-q', '--amend', '-m', 'T1: a better message');
+  const oid = sh(w.wt, 'rev-parse', 'HEAD');
+  assert.notEqual(oid, w.commit);
+  const J = await settleAll(w.dir);
+  assert.equal(J.ship_ready.T1.publication.commit, oid);
+  assert.equal(remoteRef(w.bare, 'refs/heads/feat/T1'), oid);
+});
+
+test('a remote branch at an ANCESTOR of the OID is a plain fast-forward push (no force); published', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t);
+  sh(w.wt, 'push', '-q', 'origin', `${w.base}:refs/heads/feat/T1`);
+  const J = await settleAll(w.dir);
+  assert.deepEqual(J.blocked, {});
+  assert.equal(J.ship_ready.T1.publication.pushed.oid, w.commit);
+  const p = pushes(w.dir).filter((e) => !e.argv.includes('-q'));
+  assert.equal(p.length, 1);
+  assert.ok(!p[0].argv.some((a) => /^(-f|--force.*|\+.*)$/.test(a)));
+  assert.equal(remoteRef(w.bare, 'refs/heads/feat/T1'), w.commit);
+});
+
+test('identity: a fetch or push URL naming another repository is publish_identity_mismatch, refused with no act marker', { skip: SKIP }, async (t) => {
+  for (const [why, cfg] of [['fetch url', (wt) => sh(wt, 'remote', 'set-url', 'origin', 'https://github.com/evil/widget.git')],
+    ['push url', (wt) => sh(wt, 'remote', 'set-url', '--push', 'origin', 'https://github.com/evil/widget.git')]]) {
+    const w = pubWorld(t);
+    cfg(w.wt);
+    const J = await settleAll(w.dir);
+    assert.equal(J.blocked.T1.code, 'publish_identity_mismatch', why);
+    const push = Object.values(J.ops).find((o) => o.op === 'push');
+    assert.equal(existsSync(push.files.act), false, `${why}: no act marker`);
+    assert.equal(effects(w.dir).filter((e) => e.kind === 'git:push').length, 0, why);
+  }
+});
+
+test('a failed probe before the act is nothing-ran: retried (bounded), then retries_exhausted; never a marker or a push', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t, { pub: { fail: { 'ls-remote': true } } });
+  const J = await settleAll(w.dir);
+  assert.equal(J.blocked.T1.code, 'retries_exhausted');
+  const p = Object.values(J.ops).filter((o) => o.op === 'push');
+  assert.equal(p.length, 4, 'PUBLISH_RETRY_LIMITS.nothing_ran attempts');
+  assert.ok(p.every((o) => o.result.outcome === 'nothing_ran' && !existsSync(o.files.act)));
+  assert.equal(effects(w.dir).filter((e) => e.kind === 'git:push').length, 0);
+});
+
+test('kill between the act marker and the push: ambiguous, probes find nothing, Blocked; a later candidate change never replays it', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t, { pub: { kill_before_push: true } });
+  const J = await settleAll(w.dir);
+  assert.equal(J.blocked.T1.code, 'ambiguous_unresolved');
+  const push = J.ops[J.blocked.T1.op_id];
+  assert.equal(push.op, 'push');
+  assert.equal(push.state, 'ambiguous');
+  assert.ok(existsSync(push.files.act), 'the marker preceded the (never run) push');
+  assert.equal(remoteRef(w.bare, 'refs/heads/feat/T1'), null);
+  // a successor candidate (the engine state moves to another X) does not erase the predecessor ambiguity
+  const S = readState(w.dir, 'T1'); const Y = 'e'.repeat(64);
+  writeState(w.dir, 'T1', { ...S, review_chain: [{ ...S.review_chain[0], candidate_id: Y }], freeze: { ...S.freeze, candidate: Y }, local_proof: { candidate_id: Y }, ship_ready: { ...S.ship_ready, candidate_id: Y } });
+  const n = effects(w.dir).length;
+  const J2 = await settleAll(w.dir);
+  assert.equal(effects(w.dir).length, n, 'no new attempt of any kind');
+  assert.equal(J2.ops[push.op_id].state, 'ambiguous');
+  assert.ok(!Object.keys(J2.ops).some((id) => id.includes(`:c${Y}`)), 'no op of the successor candidate starts');
+});
+
+test('a multi-ticket wave: one ticket Blocked (diverged remote) while the independent ticket publishes', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t, { keys: ['T1', 'T2'] });
+  const other = join(w.dir, 'other');
+  sh(w.dir, 'clone', '-q', w.bare, other);
+  for (const [k, v] of [['user.name', 'o'], ['user.email', 'o@example.com']]) sh(other, 'config', k, v);
+  sh(other, 'checkout', '-q', '-b', 'feat/T1'); writeFileSync(join(other, 'x.txt'), 'x'); sh(other, 'add', '-A'); sh(other, 'commit', '-q', '-m', 'x'); sh(other, 'push', '-q', 'origin', 'feat/T1');
+  const J = await settleAll(w.dir);
+  assert.equal(J.blocked.T1.code, 'push_requires_force');
+  assert.equal(J.ship_ready.T2.publication.pushed.oid, w.tickets.T2.commit);
+  assert.equal(remoteRef(w.bare, 'refs/heads/feat/T2'), w.tickets.T2.commit);
+  assert.equal(ghState(w.dir).prs.length, 1);
+});
+
+test('Block atomicity: a kill right after a refused outcome or a spent probe budget is written leaves the Block written too', { skip: SKIP }, async (t) => {
+  const w = pubWorld(t);
+  const other = join(w.dir, 'other');
+  sh(w.dir, 'clone', '-q', w.bare, other);
+  for (const [k, v] of [['user.name', 'o'], ['user.email', 'o@example.com']]) sh(other, 'config', k, v);
+  sh(other, 'checkout', '-q', '-b', 'feat/T1'); writeFileSync(join(other, 'x.txt'), 'x'); sh(other, 'add', '-A'); sh(other, 'commit', '-q', '-m', 'x'); sh(other, 'push', '-q', 'origin', 'feat/T1');
+  let killed = false;
+  for (let i = 0; i < 12 && !killed; i++) { await waitLive(w.dir); killed = child(w.dir, 'after-publish-refused:1 kill').signal === 'SIGKILL'; }
+  assert.ok(killed, 'killed right after the refused record');
+  const J = journal(w.dir);
+  const push = Object.values(J.ops).find((o) => o.op === 'push' && o.result?.outcome === 'refused');
+  assert.ok(push, 'the refused outcome is persisted');
+  assert.equal(J.blocked.T1?.code, 'push_requires_force', 'and its Block is in the same write');
+  const v = pubWorld(t, { pub: { lost_create: true, hide: 99 } });
+  killed = false;
+  for (let i = 0; i < 40 && !killed; i++) { await waitLive(v.dir); killed = child(v.dir, `after-probe-record:${MAX_PROBES} kill`).signal === 'SIGKILL'; }
+  assert.ok(killed, 'killed right after the last probe was recorded');
+  const Jv = journal(v.dir);
+  const pr = Object.values(Jv.ops).find((o) => o.op === 'pr');
+  assert.equal(pr.probes, MAX_PROBES);
+  assert.equal(Jv.blocked.T1?.code, 'ambiguous_unresolved', 'a spent budget is never persisted without its Block');
 });
