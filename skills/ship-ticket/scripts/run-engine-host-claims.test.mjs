@@ -8,12 +8,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture, POSIX, codes } from './engine-test-fixture.mjs';
 import { fakeHost } from './host-claims.test-helper.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
+import { acquireLock } from './lib/durable-io.mjs';
 
 const SKIP = POSIX ? false : 'POSIX process groups (Windows quiescence is unknown, known limit D4)';
 const engine = () => import('./run-engine.mjs');
@@ -33,7 +34,10 @@ test('P2-6 a lone heavy first node is held while the host has no free heavy slot
   await init(fx.ctx());
   const out = await drive(fx.ctx({ hostClaims: { dir, snapshot: h.snapshot, now: h.now } }));
   assert.equal(fx.runs('a').length, 0, 'the lone heavy node was not launched: the slot is taken');
-  assert.ok(codes(out).includes('host_held'), `the drive reports the hold: ${codes(out)}`);
+  // Codex-3: a capacity hold is a WAITING diagnostic, never a judgment (so `next` says drive again, not owner).
+  assert.ok(!codes(out).includes('host_held'), `no host_held judgment: ${codes(out)}`);
+  assert.equal(out.outcome, 'waiting');
+  assert.ok((out.waiting ?? []).some(w => w.code === 'host_held' && w.node === 'a'), `the hold is reported as waiting: ${JSON.stringify(out.waiting)}`);
   assert.equal(fx.readState().nodes.a.state, 'pending', 'it stays queued (no owner question, no failure)');
   assert.ok(rows(dir).some(r => r.kind === 'admission' && r.admit === false && r.reasons.includes('held_heavy') && r.op_id.startsWith('T-1.run-1.a.')), 'the hold is persisted with its sample');
 });
@@ -88,6 +92,7 @@ test('width policy: hostClaims needs an explicit width, and width 1 needs a reas
   bad(dag({ hostClaims: { version: 1 }, width: 1 }, [{ id: 'a', promptFile: 'p', hostClass: 'light' }]), /widthReason/);
   bad(dag({ hostClaims: { version: 1, widthReason: '' }, width: 1 }, [{ id: 'a', promptFile: 'p', hostClass: 'light' }]), /widthReason/);
   bad(dag({ hostClaims: { version: 2 }, width: 2 }), /hostClaims/);
+  bad(dag({ hostClaims: { version: 1 }, width: null }, [{ id: 'a', promptFile: 'p', hostClass: 'light' }]), /explicit config\.width/); // Codex-6
   bad(dag({ hostClaims: { version: 1 }, width: 2 }), /hostClass/);
   bad(dag({ width: 2 }, [{ id: 'a', promptFile: 'p', hostClass: 'heavy' }]), /config\.hostClaims/);
   bad(dag({ hostClaims: { version: 1 }, width: 2 }, [{ id: 'a', promptFile: 'p', hostClass: 'heavy', hostResources: [{ resource: 'x', mode: 'X' }] }]), /hostResources/);
@@ -119,4 +124,106 @@ test('P2-6 hostClaims works on both placements: a durable-default run and the le
     assert.ok(rows(dir).some(r => r.kind === 'admission' && r.admit && r.op_id === s.attempts[0].host_claim.op_id));
     assert.deepEqual(claimIds(dir), []);
   }
+});
+
+// ---- S2 review round 1 repairs (Codex-1, Codex-2/F1, Codex-3, F5, F8) --------------------------------------------------
+const label = { owner: 'ownr', run: 'run-c1' };
+test('Codex-1 an engine heavy node carries its container labels: a surviving container keeps the claim charged until it is gone', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: HC, nodes: [{ id: 'a', writes: ['src/a.txt'], hostClass: 'heavy', hostContainerLabel: label }] });
+  const dir = tmp(t), h = fakeHost();
+  let alive = true; const asked = [];
+  const docker = (cmd, args) => { asked.push(args.join(' ')); return { status: 0, stdout: alive ? 'abcdef0123456789\n' : '', stderr: '' }; };
+  const { init, drive, resume } = await engine();
+  await init(fx.ctx());
+  await drive(fx.ctx({ hostClaims: { dir, snapshot: h.snapshot, now: h.now, docker } }));
+  assert.equal(fx.runs('a').length, 1);
+  let a = fx.readState().attempts[0];
+  assert.equal(a.host_claim.released, false, 'not released while its labelled container survives');
+  assert.equal(a.host_claim.release_reason, 'container_alive');
+  assert.equal(claimIds(dir).length, 1, 'still charged');
+  assert.ok(asked.some(x => x.includes(`label=ai-skills.ship-ticket.owner=${label.owner}`) && x.includes(`label=ai-skills.ship-ticket.run=${label.run}`)));
+  alive = false;
+  await resume(fx.ctx({ hostClaims: { dir, docker } }));
+  a = fx.readState().attempts[0];
+  assert.equal(a.host_claim.released, true, 'released once no labelled container remains');
+  assert.deepEqual(claimIds(dir), []);
+});
+
+/** A RED-gate fixture whose runner waits for `go` (after writing `started`) before running the TAP spec. */
+function redFixture(t, unit) {
+  const fx = fixture(t, { commit: true, config: { ...HC, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', 'red.test.mjs'], format: 'tap', ...unit } } },
+    nodes: [{ id: 'r', writes: ['src/r.txt'], hostClass: 'light', redSpecs: [{ file: 'red.test.mjs', name: 'fails on assertion' }] }] });
+  const started = join(fx.root, 'started'), go = join(fx.root, 'go');
+  writeFileSync(join(fx.repo, 'red.test.mjs'), `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { existsSync, writeFileSync } from 'node:fs';\n`
+    + `writeFileSync(${JSON.stringify(started)}, '');\nwhile (!existsSync(${JSON.stringify(go)})) await new Promise(r => setTimeout(r, 20));\n`
+    + `test('fails on assertion', () => { assert.equal(1, 2); });\n`);
+  return { fx, started, go };
+}
+async function until(pred, ms = 20000) { for (const end = Date.now() + ms; Date.now() < end;) { if (await pred()) return true; await new Promise(r => setTimeout(r, 20)); } return Boolean(await pred()); }
+
+test('Codex-2/F1 a claimed installer cannot overlap an active RED/proof reader of the same realpath', { skip: SKIP }, async (t) => {
+  const shared = join(tmp(t), 'node_modules'); mkdirSync(shared);
+  const { fx, started, go } = redFixture(t, { hostClass: 'light', hostResources: [{ resource: shared, mode: 'R' }] });
+  const dir = tmp(t);
+  const { init, gate } = await engine();
+  assert.equal((await init(fx.ctx())).ok ?? true, true);
+  const running = gate(fx.ctx({ gate: 'red', input: { node: 'r', command: 'unit' }, hostClaims: { dir } }));
+  assert.ok(await until(() => existsSync(started)), 'the RED runner is running');
+  const { claim } = await import('./host-claims.mjs');
+  const npmCi = await claim({ dir, opId: 'npm-ci', cls: 'light', resources: [{ resource: shared, mode: 'W' }] });
+  assert.equal(npmCi.admit, false, 'the installer is queued behind the active runner reader');
+  assert.deepEqual(npmCi.reasons, ['held_resource']);
+  assert.equal(npmCi.conflicts.length, 1);
+  writeFileSync(go, '');
+  const v = await running;
+  assert.equal(v.code, 'red_accepted', JSON.stringify(v.reasons));
+  assert.deepEqual(claimIds(dir), [], 'the runner claim is released after its group is gone');
+  assert.ok(rows(dir).some(r => r.kind === 'peak' && r.op_id === npmCi.conflicts[0]), 'the runner\'s peak is persisted');
+});
+
+test('Codex-2/F1 a heavy suite cannot start while capacity is exhausted; the held runner leaves RED unchanged and is retried', { skip: SKIP }, async (t) => {
+  const { fx, started, go } = redFixture(t, {}); // no hostClass: a runner is heavy by default
+  writeFileSync(go, '');
+  const dir = tmp(t), h = fakeHost();
+  const { claim, releaseClaim } = await import('./host-claims.mjs');
+  assert.equal((await claim({ dir, opId: 'other-suite', cls: 'heavy', snapshot: h.snapshot, now: h.now })).admit, true);
+  const { init, gate } = await engine();
+  await init(fx.ctx());
+  const held = await gate(fx.ctx({ gate: 'red', input: { node: 'r', command: 'unit' }, hostClaims: { dir, snapshot: h.snapshot, now: h.now } }));
+  assert.equal(held.code, 'host_held', JSON.stringify(held));
+  assert.equal(held.judgment_point, false, 'a hold is pending work, never a judgment');
+  assert.equal(existsSync(started), false, 'the suite never started');
+  const s = fx.readState();
+  assert.equal(s.gates.red.r, undefined, 'no RED evidence recorded');
+  assert.ok(!s.events.some(e => e.type === 'RED_REFUSED'), 'and no refused RED');
+  assert.ok(!s.attempts.some(a => a.kind === 'gate-red'), 'no runner attempt was started');
+  assert.equal((await releaseClaim({ dir, opId: 'other-suite' })).released, true);
+  const again = await gate(fx.ctx({ gate: 'red', input: { node: 'r', command: 'unit' }, hostClaims: { dir, snapshot: h.snapshot, now: h.now } }));
+  assert.equal(again.code, 'red_accepted', 'retried once capacity returns');
+  assert.ok(rows(dir).some(r => r.kind === 'admission' && r.admit && r.op_id.includes('.gate-red.')), 'the runner admission is persisted');
+});
+
+test('F5 a busy claim store (lock timeout) holds the node; the drive does not throw', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: HC, nodes: [{ id: 'a', writes: ['src/a.txt'], hostClass: 'heavy' }] });
+  const dir = tmp(t), h = fakeHost();
+  mkdirSync(dir, { recursive: true });
+  const lock = await acquireLock({ lockFile: join(dir, 'claims.lock'), runId: 'other' });
+  t.after(() => lock.release());
+  const { init, drive } = await engine();
+  await init(fx.ctx());
+  const out = await drive(fx.ctx({ hostClaims: { dir, snapshot: h.snapshot, now: h.now, waitMs: 50 } }));
+  assert.equal(out.outcome, 'waiting');
+  assert.ok((out.waiting ?? []).some(w => w.code === 'host_held' && /busy|lock/.test(w.reason)), JSON.stringify(out.waiting));
+  assert.equal(fx.runs('a').length, 0);
+});
+
+test('F8 a dispatch that throws after its claim and before the attempt is recorded releases the claim', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: HC, nodes: [{ id: 'a', writes: ['src/a.txt'], hostClass: 'heavy' }] });
+  const dir = tmp(t), h = fakeHost();
+  const { init, drive } = await engine();
+  await init(fx.ctx());
+  const att = fx.placement().attempts;
+  rmSync(att, { recursive: true, force: true }); mkdirSync(join(att, '..'), { recursive: true }); writeFileSync(att, 'not a directory');
+  await assert.rejects(drive(fx.ctx({ hostClaims: { dir, snapshot: h.snapshot, now: h.now } })));
+  assert.deepEqual(claimIds(dir), [], 'the claim did not leak for the engine\'s lifetime');
 });

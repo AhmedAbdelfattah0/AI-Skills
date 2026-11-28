@@ -188,23 +188,38 @@ function validateHostClaims(c, bad) {
   if (c.hostClaims === undefined) return;
   const h = c.hostClaims;
   if (!isObj(h) || h.version !== 1 || Object.keys(h).some(k => k !== 'version' && k !== 'widthReason')) bad('config.hostClaims must be { version: 1, widthReason?: string }');
-  if (c.width === undefined) bad('config.hostClaims needs an explicit config.width (the planned width)');
+  if (!Number.isInteger(c.width) || c.width < 1 || c.width > 32) bad('config.hostClaims needs an explicit config.width (the planned width, an integer 1..32)'); // Codex-6: null too
   if (h.widthReason !== undefined && !(typeof h.widthReason === 'string' && h.widthReason.trim().length >= 1 && h.widthReason.length <= 300)) bad('config.hostClaims.widthReason must be a non-empty string of at most 300 characters');
   if (c.width === 1 && h.widthReason === undefined) bad('config.width 1 with config.hostClaims needs config.hostClaims.widthReason (why the run is serial)');
 }
 function validateHostNode(n, c, bad) {
   if (c.hostClaims === undefined) {
-    if (n.hostClass !== undefined || n.hostResources !== undefined) bad(`node ${n.id}: hostClass/hostResources need config.hostClaims`);
+    if (n.hostClass !== undefined || n.hostResources !== undefined || n.hostContainerLabel !== undefined) bad(`node ${n.id}: hostClass/hostResources/hostContainerLabel need config.hostClaims`);
     return;
   }
   if (!HOST_CLASSES.includes(n.hostClass)) bad(`node ${n.id}: hostClass must be heavy or light (config.hostClaims: an explicit per-operation class)`);
-  if (n.hostResources !== undefined && !(Array.isArray(n.hostResources) && n.hostResources.every(r => isObj(r) && Object.keys(r).every(k => k === 'resource' || k === 'mode')
+  hostShape(n, `node ${n.id}`, bad);
+}
+const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/** S2: optional hostResources [{ resource, mode }] and hostContainerLabel { owner, run } (the docker-lifecycle labels the operation's containers carry). */
+function hostShape(o, where, bad) {
+  if (o.hostResources !== undefined && !(Array.isArray(o.hostResources) && o.hostResources.every(r => isObj(r) && Object.keys(r).every(k => k === 'resource' || k === 'mode')
     && typeof r.resource === 'string' && r.resource.length >= 1 && r.resource.length <= 4096 && !r.resource.includes('\0') && ['R', 'W'].includes(r.mode))))
-    bad(`node ${n.id}: hostResources must be [{ resource, mode: R|W }]`);
+    bad(`${where}: hostResources must be [{ resource, mode: R|W }]`);
+  if (o.hostContainerLabel !== undefined && !(isObj(o.hostContainerLabel) && Object.keys(o.hostContainerLabel).sort().join() === 'owner,run'
+    && SAFE_LABEL.test(o.hostContainerLabel.owner) && SAFE_LABEL.test(o.hostContainerLabel.run)))
+    bad(`${where}: hostContainerLabel must be exactly { owner, run } with safe ids`);
+}
+/** S2 (F1): a runner (testCommands entry) declares its own class, shared resources and labels; heavy by default (a suite). */
+function validateHostRunner(name, e, c, bad) {
+  const has = e.hostClass !== undefined || e.hostResources !== undefined || e.hostContainerLabel !== undefined;
+  if (c.hostClaims === undefined) { if (has) bad(`config.testCommands.${name}: hostClass/hostResources/hostContainerLabel need config.hostClaims`); return; }
+  if (e.hostClass !== undefined && !HOST_CLASSES.includes(e.hostClass)) bad(`config.testCommands.${name}.hostClass must be heavy or light`);
+  hostShape(e, `config.testCommands.${name}`, bad);
 }
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
-NODE_FIELDS.push('hostClass', 'hostResources'); // S2 (P2): the per-operation class and shared host resources, only with config.hostClaims
+NODE_FIELDS.push('hostClass', 'hostResources', 'hostContainerLabel'); // S2 (P2): the per-operation class and shared host resources, only with config.hostClaims
 // REPAIR is never a DAG node: the engine dispatches repairs from review records only (it would fail 'dispatch refused').
 const NODE_PHASES = ['BUILD', 'PROVE', 'SHIP'];
 const PINNED_PLAN = /^\.specs\/plans\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
@@ -236,7 +251,8 @@ export function validateEngineDag(doc, { ticket } = {}) {
   if (!isObj(c.testCommands ?? {})) bad('config.testCommands must map name -> { cmd, args, format? }');
   for (const [name, e] of Object.entries(c.testCommands ?? {})) {
     if (!SAFE_NAME.test(name) || !isObj(e)) bad(`config.testCommands.${name} must be a { cmd, args, format? } entry with a safe name`);
-    only(e, ['cmd', 'args', 'format', 'evidence'], `testCommands.${name}`);
+    only(e, ['cmd', 'args', 'format', 'evidence', 'hostClass', 'hostResources', 'hostContainerLabel'], `testCommands.${name}`);
+    validateHostRunner(name, e, c, bad);
     if (typeof e.cmd !== 'string' || !e.cmd || !strings(e.args ?? [])) bad(`config.testCommands.${name} needs cmd and args: [string]`);
     if (e.format !== undefined && !RUNNER_FORMATS.includes(e.format)) bad(`config.testCommands.${name}.format must be ${RUNNER_FORMATS.join('|')}`);
     const v = e.evidence;

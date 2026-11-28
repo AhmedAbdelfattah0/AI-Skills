@@ -20,6 +20,7 @@ import { armAttempt } from './lib/deadline.mjs';
 import { note, judgment, closure, clampTimeout, coded } from './engine-dag.mjs';
 import { baseCandidate, baseCommit } from './engine-base-read.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
+import { claimsOn, claimedRunner, admitRunner } from './engine-claims.mjs';
 
 /** Verified evidence invalidated more often than this in one run is an invalidation storm. */
 export const MAX_UNIT_INVALIDATIONS = 2;
@@ -35,11 +36,14 @@ const J = JSON.stringify;
 export const hasUnits = (S) => S.unit_checks !== undefined;
 
 /** `gate red`/proof/unit-check runner deps: durable commits, the launcher, binding re-check. */
-export function runnerDeps(E) {
+export function runnerDeps(E, admit) {
   const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
-  return io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn,
+  const deps = io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn,
     commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
     verifyBinding: () => E.verifyBinding(), deadlineClock: ctx.deadlineClock });
+  if (!claimsOn(E.S)) return deps; // legacy: the frozen deps, unchanged
+  // S2 (F1): every runner of a hostClaims run is admitted through a claim (engine-claims.mjs); `admit` names the gate RED runner.
+  return { ...deps, spawnRunner: claimedRunner(E, deps.spawnRunner), ...(admit ? { admitRunner: () => admitRunner(E, admit) } : {}) };
 }
 
 /** A prototype-free record (unit and check names are keys; `constructor` must stay an ordinary name). */
@@ -273,13 +277,15 @@ export const ceilingHolds = (S) => holdsOf(S);
 /** One check through the runner protocol; `{ refusal }` when its group's quiescence is not proven (nothing recorded). */
 async function runCheck(E, u, name, resources) {
   const c = E.S.config.testCommands[name];
+  const adm = await admitRunner(E, { kind: 'unit-check', node: `${u}.${name}`, name }); // S2: a held check is pending, not run
+  if (adm?.held) return { refusal: true, held: true };
   const a = { attempt_id: 'att-' + randomUUID(), kind: 'unit-check', node: u, check: name, status: 'intent', resources: [...resources] };
   E.S.attempts.push(a);
   for (const r of resources) E.S.locks[r] = a.attempt_id;
   await E.commit();
   let result;
   try {
-    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs) });
+    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(adm?.claim ? { hostClaim: adm.claim } : {}) });
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
     armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
     await E.commit();

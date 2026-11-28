@@ -131,3 +131,14 @@ test('CLI: exactly one JSON line on stdout, usage error exits 2 (real process, n
   const lines = p.stdout.split('\n').filter(Boolean);
   assert.equal(lines.length, 1); assert.equal(JSON.parse(lines[0]).reason, 'usage'); assert.ok(p.stdout.endsWith('\n'));
 });
+test('F11 (behavioural RED on frozen): two concurrent `run --class heavy` at ONE heavy slot start exactly one command', { skip: process.platform === 'win32' ? 'POSIX process groups' : false }, async () => {
+  const dir = tmpStore();
+  const marks = [join(dir, 'a.ran'), join(dir, 'b.ran')];
+  const go1 = mk({ latest: { pressure_level: 2 } }), go2 = mk({ latest: { pressure_level: 2 } });
+  const cmd = (f) => ['--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(f)}, 'x'); setTimeout(() => {}, 1500)`];
+  const [x, y] = await Promise.all([
+    go(['run', '--class', 'heavy', '--op-id', 'suite-a', ...cmd(marks[0])], { dir, snapshot: go1.snapshot, now: go1.now, log: () => {} }),
+    go(['run', '--class', 'heavy', '--op-id', 'suite-b', ...cmd(marks[1])], { dir, snapshot: go2.snapshot, now: go2.now, log: () => {} })]);
+  assert.equal(marks.filter(f => existsSync(f)).length, 1, `exactly one heavy command started (codes ${x.code}, ${y.code})`);
+  assert.deepEqual([x.code, y.code].sort(), [0, 1], 'one ran, one was held');
+});

@@ -18,7 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +55,7 @@ const light = async (dir, opId, resources, extra = {}) => { const { claim } = aw
 test('P2-1 last-slot race: six processes race for the one free heavy slot, exactly one is admitted', { skip: SKIP }, async (t) => {
   const dir = tmp(t), barrier = join(dir, 'go');
   const racers = Array.from({ length: 6 }, (_, i) => claimer(t, dir, { mode: 'race', opId: `race-${i}`, barrier }));
-  await new Promise(r => setTimeout(r, 300)); // let every racer reach the barrier poll (a late racer only makes the race easier)
+  assert.ok(await waitUntil(() => racers.every(r => existsSync(r.out + '.ready'))), 'every racer reached the barrier'); // N6: no sleep
   writeFileSync(barrier, '');
   const results = await Promise.all(racers.map(r => r.result()));
   const admitted = results.filter(r => r.admit);
@@ -218,4 +218,84 @@ test('guard: the store is overridable, and the real ~/.ai-skills-state is never 
   assert.throws(() => storeDir({ NODE_TEST_CONTEXT: 'child' }), { code: 'host_store_default_in_test' });
   assert.equal(storeDir({ HOME: '/home/u' }, { home: '/home/u' }), join('/home/u', '.ai-skills-state', 'host-resources'));
   assert.equal(existsSync(real) ? statSync(real).mtimeMs : null, before, 'the real store is untouched');
+});
+
+// ---- S2 review round 1 repairs (Codex-4, Codex-5, F2, F3, F6, F7) ------------------------------------------------------
+/** A claim bound to a group that is already gone, carrying container labels (its claimer process has exited). */
+async function deadLabelled(t, dir, opId, label = { owner: 'ownr', run: 'run-9' }) {
+  const c = claimer(t, dir, { mode: 'bind-then-exit', opId, containerLabel: label });
+  const r = await c.result(); await c.exited;
+  assert.ok(await waitUntil(() => !groupAlive(r.pgid)));
+  return label;
+}
+
+test('Codex-4 Docker is probed OUTSIDE the claim mutation lock; a record changed meanwhile stays charged', { skip: SKIP }, async (t) => {
+  const dir = tmp(t);
+  await deadLabelled(t, dir, 'db-op');
+  const lockSeen = [];
+  const docker = (cmd, args) => { lockSeen.push(existsSync(join(dir, 'claims.lock'))); return { status: 0, stdout: '', stderr: '' }; };
+  const r = await heavy(dir, 'next', { docker });
+  assert.ok(lockSeen.length > 0, 'Docker was asked');
+  assert.deepEqual([...new Set(lockSeen)], [false], 'never while the store lock is held');
+  assert.equal(r.admit, true, `the probed claim was reclaimed: ${r.reasons}`);
+  assert.deepEqual(claimIds(dir), ['next']);
+});
+
+test('Codex-5 an unbound claim whose live claimer has no recorded start identity is UNKNOWN (charged, Blocked), never live', async (t) => {
+  const dir = tmp(t);
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  writeFileSync(join(dir, 'claims', 'nostart.json'), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: 'nostart', class: 'heavy', weight: 1, resources: [],
+    container_label: null, pgid: null, leader_start: null, claimer: { pid: process.pid, process_start_time: null, host: hostname() }, claimed_at: 'x', bound_at: null }));
+  const r = await heavy(dir, 'h');
+  assert.equal(r.admit, false, 'still charged');
+  assert.deepEqual(r.unknown, ['nostart'], 'an unproven identity is unknown, not live');
+  assert.equal(r.blocked?.raised, true, 'and raises the host-scoped Blocked');
+});
+
+test('F2 a claim reclaimed by another claimer before its owner releases it: the owner still persists the post-admission peak', { skip: SKIP }, async (t) => {
+  const dir = tmp(t);
+  const c = claimer(t, dir, { mode: 'bind-then-exit', opId: 'quick' });
+  const r = await c.result(); await c.exited;
+  assert.ok(await waitUntil(() => !groupAlive(r.pgid)));
+  await light(dir, 'other', [{ resource: join(dir, 'x'), mode: 'W' }]); // its reconcile reclaims `quick`
+  assert.ok(!claimIds(dir).includes('quick'));
+  const { releaseClaim } = await store();
+  const rel = await releaseClaim({ dir, opId: 'quick', peak: { peak_rss_mb: 7 } });
+  assert.equal(rel.reason, 'absent');
+  const rows = readFileSync(join(dir, 'samples.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.ok(rows.some(x => x.kind === 'peak' && x.op_id === 'quick' && x.peak_rss_mb === 7), 'the peak row is not lost');
+});
+
+test('F3 a holder of weight 2 is charged 2 and the next heavy is held_heavy (never invalid_args)', async (t) => {
+  const dir = tmp(t);
+  const { claim } = await store();
+  const h = fakeHost({ pressure: 1 }); // healthy: two heavy slots
+  const big = await claim({ dir, opId: 'big', cls: 'heavy', weight: 2, snapshot: h.snapshot, now: h.now });
+  assert.equal(big.admit, true, `${big.reasons}`);
+  const h2 = fakeHost({ pressure: 1 });
+  const next = await claim({ dir, opId: 'next', cls: 'heavy', snapshot: h2.snapshot, now: h2.now });
+  assert.equal(next.admit, false);
+  assert.ok(next.reasons.includes('held_heavy') && !next.reasons.includes('invalid_args'), `${next.reasons}`);
+});
+
+test('F6 an unreadable holder is charged its resources too: it conflicts with every resource claim', async (t) => {
+  const dir = tmp(t);
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  writeFileSync(join(dir, 'claims', 'garbled.json'), '{ not json');
+  const r = await light(dir, 'npm-ci', [{ resource: join(dir, 'node_modules'), mode: 'W' }]);
+  assert.equal(r.admit, false);
+  assert.ok(r.reasons.includes('held_resource'));
+  assert.deepEqual(r.conflicts, ['garbled']);
+  const bare = await light(dir, 'no-resources', []);
+  assert.equal(bare.admit, true, 'a claim with no resources is not blocked by it');
+});
+
+test('F7 only STOPPED labelled containers remain: the holder is unknown (charged, Blocked), not silently live', { skip: SKIP }, async (t) => {
+  const dir = tmp(t);
+  await deadLabelled(t, dir, 'stopped');
+  const docker = (cmd, args) => ({ status: 0, stdout: args.includes('status=running') ? '' : 'abcdef0123456789\n', stderr: '' });
+  const r = await heavy(dir, 'h', { docker });
+  assert.equal(r.admit, false, 'still charged');
+  assert.deepEqual(r.unknown, ['stopped']);
+  assert.equal(r.blocked?.raised, true);
 });

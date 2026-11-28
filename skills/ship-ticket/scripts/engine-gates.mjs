@@ -21,6 +21,7 @@ import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { checkedIdentity, identityStage } from './engine-identity.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
+import { admitRunner } from './engine-claims.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
@@ -95,7 +96,8 @@ async function redGate(E, input, candidate) {
   if (pin.code) return gateNo(pin.code, [pin.reason]);
   const baseCommit = baseCommit_(E.ctx.repoRoot, E.S);
   const v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
-    specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}) }, runnerDeps(E));
+    specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}) },
+    runnerDeps(E, { kind: 'gate-red', node: node.id, name: runner.name }));
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
   if (v.ok && slot) Object.assign(E.S.gates.red_addendum[slot.key], { command: runner.name, base_commit: baseCommit });
   else if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit }); delete E.S.gates.red_invalid?.[node.id]; }
@@ -137,6 +139,7 @@ export async function refreshRed(E, transient) {
     const v = c.candidate_id ? await redGate(E, { node: d, command: inv.command, specs: inv.evidence.specs }, c.candidate_id)
       : gateNo('candidate_unavailable', [c.reason]);
     const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red')?.attempt_id ?? null;
+    if (v.code === 'host_held') continue; // S2: a held re-run is pending (waiting diagnostic); it does not spend the one re-run
     note(E.S, 'RED_RERUN', { node: d, attempt_id, ok: v.ok, code: v.code });
     const rerun = { attempt_id, ok: v.ok, code: v.code, reasons: v.reasons ?? [] };
     if (v.ok) transient.push(judgment('red_invalidated', d, `${invalidCause(d, inv)}; the engine re-ran RED (attempt ${attempt_id}): `
@@ -256,6 +259,8 @@ async function runProof(E) {
   const run = runnerDeps(E).spawnRunner;
   const commands = [], runs = [];
   for (const [name, c] of Object.entries(E.S.config.testCommands ?? {})) {
+    const adm = await admitRunner(E, { kind: 'proof', node: name, name }); // S2: a held proof is pending; nothing is recorded
+    if (adm?.held) return { refusal: gateNo('host_held', [adm.reason], { waiting: true }) };
     const a = { attempt_id: 'att-' + randomUUID(), kind: 'proof', node: name, status: 'intent', started_at: new Date().toISOString() }; // started_at: telemetry only (eval proof wall)
     E.S.attempts.push(a);
     await E.commit();
@@ -263,7 +268,7 @@ async function runProof(E) {
     const args = c.evidence ? (c.args ?? []).filter(x => x !== '{files}').map(x => x.replace('{report}', REPORT_FD)) : c.args ?? [];
     let result;
     try {
-      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(c.evidence ? { report: true } : {}) });
+      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(c.evidence ? { report: true } : {}), ...(adm?.claim ? { hostClaim: adm.claim } : {}) });
       Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
       armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
       await E.commit();
@@ -522,12 +527,14 @@ export async function testKindsStatus(E) {
 async function runEvidence(E, M, d, point) {
   const S = E.S, T = S.test_kinds, repo = E.ctx.repoRoot;
   if (S.attempts.some(a => LIVE.includes(a.status))) return gateNo('evidence_unquiet', ['another attempt is live: the evidence run waits until nothing runs beside it']);
+  const adm = await admitRunner(E, { kind: 'evidence', node: T.entry, name: T.entry }); // S2: a held evidence run is pending
+  if (adm?.held) return gateNo('host_held', [adm.reason], { waiting: true });
   const a = { attempt_id: 'att-' + randomUUID(), kind: 'evidence', node: T.entry, status: 'intent', started_at: new Date().toISOString() };
   S.attempts.push(a);
   await E.commit();
   let result, typed = null;
   try {
-    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: d.command, timeoutMs: clampTimeout(S.config.timeoutMs), report: true });
+    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: d.command, timeoutMs: clampTimeout(S.config.timeoutMs), report: true, ...(adm?.claim ? { hostClaim: adm.claim } : {}) });
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
     armAttempt(S, a, clampTimeout(S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
     await E.commit();

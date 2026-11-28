@@ -127,6 +127,11 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   defaulted to 0). This form is an ADVISORY check and takes no claim. It prints ONE JSON line
   `{admit, reason, reasons, class, occupancy, unknown, claimed, signals}`
   and exits 0 admit, 1 hold, 2 usage error, unsupported platform or an internal failure (`reason:"error"`).
+  Non-macOS prints `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
+  manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
+  parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
+  reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most
+  once every 5 minutes or ask the owner. An unsafe hold means a hold for memory pressure level 4, swap growth, high load, provider errors or an unusable snapshot; pressure level 2 alone is never a hold.
 - `scripts/host-admit.mjs run --class heavy|light --op-id <id> [--resource <path|name>:R|W]... [--container-owner <o> --container-run <r>] -- <command> [args...]`
   is the claiming form. It claims before the command starts (a hold exits 1 and starts nothing) and runs
   the command through the launcher in its own process group. The claim is bound to that group's pgid and
@@ -137,31 +142,35 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   (override: env `AI_SKILLS_HOST_RESOURCES_DIR`, an absolute path; the default is refused under the test
   runner). It holds one record per operation: `op_id, class, weight, resources [{resource, mode R|W}],
   container_label, pgid, leader_start, claimer {pid, process_start_time, start_identity, host}`. It also holds `samples.jsonl` (every
-  admission decision with its host samples, every reclaim, every post-admission peak) and `blocked.json`.
-  - Sampling happens outside the store's short lock. The claims are re-read, decided and written under it.
+  admission decision with its host samples, every reclaim, every post-admission peak; append-only, not rotated) and `blocked.json`.
+  - Sampling and Docker probes happen outside the store's short lock. The claims are re-read, decided and written under
+    it; a Docker verdict applies only to the exact record version it was taken on, and any other record stays charged.
   - The sum of the weights stays at or below the heavy slots `admitHost` grants. A heavy claim weighs 1
     or more; a light claim weighs 0, so light work never waits for capacity.
   - A `W` claim excludes every `R` or `W` claim on the same canonical resource: the realpath of a path, so
-    two spellings of one installation are one resource.
-  - A claim is reclaimed only on proof. Either it was never bound and its claimer is dead (nothing ran),
-    or its group is proven gone and, for a labelled claim, no labelled container remains. It is never
-    reclaimed by age.
-  - Any other holder is unknown. It stays charged and raises one host-scoped Blocked (`blocked.json`,
-    `host_claim_unknown`), which is cleared with its cause.
-  - Trust is same-user: the records are not authenticated.
+    two spellings of one installation are one resource. The match is exact (no hierarchy: `/x` does not exclude
+    `/x/node_modules`). An unreadable record conflicts with every resource claim.
+  - A claim is reclaimed only on proof. Either it was never bound and its claimer is proven dead or a different
+    process (nothing ran), or its group is proven gone and, for a labelled claim, no labelled container remains. It is
+    never reclaimed by age.
+  - Any other holder is unknown: a malformed record, a foreign host, a live claimer or leader whose start identity is
+    unrecorded or unreadable, a dead leader with members left, only stopped labelled containers, or a Docker failure. It
+    stays charged and raises one host-scoped Blocked (`blocked.json`, `host_claim_unknown`), cleared with its cause.
+  - Trust is same-user: the records are not authenticated. The host is `os.hostname()`, as for the engine lock: a
+    hostname change makes every existing claim `foreign_host` (unknown, charged) until removed by hand.
   - An engine DAG opts in with `config.hostClaims: { version: 1, widthReason? }`. Each node then declares
-    `hostClass` (heavy or light: a per-operation class, never ticket-wide) and optional `hostResources`.
-    `config.width` must be explicit, and width 1 needs `widthReason`.
-  - The engine claims before it spawns a heavy node (a lone first node too), binds the claim before the
-    release byte and releases it after the attempt settles. A hold leaves the node pending with a
-    transient `host_held` (plus `host_blocked` while a holder is unknown); it is never a persistent
-    judgment.
-  - RED, proof, unit-check and evidence runners do not take claims yet. Non-macOS prints
-  `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
-  manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
-  parallelism or wait, then ask again; never terminate running work. Anti-loop rule: re-sample only while the set of hold
-  reasons changes; after 2 identical unsafe holds in a row stop, report `host_hold_stable`, and either re-check at most
-  once every 5 minutes or ask the owner. An unsafe hold means a hold for memory pressure level 4, swap growth, high load, provider errors or an unusable snapshot; pressure level 2 alone is never a hold.
+    `hostClass` (heavy or light: a per-operation class, never ticket-wide) and optional `hostResources` and
+    `hostContainerLabel` (`{ owner, run }`, the docker-lifecycle labels of the containers the operation starts).
+    A `testCommands` entry may declare the same three fields for its runner; a runner is heavy by default.
+    `config.width` must be an integer 1..32, and width 1 needs `widthReason`.
+  - The engine claims before it spawns any heavy operation (a lone first node too) and every operation with shared
+    resources: workers, repairs, and its RED, proof, unit-check and evidence runners. It binds the claim before the
+    release byte and releases it after the group is gone (and, for a labelled claim, no labelled container remains).
+  - A hold is a WAITING diagnostic (`status.waiting`: `host_held` with its reasons), never a judgment and never failed
+    evidence: the node or runner stays pending, `drive` ends `waiting`, and a held gate returns `host_held` with
+    `judgment_point: false` and records no evidence. The one escalation is `host_blocked` (an unknown holder), a
+    transient judgment. Host sampling is macOS only: on another POSIX host a heavy operation of a hostClaims run stays
+    held (`snapshot_unavailable`); on Windows every claim holds (POSIX process groups, known limit D4).
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers

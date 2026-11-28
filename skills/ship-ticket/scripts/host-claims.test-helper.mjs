@@ -44,6 +44,7 @@ async function main() {
   const req = { dir: o.dir, opId: o.opId, cls: o.cls ?? 'heavy', resources: o.resources ?? [], containerLabel: o.containerLabel,
     snapshot: host.snapshot, now: host.now };
   if (o.mode === 'race') {
+    put(o.out + '.ready', ''); // N6: the parent waits for every racer's ready file instead of sleeping
     while (!existsSync(o.barrier)) await sleep(5);
     const r = await claim(req);
     put(o.out, JSON.stringify(r));

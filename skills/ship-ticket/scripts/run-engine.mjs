@@ -44,6 +44,7 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
+import { claimsOn, waitingOf } from './engine-claims.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
@@ -297,6 +298,7 @@ function view(E, transient = []) {
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
       ...(budget.phase_unknown.records ? { phase_unknown: budget.phase_unknown } : {}) },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
+    ...(claimsOn(S) ? { waiting: waitingOf(E) } : {}), // S2 (Codex-3): capacity holds are waiting diagnostics, never judgments
     telemetry_degraded: structuredClone(S.telemetry_degraded),
     ...(units ? { units: withReviews(S, unitProjection(S, E.ctx.repoRoot, cache), units), unit_ceiling: ceiling(S) } : {}),
     ...(unitReviewOn(S) ? { unit_reviews_pending: pendingReviews(S, units) } : {}),
@@ -593,6 +595,8 @@ export async function drive(ctx) {
         for (const j of drift(E, { mutate: false })) transient.push(j);
       }
     }
+    // S2: the one host-scoped escalation (an unknown claim holder) is a judgment; a plain capacity hold is `waiting` only.
+    if (E.hostBlocked) transient.push(judgment('host_blocked', null, `unknown host claim holder(s) ${E.hostBlocked.op_ids.join(', ')} stay charged; resolve them (prove the group gone or remove the record); light work continues`));
     await E.commit();
     const out = view(E, transient);
     const finished = Object.values(S.nodes).every(n => ['done', 'cancelled'].includes(n.state))

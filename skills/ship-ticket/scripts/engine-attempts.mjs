@@ -19,7 +19,8 @@ import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeou
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
 import { baseCandidate, baseCommit } from './engine-base-read.mjs';
-import { claim as hostClaim, bindClaim, releaseClaim, storeDir, peakSampler } from './host-claims.mjs';
+import { bindClaim, peakSampler } from './host-claims.mjs';
+import { claimsOn, takeClaim, releaseHostClaim, releaseSettledClaims } from './engine-claims.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -291,7 +292,7 @@ export async function reconcile(E, wait) {
     if (!(runner ? ['intent', 'running', 'unknown'] : UNSETTLED).includes(a.status)) continue;
     if ((runner ? await settleRunner(E, a) : await settle(E, a, { wait })) === 'live') live = true;
   }
-  await releaseSettledClaims(E);
+  if (claimsOn(E.S)) await releaseSettledClaims(E, LIVE);
   return live;
 }
 
@@ -312,14 +313,17 @@ async function runAttempt(E, job) {
       promptFile: job.promptFile, permissionMode: cfg.permissionMode, modelMap: cfg.modelMap, risk: job.risk ?? item.risk ?? [],
       complexity: job.complexity ?? item.complexity ?? 'medium', modelTier: item.modelTier, reviewExecution: job.reviewExecution, role: item.role });
   } catch (e) { item.state = 'failed'; item.reason = 'dispatch refused: ' + e.message; await releaseHostClaim(E, null, job.hostClaim); await E.commit(); return false; }
-  const env = childEnv(cfg.provider, plan.billing, ctx.env ?? process.env);
-  const spec = spawnSpec(plan.executable, plan.args, platform, env);
-  mkdirSync(P.attempts, { recursive: true });
-  const id = 'att-' + randomUUID();
-  const pre = io.snapshot(ctx.repoRoot);
-  const planBefore = io.readIfExists(P.plan);
-  const planBeforeFile = join(P.attempts, id + '.plan-before');
-  if (planBefore !== null) writeFileSync(planBeforeFile, planBefore, { mode: 0o600 });
+  let env, spec, id, pre, planBefore, planBeforeFile;
+  try {
+    env = childEnv(cfg.provider, plan.billing, ctx.env ?? process.env);
+    spec = spawnSpec(plan.executable, plan.args, platform, env);
+    mkdirSync(P.attempts, { recursive: true });
+    id = 'att-' + randomUUID();
+    pre = io.snapshot(ctx.repoRoot);
+    planBefore = io.readIfExists(P.plan);
+    planBeforeFile = join(P.attempts, id + '.plan-before');
+    if (planBefore !== null) writeFileSync(planBeforeFile, planBefore, { mode: 0o600 });
+  } catch (e) { await releaseHostClaim(E, null, job.hostClaim); throw e; } // S2 F8: a claim never leaks before the attempt exists
   const a = { attempt_id: id, kind: job.kind, node: item.id, phase: job.phase, provider: cfg.provider, model: plan.model, role: plan.role,
     status: 'intent', resources: [...(job.resources ?? [])], pre_snapshot: pre, pre_snapshot_digest: io.sha(JSON.stringify(pre)),
     plan_before_file: planBefore === null ? null : planBeforeFile, allowed: job.allowed, excluded: [...job.othersOwned],
@@ -376,60 +380,6 @@ async function runAttempt(E, job) {
   }
 }
 
-// ---- S2 (P2) host claims ------------------------------------------------------------------------
-
-/**
- * Take the host claim of `item` BEFORE its spawn (config.hostClaims runs only): null when none is needed (a light
- * operation with no shared resource), the claim { dir, op_id } when admitted, false when held (the item stays pending;
- * a transient host_held, plus one host_blocked while an unknown holder exists; never a persistent judgment, so
- * other work keeps dispatching).
- */
-async function takeClaim(E, item, transient, { cls, resources }) {
-  const { S, ctx } = E;
-  if (!S.config.hostClaims || (cls !== 'heavy' && !resources.length)) return null;
-  if ((ctx.platform ?? process.platform) === 'win32') {
-    transientOnce(transient, 'host_held', item.id, 'host claims need POSIX process groups (Windows: unsupported, known limit D4)');
-    return false;
-  }
-  const hc = ctx.hostClaims ?? {};
-  const dir = hc.dir ?? storeDir(ctx.env ?? process.env);
-  const safe = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_');
-  const opId = `${safe(S.ticket)}.${safe(S.run_id)}.${safe(item.id)}.${randomUUID().slice(0, 8)}`;
-  const r = await hostClaim({ dir, opId, cls, resources, cwd: ctx.repoRoot,
-    ...(hc.snapshot ? { snapshot: hc.snapshot } : {}), ...(hc.now ? { now: hc.now } : {}), ...(hc.docker ? { docker: hc.docker } : {}) });
-  if (r.admit) return { dir, op_id: opId };
-  E.hostHeld ??= new Set();
-  if (!E.hostHeld.has(item.id)) { E.hostHeld.add(item.id); note(S, 'HOST_HELD', { node: item.id, op_id: opId, reasons: r.reasons }); }
-  transientOnce(transient, 'host_held', item.id, `host admission held (${r.reasons.join(', ')}); it stays queued until capacity returns`);
-  if (r.blocked) transientOnce(transient, 'host_blocked', null, `unknown host claim holder(s) ${r.blocked.op_ids.join(', ')} stay charged; light work continues`);
-  return false;
-}
-
-/** Release a claim once its attempt is over; the store refuses while the group lives (it then stays charged). */
-async function releaseHostClaim(E, a, c, peak = null) {
-  if (!c) return;
-  const env = a?.envelope ?? null;
-  const r = await releaseClaim({ dir: c.dir, opId: c.op_id, peak: { ...(peak ?? {}), ...(env ? { peak_rss_mb: env.peak_rss_mb, peak_cpu_pct: env.peak_cpu_pct, resource_samples: env.resource_samples } : {}) },
-    ...(E.ctx.hostClaims?.docker ? { docker: E.ctx.hostClaims.docker } : {}) });
-  if (a?.host_claim) { a.host_claim.released = r.released; a.host_claim.release_reason = r.reason; }
-  if (!r.released && r.reason !== 'absent') note(E.S, 'HOST_CLAIM_KEPT', { node: a?.node ?? null, op_id: c.op_id, reason: r.reason });
-}
-
-/** S2: release the claims of attempts an earlier engine left settled but unreleased (crash recovery; the store decides). */
-async function releaseSettledClaims(E) {
-  for (const a of E.S.attempts) if (a.host_claim && a.host_claim.released === false && !LIVE.includes(a.status)) await releaseHostClaim(E, a, a.host_claim);
-}
-
-/** The launcher itself failed to start (no pid recorded, nothing ran): retired, retried once, then failed. */
-async function settleSpawnFailure(E, a, item) {
-  if (!(await retire(E.S, a, E.alive, 'spawn_failed', { owned: true }))) { unquiet(E.S, a, item); await E.commit(); return; }
-  if ((item.retries ?? 0) < MAX_RETRIES) {
-    item.retries = (item.retries ?? 0) + 1; item.state = 'pending';
-    note(E.S, 'INFRA_RETRY', { node: a.node, attempt_id: a.attempt_id, cause: 'launcher_spawn_failed' });
-  } else { item.state = 'failed'; item.reason = 'launcher spawn failed'; }
-  await E.commit();
-}
-
 /** Whether `n` may start beside the running nodes: durable locks, scheduler conflicts/width/memory, then live admission. */
 function fits(E, n, running) {
   if (n.resources.some(r => E.S.locks[r] !== undefined)) return false;
@@ -469,9 +419,10 @@ export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
         for (const n of ready) {
           if (!budgetOk(E, transient, n.phase)) { stop = true; break; }
           if (!fits(E, n, running.keys())) continue;
-          const claimed = await takeClaim(E, n, transient, { cls: n.hostClass, resources: n.hostResources ?? [] });
+          // S2: only with config.hostClaims (F4: a legacy dispatch has no added await and no added break).
+          const claimed = claimsOn(S) ? await takeClaim(E, n.id, { cls: n.hostClass, resources: n.hostResources ?? [], containerLabel: n.hostContainerLabel ?? null }) : null;
           if (claimed === false) continue;
-          if (failure || S.judgments.length) { await releaseHostClaim(E, null, claimed); break; } // changed while sampling
+          if (claimed && (failure || S.judgments.length)) { await releaseHostClaim(E, null, claimed); break; } // changed while sampling
           running.set(n.id, runAttempt(E, { kind: 'node', item: n, phase: n.phase, writes: n.writes, othersOwned: n.othersOwned,
             allowed: n.writes, promptFile: n.promptFile, resources: n.resources, hostClaim: claimed })
             .catch(e => { failure ??= e; }).finally(() => running.delete(n.id)));
@@ -547,9 +498,15 @@ export async function runRepairs(E, transient) {
     const affected = Object.values(S.nodes).filter(n => n.writes.some(w => r.writes.some(p => overlap(w, p))));
     const risk = [...new Set(affected.flatMap(n => n.risk ?? []))].sort();
     const complexity = affected.some(n => n.complexity === 'high') ? 'high' : undefined;
-    // S2: a repair is classed like the nodes it repairs (heavy if any is) and claims their shared host resources.
-    const claimed = await takeClaim(E, r, transient, { cls: affected.some(n => n.hostClass === 'heavy') ? 'heavy' : 'light', resources: affected.flatMap(n => n.hostResources ?? []) });
-    if (claimed === false) continue;
+    // S2: a repair is classed like the nodes it repairs (heavy if any is), claims their shared host resources and carries
+    // their container labels (Codex-1; one claim carries one label pair, so differing labels hold the repair: fail closed).
+    let claimed = null;
+    if (claimsOn(S)) {
+      const labels = [...new Map(affected.filter(n => n.hostContainerLabel).map(n => [JSON.stringify(n.hostContainerLabel), n.hostContainerLabel])).values()];
+      if (labels.length > 1) { (E.hostWaiting ??= new Map()).set(r.id, { code: 'host_held', node: r.id, reasons: ['container_labels_differ'], reason: 'the repaired nodes carry different container labels; one claim carries one label pair' }); continue; }
+      claimed = await takeClaim(E, r.id, { cls: affected.some(n => n.hostClass === 'heavy') ? 'heavy' : 'light', resources: affected.flatMap(n => n.hostResources ?? []), containerLabel: labels[0] ?? null });
+      if (claimed === false) continue;
+    }
     await runAttempt(E, { kind: 'repair', item: r, phase: auth.phase, writes: r.writes, othersOwned: [], allowed: auth.allowed,
       promptFile: r.promptFile, reviewExecution: r.review_execution, onLaunch, risk, complexity, hostClaim: claimed });
   }

@@ -71,7 +71,7 @@ export async function run(argv, deps = {}) {
   for (let round = 1; round <= 2; round++) {
     const snap = await sample({ platform });
     held = inspectClaims(dir);
-    const running = { total: held.live.length + held.unknown.length, heavy: cls === 'HEAVY' ? held.occupancy : 0 };
+    const running = { total: Math.max(held.live.length + held.unknown.length, held.occupancy), heavy: cls === 'HEAVY' ? held.occupancy : 0 }; // F3
     r = admitHost(snap, cls, running, history);
     history = r.history;
     if (r.admit || r.reasons.some(x => x !== 'held_hysteresis' && x !== 'held_heavy')) break;

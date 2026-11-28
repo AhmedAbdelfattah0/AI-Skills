@@ -27,8 +27,9 @@
  *   - A holder is reclaimed only on PROOF: never bound and its claimer proven dead (the launcher exits 125 without the
  *     byte, so nothing ran), or its group proven gone (engine-quiesce.mjs groupIdentity) AND, for a labelled claim, Docker
  *     reporting no container with its exact labels. The container check comes BEFORE the removal. Never by age.
- *   - Anything else that is not proven live (malformed record, foreign host, live group with an unrecorded or different
- *     leader start, a dead leader with members left, a Docker failure) is UNKNOWN: it stays charged (weight 1 when the
+ *   - Anything else that is not proven live (malformed record, foreign host, a live claimer or leader whose start
+ *     identity is unrecorded or unreadable, a dead leader with members left, only stopped labelled containers, a Docker
+ *     failure) is UNKNOWN; Docker is probed OUTSIDE the lock and the verdict applies only to the record version probed: it stays charged (weight 1 when the
  *     record is unreadable) and raises one host-scoped Blocked.
  */
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync } from 'node:fs';
@@ -36,9 +37,10 @@ import { homedir, hostname, loadavg as osLoadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { acquireLock, writeStateAtomic } from './lib/durable-io.mjs';
-import { groupIdentity, processInfo, startRecord, recordDiffers } from './engine-quiesce.mjs';
+import { groupIdentity, processInfo, startRecord, recordDiffers, sameStart } from './engine-quiesce.mjs';
 import { admitHost, hostSnapshot, HOST_POLICY } from './harness.mjs';
-import { ownedContainers } from './docker-lifecycle.mjs';
+import { ownedContainers, reusableContainers } from './docker-lifecycle.mjs';
+import { createHash } from 'node:crypto';
 
 export const STORE_ENV = 'AI_SKILLS_HOST_RESOURCES_DIR';
 export const CLAIM_SCHEMA = 'ship-ticket-host-claim-v1';
@@ -103,35 +105,61 @@ export function listClaims(dir) {
   try { names = readdirSync(paths(dir).claims); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
   return names.filter(n => n.endsWith('.json')).sort().map(n => {
     const id = n.slice(0, -5);
-    let c = null;
-    try { c = JSON.parse(readFileSync(join(paths(dir).claims, n), 'utf8')); } catch { /* unreadable: unknown */ }
-    return { id, claim: validClaim(c, id) ? c : null };
+    let c = null, raw = null;
+    try { raw = readFileSync(join(paths(dir).claims, n), 'utf8'); c = JSON.parse(raw); } catch { /* unreadable: unknown */ }
+    return { id, claim: validClaim(c, id) ? c : null, version: raw === null ? null : createHash('sha256').update(raw).digest('hex') };
   });
 }
 
+/** Whether probe `now` POSITIVELY names the process of record `rec` (S1 identity: start_identity, else either pre-S1 form). */
+const recordMatches = (now, rec) => (rec?.start_identity != null && now?.startTime != null ? now.startTime === rec.start_identity : sameStart(now, rec?.process_start_time ?? null));
+
 /**
- * The holder state of one claim: { state: 'live'|'unknown'|'reclaimable', why }. Only proof makes a claim reclaimable;
- * Docker is asked (exact labels) only once the group is proven gone, and a Docker failure proves nothing.
+ * The Docker verdict of a labelled claim whose group is gone: 'gone' (no container with its exact labels), 'running', or
+ * 'stopped' (only exited containers remain), or 'failed'. It is taken OUTSIDE the claim lock (Codex-4).
  */
-export function holderState(c, deps = {}) {
-  const { info = processInfo, isAlive = groupAlive, docker = spawnSync, host = hostname() } = deps;
+export function dockerVerdict(label, docker = spawnSync) {
+  try {
+    if (!ownedContainers(label.owner, label.run, docker).length) return 'gone';
+    return reusableContainers(label.owner, label.run, docker).length ? 'running' : 'stopped';
+  } catch { return 'failed'; }
+}
+const DOCKER_STATE = { gone: { state: 'reclaimable', why: 'group_and_containers_gone' }, running: { state: 'live', why: 'container_alive' },
+  stopped: { state: 'unknown', why: 'container_stopped' }, failed: { state: 'unknown', why: 'docker_failed' } };
+
+/**
+ * The holder state of one claim: { state: 'live'|'unknown'|'reclaimable', why, needsDocker? }. Only proof makes a claim
+ * reclaimable. Live needs a POSITIVE identity match (Codex-5): a live claimer or leader whose start identity is unrecorded
+ * or unreadable is unknown (charged, Blocked); a proven different start or a dead process is reclaimable. Docker is asked
+ * (exact labels) only once the group is proven gone: `docker` is the verdict taken outside the lock (dockerVerdict), or
+ * absent, then the claim is `needsDocker` (still charged as unknown until probed). A failure or stopped containers prove nothing.
+ */
+export function holderState(c, deps = {}, docker) {
+  const { info = processInfo, isAlive = groupAlive, host = hostname() } = deps;
   if (!c) return { state: 'unknown', why: 'malformed' };
   if (c.claimer.host !== host) return { state: 'unknown', why: 'foreign_host' };
   if (c.pgid === null) {
     const o = info(c.claimer.pid) ?? { alive: false, startTime: null };
-    // S1's lock/marker identity rule (engine-quiesce.mjs recordDiffers): only a PROVEN different start time is a reused pid.
-    const reused = o.alive && recordDiffers(o, c.claimer);
-    return o.alive && !reused ? { state: 'live', why: 'claimer_alive' } : { state: 'reclaimable', why: 'claimer_dead_never_bound' };
+    if (!o.alive || recordDiffers(o, c.claimer)) return { state: 'reclaimable', why: 'claimer_dead_never_bound' };
+    return recordMatches(o, c.claimer) ? { state: 'live', why: 'claimer_alive' } : { state: 'unknown', why: 'claimer_identity_unknown' };
   }
   const id = groupIdentity({ pgid: c.pgid, leader_start: c.leader_start }, isAlive, info);
   if (id === 'verified') return { state: 'live', why: 'group_alive' };
   if (id === 'unknown') return { state: 'unknown', why: 'group_unknown' };
   if (!c.container_label) return { state: 'reclaimable', why: 'group_gone' };
-  try {
-    return ownedContainers(c.container_label.owner, c.container_label.run, docker).length
-      ? { state: 'live', why: 'container_alive' } : { state: 'reclaimable', why: 'group_and_containers_gone' };
-  } catch { return { state: 'unknown', why: 'docker_failed' }; }
+  return docker ? DOCKER_STATE[docker] : { state: 'unknown', why: 'docker_unprobed', needsDocker: true };
 }
+
+/** Outside the lock: the Docker verdict of every labelled claim whose group is gone, keyed by op_id and record version. */
+function probeOutside(dir, deps) {
+  const out = new Map();
+  for (const { id, claim: c, version } of listClaims(dir)) {
+    if (holderState(c, deps).needsDocker) out.set(id, { version, verdict: dockerVerdict(c.container_label, deps.docker ?? spawnSync) });
+  }
+  return out;
+}
+/** A probe applies only to the exact record version it was taken on; anything else stays charged (unprobed). */
+const probed = (probes, id, version) => (probes.get(id)?.version === version ? probes.get(id).verdict : undefined);
 
 function appendRow(dir, row) {
   const fd = openSync(paths(dir).samples, 'a', 0o600);
@@ -139,10 +167,10 @@ function appendRow(dir, row) {
 }
 
 /** Under the lock: reclaim proven-free claims, classify the rest, keep the one host-scoped Blocked in step with the unknown set. */
-async function reconcileLocked(dir, deps) {
+async function reconcileLocked(dir, deps, probes = new Map()) {
   const live = [], unknown = [], reclaimed = [];
-  for (const { id, claim: c } of listClaims(dir)) {
-    const h = holderState(c, deps);
+  for (const { id, claim: c, version } of listClaims(dir)) {
+    const h = holderState(c, deps, probed(probes, id, version));
     if (h.state === 'reclaimable') {
       try { unlinkSync(claimFile(dir, id)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
       appendRow(dir, { kind: 'reclaimed', op_id: id, at: new Date().toISOString(), why: h.why });
@@ -208,17 +236,19 @@ export async function claim({ dir, opId, cls, weight, resources = [], containerL
       if (r.admit || r.reasons.some(x => x !== 'held_hysteresis' && x !== 'held_heavy')) break;
     }
   }
+  const probes = probeOutside(dir, deps);
   return locked(dir, deps, async () => {
-    const rec = await reconcileLocked(dir, deps);
+    const rec = await reconcileLocked(dir, deps, probes);
     const holders = [...rec.live, ...rec.unknown];
     const reasons = [];
     if (holders.some(h => h.id === opId)) reasons.push('claim_exists');
-    const conflicts = holders.filter(h => h.claim && h.claim.resources.some(x => mine.some(m => m.resource === x.resource && (m.mode === 'W' || x.mode === 'W')))).map(h => h.id);
+    // F6: an unreadable holder is charged its (unknown) resources too: it conflicts with every resource claim.
+    const conflicts = holders.filter(h => (h.claim ? h.claim.resources.some(x => mine.some(m => m.resource === x.resource && (m.mode === 'W' || x.mode === 'W'))) : mine.length > 0)).map(h => h.id);
     if (conflicts.length) reasons.push('held_resource');
     const occupancy = holders.reduce((t, h) => t + (h.claim ? h.claim.weight : 1), 0);
     let v = null;
     if (w > 0) {
-      v = admitHost(snap, 'HEAVY', { total: holders.length, heavy: occupancy }, before);
+      v = admitHost(snap, 'HEAVY', { total: Math.max(holders.length, occupancy), heavy: occupancy }, before); // F3: total >= heavy for weights > 1
       for (const x of v.reasons) if (!reasons.includes(x)) reasons.push(x);
       const age = now() - snap?.now_ms;
       if (!(Number.isFinite(age) && age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms) && !reasons.includes('held_resample')) reasons.push('held_resample');
@@ -258,17 +288,22 @@ export async function bindClaim({ dir, opId, pgid, leaderStart = null, ...deps }
  * or, never bound, by its own claimer. Persists the post-admission peak row. Returns { released, reason }.
  */
 export async function releaseClaim({ dir, opId, peak = {}, loadavg = osLoadavg, ...deps }) {
+  const probes = probeOutside(dir, deps);
   return locked(dir, deps, async () => {
     const found = listClaims(dir).find(x => x.id === opId);
-    if (!found) return { released: false, reason: 'absent' };
+    const peakRow = (c, extra = {}) => {
+      const [l1, l5, l15] = loadavg();
+      appendRow(dir, { kind: 'peak', op_id: opId, at: new Date().toISOString(), class: c?.class ?? null, weight: c?.weight ?? null,
+        host_load1_at_release: l1, host_load5_at_release: l5, host_load15_at_release: l15, ...peakFields(peak), ...extra });
+    };
+    // F2: another claimer already reclaimed it (its group was proven gone): the owner's peak is still persisted.
+    if (!found) { peakRow(null, { reclaimed_before_release: true }); return { released: false, reason: 'absent' }; }
     const c = found.claim;
     const own = c && c.pgid === null && c.claimer.pid === process.pid && c.claimer.host === (deps.host ?? hostname());
-    const h = own ? { state: 'reclaimable', why: 'never_bound' } : holderState(c, deps);
+    const h = own ? { state: 'reclaimable', why: 'never_bound' } : holderState(c, deps, probed(probes, opId, found.version));
     if (h.state !== 'reclaimable') return { released: false, reason: h.why };
     unlinkSync(claimFile(dir, opId));
-    const [l1, l5, l15] = loadavg();
-    appendRow(dir, { kind: 'peak', op_id: opId, at: new Date().toISOString(), class: c?.class ?? null, weight: c?.weight ?? null,
-      host_load1_at_release: l1, host_load5_at_release: l5, host_load15_at_release: l15, ...peakFields(peak) });
+    peakRow(c);
     return { released: true, reason: h.why };
   });
 }
@@ -280,7 +315,8 @@ const peakFields = (p) => Object.fromEntries(PEAK_KEYS.map(k => [k, isObj(p) && 
 export function inspectClaims(dir, deps = {}) {
   const live = [], unknown = [];
   for (const { id, claim: c } of listClaims(dir)) {
-    const h = holderState(c, deps);
+    let h = holderState(c, deps);
+    if (h.needsDocker) h = DOCKER_STATE[dockerVerdict(c.container_label, deps.docker ?? spawnSync)]; // read-only, no lock held
     if (h.state !== 'reclaimable') (h.state === 'live' ? live : unknown).push({ id, weight: c ? c.weight : 1, why: h.why });
   }
   return { live, unknown, occupancy: [...live, ...unknown].reduce((t, x) => t + x.weight, 0), blocked: existsSync(paths(dir).blocked) };
