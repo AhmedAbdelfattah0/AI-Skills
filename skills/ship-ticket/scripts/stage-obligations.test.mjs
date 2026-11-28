@@ -24,7 +24,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as SP from './security-plan.mjs';
@@ -348,7 +349,7 @@ test('[P6-N7a] 124: `this.api.get(` in a client/test file is dismissible with an
   for (const format of [2, 3]) {
     for (const path of [CLIENT, 'apps/admin/src/app/features/settings/settings-api.service.spec.ts']) {
       const files = [{ path, added: ['import { inject } from "@angular/core";', CLIENT_LINE, "    expect(this.api.get).toHaveBeenCalled();",
-        "    this.api.get(`/settings/${id}`, { params: { a: '1, 2' } }).subscribe((r) => done(r));"] }];
+        "    this.api.get(`/settings/${id}`, { params: { a: '1, 2' } });"] }];
       const id = `new-route@${path}`;
       const first = rea(files, { format });
       assert.equal(first.ok, false);
@@ -362,6 +363,74 @@ test('[P6-N7a] 124: `this.api.get(` in a client/test file is dismissible with an
       assert.deepEqual(done.dispositions_used.map((d) => [d.signal_id, d.reviewer]), [[id, 'codex:independent']]);
       // the signal is still reported (detection not weakened), only closed
       assert.ok(done.signals.some((s) => s.id === id));
+    }
+  }
+});
+
+// R2 (RCA-S4-ROUND2 step 1): the classifier is an ALLOW-list. Every probe line of both round-2 reviewers, verbatim
+// (scratchpad probe.mjs / probe3.mjs / probe4.mjs), plus chained calls, decorators and plain-name first arguments.
+const R2_ADMISSIBLE = [
+  "const r = x.api.get(`/u/${id}`)",
+  "this.api.get('/users')",
+  "this.api.get('/users', { params: { a: 1 } })",
+  "x.api.get('/u', { a: 1 } )",
+  "x.api.get('/u', {'a': '1', b: {c: true}})",
+  "return this.api.post(`/s/${id}`, { a: 1, b: 'x' });",
+  "await this.api.delete('/s');",
+];
+const R2_INADMISSIBLE = [
+  "@deps.api.post('/users', status_code=201)",
+  "@routers.api.get(\"/users\")",
+  "ctx.api.get('/users').get(c => c.json(users))",
+  "ctx.api.get('/users').post(createUser)",
+  "srv.api.get(listUsers)",
+  "x.api.get('/u') # app.get(h)",
+  "x.api.get('/u')\t.use(h)",
+  "x.api.get('/u', **{})",
+  "x.api.get('/u', handler=h)",
+  "x.api.get('/u', { a: 1 }) /",
+  "x.api.get('/u', { a: 1 }) // app.get('/x', h)",
+  "x.api.get('/u', { a: 1 }) ? 1 : 2",
+  "x.api.get('/u', { a: 1 }).then(r => r.json())",
+  "x.api.get('/u', { a: 1 }, h)",
+  "x.api.get('/u', { a: 1 },)",
+  "x.api.get('/u', { a: 1 }['x'])",
+  "x.api.get('/u', { a: `${h}` })",
+  "x.api.get('/u', { handler: h }.handler)",
+  "x.api.get('/u', { onSuccess: h })",
+  "x.api.get('/u', {a: 1}) + app2(h)",
+  "x.api.get('/u', {a:1} /* c */)",
+  "x.api.get('/u', {a:1}); x.handlers.push(h)",
+  "x.api.get('/u',\"a\")",
+  "x.api.get(['/a','/b'])",
+  "x.api.get(`${h}`)",
+  "x.api.get(`/u/${f(h)}`)",
+  "x.api.get(h, {})",
+  "x.api.get(h.handler)",
+  "x.api.get({ handler: h }.handler)",
+  "x.api.post('/u', { a: 1 }); export default h",
+  "ctx.api.get('/users').get(handler);",
+  "    @routers.api.get(\"/users\")",
+  "this.api.get('/x').subscribe((r) => done(r));",
+  "this.api.get(url);",
+  "this.api.get('/x', opts);",
+  "this.api.get('/x', { a: 1 }, extra);",
+  "this.api.get('/x' /* c */);",
+  "const f = () => this.api.get('/x');",
+];
+test('[P6-R2a] allow-list classifier: only the whole statement `[const x =|return|await] <ident-chain>.api.<verb>(<literal path>[, <plain literal object>])[;]` is admissible', () => {
+  for (const format of [2, 3]) {
+    for (const line of R2_ADMISSIBLE) {
+      const b = briefOf(rea([{ path: CLIENT, added: [line] }], { format }), `new-route@${CLIENT}`);
+      assert.ok(b, line); assert.equal(b.admissible, true, `${line}: ${b.why}`);
+    }
+    for (const line of R2_INADMISSIBLE) {
+      const files = [{ path: 'src/server/settings.ts', added: [line] }];
+      const first = rea(files, { format });
+      const b = briefOf(first, 'new-route@src/server/settings.ts');
+      if (!b) { assert.equal(first.ok, false, `${line}: not even a new-route signal, and not closed`); continue; }
+      assert.equal(b.admissible, false, line);
+      assert.equal(rea(files, { format, dispositions: [dispose(b)] }).code, 'disposition_inadmissible', line);
     }
   }
 });
@@ -523,17 +592,22 @@ test('[P6-R1] the stage record is checked against the approved policy on EVERY l
   okc(fx.cli('status'), 'status after binding');
 });
 
-test('[P6-R1b] gate reassess derives no_runtime_boundary and artifacts from the approved policy, never from mutable state', async () => {
-  const { reassessStagePolicy } = await import('./stage-obligations.mjs');
-  const plan = (p) => `# Plan\n\n${stageLine(p)}\n\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n`;
-  const off = reassessStagePolicy(plan({ ...POLICY_236() }), 'T-1');
-  assert.equal(off.no_runtime_boundary, false);
-  assert.deepEqual(off.artifacts, []);
-  const on = reassessStagePolicy(plan({ ...POLICY_236(), no_runtime_boundary: true, artifacts: ['.specs/design-parity/T-1.md'] }), 'T-1');
-  assert.equal(on.no_runtime_boundary, true);
-  assert.deepEqual(on.artifacts, ['.specs/design-parity/T-1.md']);
-  const hidden = `# Plan\n\n${stageLine(POLICY_236())}\n\n<!-- RUN-STATE:BEGIN -->\n${stageLine({ ...POLICY_236(), no_runtime_boundary: true })}\n<!-- RUN-STATE:END -->\n`;
-  assert.equal(reassessStagePolicy(hidden, 'T-1').no_runtime_boundary, false, 'a line in the RUN-STATE body is never the approved one');
+test('[P6-R1b] gate reassess and every gate use the RETAINED approved line; a consistently re-forged record (line + record) or a verification missing from RUN-STATE is refused at the binding', { skip: WIN_SKIP }, async (t) => {
+  const { parseStagePolicy, initialStage, retainedStagePolicy } = await import('./stage-obligations.mjs');
+  const fx = stageRun(t);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init');
+  assert.equal(retainedStagePolicy(fx.readState()).no_runtime_boundary, false);
+  // forge both the retained line (no_runtime_boundary: true) and a record derived from it: load passes, the binding does not
+  fx.editState((st) => { const line = stageLine({ ...POLICY_236(), no_runtime_boundary: true }); st.stage = initialStage(parseStagePolicy(line)); });
+  okc(fx.cli('status'), 'a self-consistent forged record loads (state alone cannot tell)');
+  const g = fx.gate('ship-ready', {});
+  assert.equal(g.out?.code, 'stage_policy_mismatch', g.stdout);
+  // a retained verification that never reached RUN-STATE (written into state only)
+  const { fx: f2, cand, verify } = await shipped(t);
+  okc(verify('R2', EVIDENCE(cand)), 'verify');
+  const text = readFileSync(f2.planFile, 'utf8');
+  writeFileSync(f2.planFile, text.split('\n').filter((l) => !l.includes('"OBLIGATION_VERIFIED"')).join('\n'));
+  assert.equal(f2.gate('ship-ready', {}).out?.code, 'stage_policy_mismatch');
 });
 
 test('[P6-R3] a stage run records a distinguishable policy version: an engine without S4 (the main policy table, 1-24) refuses to resume it', { skip: WIN_SKIP }, async (t) => {
@@ -583,4 +657,115 @@ test('[P6-H1..H5] frozen hazards stay frozen without the flag: parity artifact, 
   okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive');
   mkdirSync(join(fx.repo, '.specs', 'design-parity'), { recursive: true }); writeFileSync(join(fx.repo, '.specs', 'design-parity', 'T-1.md'), '# parity\n');
   assert.equal(fx.gate('reassess', {}).out?.code, 'security_reapproval', 'H5');
+});
+
+// ---- R2 (RCA-S4-ROUND2 steps 2-4) ------------------------------------------------------------------------------
+const EVIDENCE = (c, over = {}) => ({ stage: 'production', environment: 'production', subject: 'api release of this candidate', candidate_id: c,
+  required_evidence: 'read-only probe output against production after deploy', result: 'pass', ref: 'gh-run-9', summary: 'probe passed', ...over });
+async function shipped(t, policy) {
+  const fx = stageRun(t, policy ? { policy } : {});
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive');
+  const cand = fx.candidate();
+  okc(fx.gate('review', passReview('review-1', cand)), 'review'); okc(fx.gate('ship-ready', {}), 'ship-ready');
+  const ev = join(fx.root, 'ev.json');
+  const verify = (id, e) => { writeFileSync(ev, J(e)); return fx.cli('obligation-verify', { id, input: ev }); };
+  return { fx, cand, verify };
+}
+
+test('[P6-R2b] a stored `verified` status is authoritative only through a retained OBLIGATION_VERIFIED record: every forge is refused on load', { skip: WIN_SKIP }, async (t) => {
+  const forges = [
+    ['the round-2 4-field stub (Codex/Opus forge.test.mjs)', (st, c) => { const o = st.stage.obligations[0]; o.status = 'verified'; o.evidence = { candidate_id: c, result: 'pass', ref_id: 'forged', digest: 'x' }; }],
+    ['a full, self-consistent evidence copy with no retained record', (st, c) => { const o = st.stage.obligations[0]; o.status = 'verified';
+      o.evidence = { ...EVIDENCE(c), digest: 'sha256:' + '1'.repeat(64), ref_id: 'gh-run-9', seq: 1 }; }],
+  ];
+  for (const [what, edit] of forges) {
+    const { fx, cand } = await shipped(t);
+    fx.editState((st) => edit(st, cand));
+    const st = fx.cli('status');
+    assert.notEqual(st.status, 0, what); assert.match(st.stderr, /stage_state_invalid/, `${what}: ${st.stderr}`);
+  }
+  // a real verification, then forges of its retained record
+  const tamper = [
+    ['record digest edited', (st) => { st.stage.verifications[0].evidence_digest = 'sha256:' + '2'.repeat(64); }],
+    ['record evidence edited (result)', (st) => { st.stage.verifications[0].evidence.result = 'fail'; }],
+    ['record bound to another row', (st) => { st.stage.verifications[0].row = 'R9'; }],
+    ['record deleted, status kept', (st) => { st.stage.verifications = []; }],
+    ['status flipped back to open with the record kept', (st) => { st.stage.obligations[0].status = 'open'; st.stage.obligations[0].evidence = null; }],
+    ['record duplicated (ref twice)', (st) => { st.stage.verifications.push({ ...st.stage.verifications[0] }); }],
+  ];
+  for (const [what, edit] of tamper) {
+    const { fx, cand, verify } = await shipped(t);
+    okc(verify('R2', EVIDENCE(cand)), 'verify');
+    okc(fx.cli('status'), `${what}: the untampered twin loads`);
+    fx.editState(edit);
+    const st = fx.cli('status');
+    assert.notEqual(st.status, 0, what); assert.match(st.stderr, /stage_state_invalid/, `${what}: ${st.stderr}`);
+  }
+  // the retained record carries the full evidence schema and the recomputable digest
+  const { fx, cand, verify } = await shipped(t);
+  okc(verify('R2', EVIDENCE(cand)), 'verify');
+  const rec = fx.readState().stage.verifications[0];
+  assert.deepEqual(Object.keys(rec.evidence).sort(), Object.keys(EVIDENCE(cand)).sort());
+  assert.equal(rec.row, 'R2'); assert.equal(rec.candidate_id, cand); assert.equal(rec.ref_id, 'gh-run-9');
+  assert.ok(runStateEvents(fx.planFile).some((e) => e.event === 'OBLIGATION_VERIFIED' && e.evidence_digest === rec.evidence_digest));
+});
+
+test('[P6-R2c] a consumed evidence ref stays consumed run-wide, also after the obligation reopens on a new candidate', { skip: WIN_SKIP }, async (t) => {
+  const { fx, cand: c1, verify } = await shipped(t);
+  okc(verify('R2', EVIDENCE(c1, { ref: 'ci-run-123' })), 'verify c1');
+  fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'review-2', predecessor: 'review-1', authorized_by: 'owner', reason: 'test: second candidate', timestamp: new Date().toISOString() });
+  fx.behave({ a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } });
+  okc(fx.gate('review', failReview('review-2', c1, 'src/a.txt', fx.prompt('fix'))), 'review 2 FAIL');
+  okc(fx.cli('drive'), 'repair');
+  const c2 = fx.candidate();
+  okc(fx.gate('review', confirmReview('review-2', c2)), 'confirmation');
+  okc(fx.gate('ship-ready', {}), 'ship-ready c2');
+  assert.equal(fx.readState().stage.obligations[0].status, 'open');
+  assert.equal(verify('R2', EVIDENCE(c2, { ref: 'ci-run-123' })).out?.code, 'obligation_evidence_reused', 'the c1 ref cannot verify c2');
+  okc(verify('R2', EVIDENCE(c2, { ref: 'ci-run-124' })), 'a new ref verifies c2');
+  assert.equal(fx.readState().stage.verifications.length, 2, 'both records retained');
+  okc(fx.cli('status'), 'loads');
+});
+
+test('[P6-R2d] a foreign-worktree command (the deadline sweep from main after the owning worktree is gone) never reads the caller\'s plan', { skip: WIN_SKIP }, async (t) => {
+  for (const staged of [false, true]) {
+    const fx = fixture(t, { commit: true, narrativeExtra: staged ? stageLine(POLICY_236()) + '\n\n' : '',
+      config: { testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, ...(staged ? { stagePolicy: { version: 1 } } : {}) } });
+    const plan = readFileSync(fx.planFile, 'utf8');
+    const wt = join(fx.root, 'feature');
+    assert.equal(spawnSync('git', ['worktree', 'add', '-q', '-b', 'feature', wt], { cwd: fx.repo }).status, 0);
+    mkdirSync(join(wt, '.specs', 'plans'), { recursive: true }); writeFileSync(join(wt, '.specs', 'plans', 'T-1.md'), plan);
+    const cli = (repo, ...a) => spawnSync(process.execPath, [fileURLToPath(new URL('./run-engine.mjs', import.meta.url)), ...a, '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1'], { encoding: 'utf8', env: fx.env, timeout: 60000 });
+    const i = cli(wt, 'init', '--dag', fx.dagFile); assert.equal(i.status, 0, i.stderr);
+    assert.equal(spawnSync('git', ['worktree', 'remove', '--force', wt], { cwd: fx.repo }).status, 0);
+    rmSync(fx.planFile); // the ticket's plan lives on the feature branch, not in the main checkout
+    const sweep = cli(fx.repo, 'reconcile', '--deadlines', 'true');
+    assert.equal(sweep.status, 0, `stage=${staged}: ${sweep.stderr}`);
+  }
+});
+
+test('[P6-R2e] CommonMark fences hide the stage line: indented (1-3 spaces), longer backtick and tilde fences, an inner shorter fence, unterminated', async () => {
+  const { parseStagePolicy } = await import('./stage-obligations.mjs');
+  const L = stageLine(POLICY_236());
+  const code = (n) => { try { parseStagePolicy(n, { ticket: 'T-1' }); return 'ok'; } catch (e) { return e.code; } };
+  for (const [what, n] of [['1-space fence', ` \`\`\`\n${L}\n \`\`\`\n`], ['3-space fence', `   \`\`\`js\n${L}\n   \`\`\`\n`], ['4-backtick with inner ```', `\`\`\`\`\n\`\`\`\n${L}\n\`\`\`\`\n`],
+    ['~~~~ closed only by ~~~~', `~~~~\n~~~\n${L}\n~~~~\n`], ['unterminated ````', `\`\`\`\`\n${L}\n`], ['a backtick fence is not closed by tildes', `\`\`\`\n~~~\n${L}\n`]])
+    assert.equal(code(`x\n${n}`), 'stage_policy_invalid', what);
+  // a closed fence BEFORE the visible line does not hide it; 4 spaces is not a fence (an indented line, and the stage line is at column 1)
+  assert.equal(code(`x\n\`\`\`\`\ncode\n\`\`\`\`\`\n${L}\n`), 'ok', 'a longer closer closes');
+  assert.equal(code(`x\n~~~\ncode\n~~~\n${L}\n`), 'ok');
+  assert.equal(code(`x\n    \`\`\`\n${L}\n`), 'ok', 'four spaces: an indented code line, not a fence opener');
+});
+
+test('[P6-R2f] runner reach counts only understood selectors: option values, -e argv, unknown commands and evidence entries reach nothing', { skip: WIN_SKIP }, async (t) => {
+  const client = { id: 'client', deps: [], writes: ['apps/admin'], redSpecs: [{ file: 'apps/admin/src/settings.service.spec.ts', name: 'loads settings' }] };
+  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [] };
+  const UNIT = { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' };
+  const run = (client2) => pf(secRun(t, { policy: pol, nodes: [client], config: { testCommands: { unit: UNIT, client: client2 } } }));
+  const SPECF = 'apps/admin/src/settings.service.spec.ts';
+  for (const args of [['--test', '--test-name-pattern', SPECF], ['--test', '--test-reporter', 'apps/admin'], ['-e', 'process.exit(0)', SPECF], ['--eval', 'x', SPECF], [SPECF], ['--test', '--import', 'apps/admin']])
+    await rejects(run({ cmd: process.execPath, args, format: 'tap' }), 'red_runner_missing');
+  await rejects(run({ cmd: 'npx', args: ['vitest', 'run', SPECF], format: 'tap' }), 'red_runner_missing'); // an unknown runner: reach unproven
+  assert.equal((await run({ cmd: process.execPath, args: ['--test', '--test-reporter=tap', 'apps/admin/src/settings.servic?.spec.ts'], format: 'tap' })).code, 'preflight_ok', '? is a one-character glob');
+  assert.equal((await run({ cmd: process.execPath, args: ['--test', '--test-concurrency=1', '--test-reporter=tap', 'apps/admin'], format: 'tap' })).code, 'preflight_ok');
 });

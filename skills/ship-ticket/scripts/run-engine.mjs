@@ -53,7 +53,7 @@ import { samePath } from './lib/run-log-paths.mjs';
 import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
-import { stageOn, parseStagePolicy, feasibility, initialStage, verifyObligation, stageStateRefusal } from './stage-obligations.mjs';
+import { stageOn, parseStagePolicy, feasibility, initialStage, verifyObligation, stageStateRefusal, stageBindingRefusal } from './stage-obligations.mjs';
 
 export { writeStateAtomic } from './engine-io.mjs';
 /** The ticket's engine lock (S1: in the run's placement: an existing run's, else the default of a new run, durable). */
@@ -174,7 +174,7 @@ function open(ctx, prefer) {
       if (new Set([E.policy.semantics.stageObligations === true, E.S.config?.stagePolicy !== undefined, E.S.stage !== undefined]).size !== 1)
         throw coded('stage_state_missing', `policy_version ${E.S.policy_version}, config.stagePolicy and the stage obligation state disagree: a partial stage record is never resumed`);
       if (E.S.stage !== undefined) {
-        const why = stageStateRefusal(E.S, io.readIfExists(P.plan), ctx.ticket);
+        const why = stageStateRefusal(E.S); // R2: the retained run-owned policy only; a foreign-worktree command never reads its caller's plan
         if (why) throw coded('stage_state_invalid', `the stage obligation record does not match the approved stage policy: ${why}; it is never resumed`);
       }
       // S-12: the pinned-base flag of the run's version, S.base and config.pinnedBase come together or not at all (no partial pin is resumed)
@@ -261,6 +261,11 @@ function verifyBinding(E) {
   try {
     const approved = approvedPlan(ctx, E.P, S);
     if (approved.digest !== S.plan_digest) out.push(judgment('approval_mismatch', null, 'plan narrative differs from the one bound at init'));
+    else if (S.stage) { // STAB S4 (R2): the retained stage line is the approved one, and every retained verification reached RUN-STATE
+      const t = approved.text, b = t.indexOf(BEGIN), e = t.indexOf(END);
+      const why = stageBindingRefusal(S, b >= 0 && e > b ? t.slice(0, b) + t.slice(e) : t, approved.events);
+      if (why) out.push(judgment('stage_policy_mismatch', null, why));
+    }
     // Grandfathering is by the trusted START's approval time, never by a missing field (AIS-HARNESS-4 Wave B).
     else if (!securityOn(S) && !legacyApproval(approved.start)) out.push(judgment('security_policy_required', null,
       'the trusted START is not approved before the security policy cutoff, and the bound DAG has no config.securityPolicy 2'));

@@ -22,7 +22,7 @@ import { checkedIdentity, identityStage } from './engine-identity.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
-import { shipStage, reassessStagePolicy } from './stage-obligations.mjs';
+import { shipStage, retainedStagePolicy } from './stage-obligations.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -606,7 +606,7 @@ export function pendingNa(block, events) {
 export function securityRefusal(sec) {
   const jp = { judgment_point: true };
   if (!sec.catalog.ok) return gateNo('catalog_unavailable', [`the control catalog is unavailable (${sec.catalog.code}): ${(sec.catalog.reasons ?? []).join('; ')}`], jp);
-  if (sec.formatMismatch) return gateNo('security_pairs_mismatch', ['the approved §3a block format and the run\'s recorded policy version disagree (a format-3 block needs policy_version 3 or 4, and only it)'], jp);
+  if (sec.formatMismatch) return gateNo('security_pairs_mismatch', ['the approved §3a block format and the run\'s recorded policy version disagree (a format-3 block needs a policy version with securityObligations: 3, 4 and their pinned, identity, durable and stage rows, and only it)'], jp);
   const { conflicts, outside, forged, addenda } = sec.events;
   if (conflicts.length) return gateNo('addendum_conflict', conflicts.map(c => `${c.addendum_id}: ${c.reason}`), jp);
   if (outside.length) return gateNo('addendum_outside_contract', outside.map(c => `${c.addendum_id}: ${c.reason} (WAIT_FOR_USER: re-approve the plan)`), jp);
@@ -814,8 +814,9 @@ async function reassessGate(E, input, candidate) {
   if (refusal) return refusal;
   const plan = io.readIfExists(E.P.plan) ?? '';
   // STAB S4: a disposition needs the approved stage policy's no_runtime_boundary (the DAG flag alone never loosens the classifier).
-  // R1 (Codex 1): read from the APPROVED line (the plan narrative the binding just verified), never from the mutable S.stage record.
-  const approvedStage = S.stage ? reassessStagePolicy(plan, S.ticket) : { no_runtime_boundary: false, artifacts: [] };
+  // Read from the RETAINED approved line (load validated the record against it; verifyBinding, just run, matched it to the
+  // approved narrative), never from the record's mutable fields.
+  const approvedStage = S.stage ? retainedStagePolicy(S) : { no_runtime_boundary: false, artifacts: [] };
   const allowDispositions = approvedStage.no_runtime_boundary === true;
   if (input.dispositions !== undefined && !allowDispositions) return gateNo('disposition_not_approved', ['the approved stage policy does not set no_runtime_boundary: a disposition closes nothing on this run']);
   // The input surfaces pass straight through: reassess unites them with the approved ones (an identical one is

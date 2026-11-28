@@ -1014,101 +1014,60 @@ export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
 // ---------------------------------------------------------------------------------------------------- dispositions (S4)
 /**
  * STAB S4 (P6 S, PROVISIONAL, UNQUALIFIED): the "no runtime boundary" disposition. It closes ONE kind of signal, a
- * new-route signal raised by added LINES only, and only when every route-shaped match on every such line is a client
- * member call `<receiver>.api.<verb>(` whose arguments close on that line and hold no handler (`=>`, `function`).
- * Never: a path-raised signal (route directory or route file name), an auth or migration signal, a bare or member
- * `app|router|server|route` registration, a decorator or exported handler, any ROUTE_LINE_V3 form, a call that does
- * not close on its line. The detector is untouched (the signal is still raised and reported); there is no filename
- * rule (owner Option 2). The engine issues a brief per open new-route signal whose digest binds (signal, path,
- * candidate, matched lines); a disposition quotes that digest plus an independent reviewer and basis, so an edited
- * file or another candidate is stale. The reviewer is asserted text, as authorized_by is (A16 weakness).
+ * new-route signal raised by added LINES only (never path-raised, never auth or migration). R2 (RCA-S4-ROUND2): the
+ * classifier is an ALLOW-list. A route-shaped added line is admissible only when the WHOLE line is one statement of the
+ * exact form
+ *     [const|let|var <name> =] [return] [await] <name>(.<name>)*.api.<get|post|put|patch|delete>(<args>) [;]
+ * where <args> is empty, or a non-empty string literal (or a template with literal text whose interpolations are plain names or member paths),
+ * optionally followed by ONE plain object literal whose values are string, number, boolean or null literals or such
+ * objects. Anything else (a chained call, a decorator, a plain-name or handler argument, a comment, a regex, a
+ * second statement, any other text) is not recognised and therefore not admissible: the signal stays open. The detector
+ * is untouched; there is no filename rule (owner Option 2). The engine issues a brief per open new-route signal whose
+ * digest binds (signal, path, candidate, matched lines); a disposition quotes that digest plus an independent reviewer
+ * and basis. The reviewer is asserted text, as authorized_by is (A16 weakness W2).
  */
 const [, NEW_ROUTE_PATH, NEW_ROUTE_LINE] = RULES.find(([k]) => k === 'new-route');
-const NEW_ROUTE_ALL = new RegExp(NEW_ROUTE_LINE.source, 'g');
 const routeLine = (l) => NEW_ROUTE_LINE.test(l) || ROUTE_LINE_V3.test(l);
-/** The arguments of the call opened at `from` (just after its '('), or null when it does not close on the line. */
-function callArgs(l, from) {
-  let depth = 0, q = null;
-  for (let i = from; i < l.length; i++) {
-    const ch = l[i];
-    if (q) { if (ch === '\\') i++; else if (ch === q) q = null; continue; }
-    if (ch === "'" || ch === '"' || ch === '`') q = ch;
-    else if (ch === '(') depth++;
-    else if (ch === ')') { if (depth === 0) return l.slice(from, i); depth--; }
+const NAME = '[A-Za-z_$][\\w$]*';
+const SQ = "'(?:[^'\\\\\\n]|\\\\.)*'", DQ = '"(?:[^"\\\\\\n]|\\\\.)*"';
+const TPL = '`(?:[^`\\\\$]|\\\\.|\\$(?!\\{)|\\$\\{\\s*' + NAME + '(?:\\.' + NAME + ')*\\s*\\})*`';
+const PATH_ARG = new RegExp('^(?:' + SQ + '|' + DQ + '|' + TPL + ')');
+const LIT = new RegExp('^(?:' + SQ + '|' + DQ + '|-?\\d+(?:\\.\\d+)?\\b|(?:true|false|null)\\b)');
+const KEY = new RegExp('^(?:' + NAME + '|' + SQ + '|' + DQ + ')');
+const HEAD = new RegExp('^\\s*(?:(?:const|let|var)\\s+' + NAME + '\\s*=\\s*)?(?:return\\s+)?(?:await\\s+)?' + NAME + '(?:\\.' + NAME + ')*\\.api\\.(?:get|post|put|patch|delete)\\(');
+/** Parse a plain object literal at the start of `t`; the rest of `t` after it, or null. */
+function plainObjectAt(t, depth = 0) {
+  if (depth > 4 || t[0] !== '{') return null;
+  let r = t.slice(1).trimStart();
+  if (r[0] === '}') return r.slice(1);
+  for (;;) {
+    const k = KEY.exec(r); if (!k) return null;
+    r = r.slice(k[0].length).trimStart();
+    if (r[0] !== ':') return null;
+    r = r.slice(1).trimStart();
+    const v = LIT.exec(r);
+    if (v) r = r.slice(v[0].length);
+    else { const rest = plainObjectAt(r, depth + 1); if (rest === null) return null; r = rest; }
+    r = r.trimStart();
+    if (r[0] === ',') { r = r.slice(1).trimStart(); if (r[0] === '}') return r.slice(1); continue; }
+    if (r[0] === '}') return r.slice(1);
+    return null;
   }
-  return null;
 }
-/** Why the line cannot be lexed with strings alone ('/' outside a string, a non-trivial `${}`), or null. */
-function unquotedProblem(l) {
-  let q = null;
-  for (let i = 0; i < l.length; i++) {
-    const ch = l[i];
-    if (q) {
-      if (ch === '\\') { i++; continue; }
-      if (q === '`' && ch === '$' && l[i + 1] === '{') {
-        const end = l.indexOf('}', i + 2);
-        if (end < 0 || !/^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*$/.test(l.slice(i + 2, end))) return 'a template interpolation that is not a plain name';
-        i = end; continue;
-      }
-      if (ch === q) q = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') q = ch;
-    else if (ch === '/') return "a '/' outside a string (comment, regex literal or division): the line cannot be verified";
+/** True only when the whole line is the one admissible client statement form (see above). */
+export function clientStatement(l) {
+  const h = HEAD.exec(l);
+  if (!h) return false;
+  let r = l.slice(h[0].length).trimStart();
+  if (r[0] !== ')') {
+    const p = PATH_ARG.exec(r);
+    // the path must carry literal text: a template that is only interpolations is a value of unknown origin
+    if (!p || p[0].slice(1, -1).replace(/\$\{[^}]*\}/g, '').length === 0) return false;
+    r = r.slice(p[0].length).trimStart();
+    if (r[0] === ',') { r = r.slice(1).trimStart(); const rest = plainObjectAt(r); if (rest === null) return false; r = rest.trimStart(); }
+    if (r[0] !== ')') return false;
   }
-  return q ? 'an unterminated string' : null;
-}
-/** A plain first argument: a string literal, a template (its interpolations already checked), or a name / member path. */
-const PLAIN_FIRST = /^(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)$/;
-const LITERAL = /^(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)$/;
-/** A plain object literal: { key: <literal | plain object>, ... } and nothing after its closing brace. */
-function plainObject(x) {
-  if (!x.startsWith('{') || !x.endsWith('}')) return false;
-  const body = x.slice(1, -1).trim();
-  if (!body) return true;
-  return topLevelArgs(body).every((kv) => {
-    const m = /^(?:[A-Za-z_$][\w$]*|'[^']*'|"[^"]*")\s*:\s*([\s\S]+)$/.exec(kv);
-    return Boolean(m) && (LITERAL.test(m[1].trim()) || plainObject(m[1].trim()));
-  });
-}
-/** The top-level comma-separated arguments of `args` (quotes and brackets respected), trimmed; [] for none. */
-function topLevelArgs(args) {
-  const out = [];
-  let depth = 0, q = null, cur = '';
-  for (let i = 0; i < args.length; i++) {
-    const ch = args[i];
-    if (q) { cur += ch; if (ch === '\\') cur += args[++i] ?? ''; else if (ch === q) q = null; continue; }
-    if (ch === "'" || ch === '"' || ch === '`') q = ch;
-    else if ('([{'.includes(ch)) depth++;
-    else if (')]}'.includes(ch)) depth--;
-    else if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
-    cur += ch;
-  }
-  if (cur.trim()) out.push(cur.trim());
-  return out;
-}
-/** Why `l` (a route-shaped added line) is not a client-only line, or null when every route-shaped match is a client call. */
-function serverForm(l) {
-  if (ROUTE_LINE_V3.test(l)) return 'a format-3 route registration form';
-  // R1 (Codex 2, Opus MINOR-4): the scanner knows strings only, so any '/' outside a string (a comment, a regex literal or a
-  // division) and any template interpolation that is not a plain name or member path make the line unverifiable: refused.
-  const lexed = unquotedProblem(l);
-  if (lexed) return lexed;
-  let m, any = false;
-  NEW_ROUTE_ALL.lastIndex = 0;
-  while ((m = NEW_ROUTE_ALL.exec(l))) {
-    any = true;
-    if (m[1] !== 'api') return m[1] ? `a ${m[1]}.${m[2]}( registration` : 'a decorator or exported route handler';
-    if (m[2] === 'route' || m[2] === 'all') return `api.${m[2]}( registers a handler (only HTTP verb calls are client calls)`;
-    if (l[m.index - 1] !== '.' || !/[\w$)\]]/.test(l[m.index - 2] ?? '')) return 'a bare api.<verb>( call (not a member of a client object)';
-    const args = callArgs(l, m.index + m[0].length);
-    if (args === null) return 'the call does not close on its line (cannot be verified)';
-    if (/=>|\bfunction\b/.test(args)) return 'a handler-shaped argument';
-    const parts = topLevelArgs(args);
-    if (parts.length && !PLAIN_FIRST.test(parts[0])) return 'a first argument that is not a string literal, template or plain name';
-    if (parts.slice(1).some((x) => !plainObject(x))) return 'an argument after the first that is not a plain object literal of literal values (it could be a handler)';
-  }
-  return any ? null : 'no route-shaped match';
+  return /^\)\s*;?\s*$/.test(r);
 }
 /** The engine-issued brief for every OPEN new-route signal (class null) of `files`: admissible or not, with its digest. */
 function dispositionBriefs(signals, files, candidateId) {
@@ -1117,7 +1076,8 @@ function dispositionBriefs(signals, files, candidateId) {
     const lines = (f?.added ?? []).filter(routeLine);
     const b = s.path.split('/').pop().toLowerCase();
     const why = NEW_ROUTE_PATH(s.path.toLowerCase(), b) ? 'raised by its path (route directory or route file name)'
-      : !lines.length ? 'no route-shaped added line' : lines.map(serverForm).find((x) => x !== null) ?? null;
+      : !lines.length ? 'no route-shaped added line'
+      : lines.every(clientStatement) ? null : 'a route-shaped line is not the one admissible client statement form (allow-list): it stays an open signal';
     return { signal_id: s.id, path: s.path, lines, admissible: why === null, ...(why ? { why } : {}),
       brief_digest: sha(canon({ v: 1, signal_id: s.id, path: s.path, candidate_id: candidateId, lines })) };
   });

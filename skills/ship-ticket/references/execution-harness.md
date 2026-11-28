@@ -311,18 +311,21 @@ stage, the verification rows it declares with their stages (not cross-checked ag
 trigger or tracker). `preflight` and `init` both refuse an infeasible plan: a row whose stage neither exists nor is deferred
 (`stage_unavailable`), a deferral of an existing stage or of a section 3a pair (`stage_deferral_invalid`), a deferral with
 no trigger and no tracker (`obligation_trigger_missing`), a design-parity artifact of a `ui` run not declared in `artifacts`
-(`required_artifact_outside_contract`), a RED or pair spec no formatted runner command reaches by a file, directory or glob
-argument (`red_runner_missing`), a test
+(`required_artifact_outside_contract`), a RED or pair spec no formatted runner command reaches by a selector the engine understands
+(today `node --test` with file, directory or glob arguments; any other runner is unproven) (`red_runner_missing`), a test
 command that is not executable (`runner_not_executable`), and a file-shaped planned write that raises a surface signal no
 surface lists (`surface_inventory_incomplete`, any block format). Each deferral is an open obligation in the state; the
 SHIP_READY event carries `verified_through` (the merge stage) and `obligations_open`, binds each obligation to the
 candidate and re-binds it, with a lineage entry, on a later candidate (a verified one reopens). Only `obligation-verify`
 with evidence for the obligation's stage, environment, subject and bound candidate marks it verified
-(`OBLIGATION_VERIFIED`, evidence with no `authorized_by`). On every load the state's stage record must equal the one the approved line derives (`stage_state_invalid`); evidence must
-name the required evidence and report `result: pass`, and its `ref` may verify only one obligation. Declared `artifacts`
+(`OBLIGATION_VERIFIED`, evidence with no `authorized_by`). The approved line is retained in the run state; on every load the stage record must equal the one that retained line
+derives, and a `verified` status must be derived from a retained, recomputable `OBLIGATION_VERIFIED` record
+(`stage_state_invalid`). Owner commands also check the retained line against the approved narrative and each retained
+record against RUN-STATE (`stage_policy_mismatch`). A foreign-worktree command never reads its caller's plan. Evidence must
+name the required evidence and report `result: pass`, and a `ref` is consumed once per run, also after a reopen. Declared `artifacts`
 (exact `.specs/` paths, never inside an HTML comment or fence, like the line itself) extend the Design Contract that `gate
 reassess` matches. With `no_runtime_boundary: true` in the approved line, `gate reassess` accepts a disposition for a
-new-route signal raised only by added client lines (`<x>.api.<verb>(` with no handler argument), quoting the brief digest
+new-route signal raised only by added lines that are each exactly one allow-listed client statement (`<name>(.<name>)*.api.<verb>(<literal path>[, <plain literal object>])`, optionally after `const x =`, `return` or `await`; anything else stays an open signal), quoting the brief digest
 the engine printed for that candidate and naming an independent reviewer. A route path, any other registration form, an
 auth or migration signal, or a recorded REAPPROVAL is never closed by it. Recording an obligation does not enforce
 deployment: nothing stops a deploy until the deploy boundary consumes the obligation. Section 3b status rules and the
