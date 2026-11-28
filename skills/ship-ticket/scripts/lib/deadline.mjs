@@ -33,7 +33,7 @@
  * - Unknown boot id (neither source readable): nothing is measured; the observation is recorded as unmeasured.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, mkdirSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const DEADLINE_SCHEMA = 'ship-ticket-deadline-v0';
@@ -145,7 +145,7 @@ export const SWEEP_SCHEMA = 'ship-ticket-deadline-sweep-v0';
 
 /** Append record `rec` (one line, fsynced) to the sweep file of the attempts directory `dir`. */
 export function appendSweep(dir, rec) {
-  mkdirSync(dir, { recursive: true });
+  // no mkdir: a released attempt's directory exists; recreating one retired meanwhile would strand a file in it (m8)
   const fd = openSync(join(dir, SWEEP_FILE), 'a', 0o600);
   try { writeSync(fd, JSON.stringify({ schema: SWEEP_SCHEMA, ...rec }) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
 }

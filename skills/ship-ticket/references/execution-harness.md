@@ -311,8 +311,8 @@ signal), after appending a receipt to its own file `attempts/deadline-sweep.json
 settlement stays under the run lock: the sweep settles in one lock attempt when no driver holds it (`settlement: settled`),
 else `deferred`, and every settler (the driver, `resume`, the sweep) derives the timeout from the persisted receipt, so the
 attempt ends `timed_out` and is never re-queued. A `drive` started with the variable arms its attempts with
-`enforcement: 'unqualified_opt_in'`; a durable worker's envelope carries the launcher's monotonic `mono_ns`, and under the
-opt-in an envelope written at or past the deadline is kept as `late_envelope` evidence while the attempt ends `timed_out`.
+`enforcement: 'unqualified_opt_in'` and its workers' envelopes carry the launcher's monotonic `mono_ns`; for such an attempt an
+envelope written at or past the deadline is kept as `late_envelope` evidence while the attempt ends `timed_out`.
 The kill escalation grace (SIGTERM to SIGKILL) is measured on a monotonic clock. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
 
 **DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields

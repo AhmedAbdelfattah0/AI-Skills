@@ -111,7 +111,7 @@ test('P1: a SIGSTOPped driver holding the run lock does not block the sweep: a s
   const end = await exited;
   assert.equal(end.signal, null, 'the resumed driver exits by itself');
   const b = attemptOf(fx, a.attempt_id);
-  assert.equal(b.status, 'timed_out', 'the resumed driver settles it as a timeout (from the receipt), never a crash/re-queue');
+  assert.equal(b.status, 'timed_out', 'the resumed driver settles it as a timeout, never a crash/re-queue');
   assert.equal(b.quiesced, true);
   assert.equal(fx.readState().nodes.a.state, 'failed');
   assert.equal(fx.runs('a').length, 1, 'never re-dispatched');
@@ -193,17 +193,57 @@ for (const [name, driverEnv, offsetMs, expect] of [
   });
 }
 
-test('the durable worker launcher stamps its envelope with the monotonic clock (mono_ns past the deadline origin); a legacy run\'s envelope is unchanged', { skip: SKIP }, async (t) => {
+test('a durable worker launched under the opt-in stamps its envelope with the monotonic clock (mono_ns past the deadline origin); without it (durable or legacy) the envelope is unchanged', { skip: SKIP }, async (t) => {
   const fx = fixture(t, { config: {} });
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
-  assert.equal(fx.cli('drive').status, 0);
+  assert.equal(cli(fx, 'drive', {}, OPT_IN).status, 0);
   const a = fx.readState().attempts[0];
+  assert.equal(a.deadline.enforcement, 'unqualified_opt_in');
   assert.match(a.envelope.mono_ns, /^\d+$/);
   assert.ok(BigInt(a.envelope.mono_ns) > BigInt(a.deadline.start_ns));
-  const legacy = fixture(t, { config: { durableRun: false } });
-  assert.equal(legacy.cli('init', { dag: legacy.dagFile }).status, 0);
-  assert.equal(legacy.cli('drive').status, 0);
-  assert.equal(Object.hasOwn(legacy.readState().attempts[0].envelope, 'mono_ns'), false);
+  for (const config of [{}, { durableRun: false }]) {
+    const plain = fixture(t, { config });
+    assert.equal(plain.cli('init', { dag: plain.dagFile }).status, 0);
+    assert.equal(plain.cli('drive').status, 0);
+    assert.equal(Object.hasOwn(plain.readState().attempts[0].envelope, 'mono_ns'), false, `no stamp without the opt-in (${JSON.stringify(config)})`);
+  }
+});
+
+test('P1 owned path: a live driver (no opt-in, its own timer far away) whose worker a separate sweep killed settles it timed_out from the receipt', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: { timeoutMs: 600000 }, nodes: [{ id: 'a', writes: ['src/a.txt'] }], behaviour: { a: { hang: true } } });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const { a, exited } = await driveUntilRunning(t, fx);
+  const { testClock } = await import('./lib/deadline.mjs');
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  const r = await reconcileDeadlines(fx.ctx({ deadlineClock: testClock({ bootId: a.deadline.boot_id, nowNs: () => BigInt(a.deadline.start_ns) + 600001n * 1000000n }) }));
+  assert.equal(r.swept[0].action, 'killed');
+  // the driver holds the lock for its whole command (deferred), or has already settled and exited by the time the one lock
+  // attempt is made (then the sweep finds the attempt settled by the driver and changes nothing)
+  assert.ok(['deferred', 'settled'].includes(r.settlement), r.settlement);
+  const end = await exited;
+  assert.equal(end.code, 2, 'the driver ends on the failed node (judgment point)');
+  const b = attemptOf(fx, a.attempt_id);
+  assert.equal(b.status, 'timed_out', 'the launcher\'s own settle derived the timeout from the receipt (its timer never fired)');
+  assert.equal(b.deadline.timed_out.signalled, true);
+  assert.equal(fx.runs('a').length, 1);
+});
+
+test('P1 mixed opt-in: a sweep kill deferred to a driver that then dies; resume WITHOUT the opt-in still settles timed_out, never re-queues', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: { timeoutMs: 600000 }, nodes: [{ id: 'a', writes: ['src/a.txt'] }], behaviour: { a: { hang: true } } });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const { driver, a, exited } = await driveUntilRunning(t, fx);
+  driver.kill('SIGSTOP');
+  const { testClock } = await import('./lib/deadline.mjs');
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  const r = await reconcileDeadlines(fx.ctx({ deadlineClock: testClock({ bootId: a.deadline.boot_id, nowNs: () => BigInt(a.deadline.start_ns) + 600001n * 1000000n }) }));
+  assert.equal(r.settlement, 'deferred');
+  driver.kill('SIGKILL');
+  await exited;
+  cli(fx, 'resume'); // no opt-in in this process
+  const b = attemptOf(fx, a.attempt_id);
+  assert.equal(b.status, 'timed_out');
+  assert.equal(fx.readState().nodes.a.state, 'failed');
+  assert.equal(fx.runs('a').length, 1, 'never re-dispatched');
 });
 
 // ---------------------------------------------------------------- FU-1: a boot-ended attempt never waits on a live pgid number

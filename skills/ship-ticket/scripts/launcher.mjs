@@ -287,7 +287,7 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
 
 const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
 /**
- * PR-1b: `monoStamp: true` (durable-run workers only) selects LAUNCHER_STAMPED, whose envelope adds `mono_ns`, the
+ * PR-1b: `monoStamp: true` (durable-run workers launched under the UNQUALIFIED enforcement opt-in only) selects LAUNCHER_STAMPED, whose envelope adds `mono_ns`, the
  * launcher's uv_hrtime at the envelope write, so a settlement can position the envelope on the attempt's deadline without
  * the wall clock. Without it the launcher script and argv stay byte-identical (AC5 pins).
  */

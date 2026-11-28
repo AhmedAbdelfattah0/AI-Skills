@@ -14,7 +14,7 @@ import { prepareDispatch, childEnv, spawnSpec, workerRunStateAppend } from './ca
 import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
-import { armAttempt, signalReceipt, deadlineOverrun, envelopePosition } from './lib/deadline.mjs';
+import { armAttempt, signalReceipt, deadlineOverrun, envelopePosition, enforcementOptIn } from './lib/deadline.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
@@ -352,7 +352,7 @@ async function runAttempt(E, job) {
     await E.commit();
     await io.boundary(ctx.hooks, 'after-intent', { attempt_id: id, node: item.id });
     const child = io.startLauncher({ spawnFn: ctx.spawn, spec, cwd: ctx.repoRoot, env, platform,
-      files: { promptFile: plan.promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id, ...(S.durable ? { monoStamp: true } : {}) } });
+      files: { promptFile: plan.promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id, ...(S.durable && enforcementOptIn() ? { monoStamp: true } : {}) } });
     const exited = new Promise(r => { child.on('exit', r); child.on('error', r); });
     child.stdin.on('error', () => {});
     await io.boundary(ctx.hooks, 'after-spawn', { attempt_id: id });

@@ -812,6 +812,7 @@ export async function reconcileDeadlines(ctx) {
   if (!existsSync(P.state)) throw coded('no_state', `no engine state for ${ctx.ticket}; run init`);
   const S = JSON.parse(readFileSync(P.state, 'utf8')); // lock-free snapshot of the atomically renamed state
   if (S.run_id !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${S.run_id}, not ${ctx.runId}`);
+  runPolicy(S, ctx.policy); // fail closed, as every locked load does: an unsupported policy_version is never swept
   if (!S.durable) throw coded('durable_state_missing', `${P.state} has no durable run record: a partial durable run is never swept`);
   const alive = (pgid) => (ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)))(pgid);
   const measurement = clock === null ? 'unqualified' : MEASUREMENT_QUALIFIED ? 'qualified' : isTestClock(clock) ? 'test_clock' : 'unqualified_opt_in';
