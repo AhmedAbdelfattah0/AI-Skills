@@ -23,7 +23,7 @@ export const ENGINE_POLICY_VERSION = 1;
  * Version 2 (S-01b2 P5r) adds the test-kind freeze gate; `init` records it ONLY for a run that activates
  * test kinds (config.testKinds), so every other run is still version 1, byte for byte.
  */
-export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
+const CORE_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
   3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }),
   5: Object.freeze({ pinnedBase: true }), 6: Object.freeze({ testKinds: true, pinnedBase: true }),
   7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }),
@@ -42,6 +42,35 @@ export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.
   21: Object.freeze({ pinnedBase: true, repoIdentity: true, durableRun: true }), 22: Object.freeze({ testKinds: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
   23: Object.freeze({ securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
   24: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }) });
+
+/**
+ * STAB S5 (P5a): an additive capability offset, composable with any other flag. Every core version v (< EARLY_CHECKS_OFFSET)
+ * has an early-checks twin v + EARLY_CHECKS_OFFSET with the same flags plus earlyChecks (config.earlyChecks: the pre-review
+ * `gate prove` and REVIEW waiting for it). The twins are DERIVED from the core table, so a later slice that adds core rows
+ * (S4's stageObligations 25-48, say) gets its early-checks twins without another hand-written row. An engine without S5 has no
+ * version >= EARLY_CHECKS_OFFSET and refuses such a run (policy_version_unsupported) instead of resuming it with REVIEW no
+ * longer waiting for prove. Every run without config.earlyChecks keeps its core version, byte for byte.
+ */
+export const EARLY_CHECKS_OFFSET = 100;
+/** The core table (every version without earlyChecks): what an engine before S5 supports. Exported for the resume regression. */
+export const PRE_EARLY_CHECKS_SEMANTICS = CORE_SEMANTICS;
+/**
+ * `core` plus the early-checks twin of each of its rows. Refuses (policy_table_ceiling), at module load, a core row at or above
+ * EARLY_CHECKS_OFFSET or one that already carries earlyChecks: a twin would silently overwrite it and change the meaning of
+ * existing runs. The offset is therefore a ceiling on the core table (24 rows today, 48 with S4): a later doubling flag that
+ * pushes the core to 100 rows must move the offset first.
+ */
+export function withEarlyChecksTwins(core) {
+  const bad = Object.entries(core).filter(([v, f]) => !(Number(v) < EARLY_CHECKS_OFFSET) || f.earlyChecks === true).map(([v]) => v);
+  if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: core policy version(s) ${bad.join(', ')} reach EARLY_CHECKS_OFFSET ${EARLY_CHECKS_OFFSET} or already carry earlyChecks`), { code: 'policy_table_ceiling' });
+  return Object.freeze({ ...core, ...Object.fromEntries(Object.entries(core).map(([v, f]) => [Number(v) + EARLY_CHECKS_OFFSET, Object.freeze({ ...f, earlyChecks: true })])) });
+}
+export const POLICY_SEMANTICS = withEarlyChecksTwins(CORE_SEMANTICS);
+/** The early-checks twin of core `version` in `table`, or null when that engine has none (an engine without S5). */
+export const earlyChecksVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Number.isInteger(version) && version < EARLY_CHECKS_OFFSET ? version + EARLY_CHECKS_OFFSET : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].earlyChecks === true ? w : null;
+};
 
 /**
  * S1 (P1): the durable version of each version 1-12 (its flags plus durableRun). `init` records it for every NEW run unless

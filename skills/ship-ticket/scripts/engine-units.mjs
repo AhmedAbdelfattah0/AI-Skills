@@ -37,7 +37,7 @@ export const hasUnits = (S) => S.unit_checks !== undefined;
 /** `gate red`/proof/unit-check runner deps: durable commits, the launcher, binding re-check. */
 export function runnerDeps(E) {
   const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
-  return io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn,
+  return io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn, ...(ctx.killGraceMs ? { killGraceMs: ctx.killGraceMs } : {}),
     commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
     verifyBinding: () => E.verifyBinding(), deadlineClock: ctx.deadlineClock });
 }

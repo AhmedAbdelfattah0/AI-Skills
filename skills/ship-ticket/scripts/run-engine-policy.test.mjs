@@ -119,7 +119,9 @@ test('[AC3] skillCommit ignores an inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FIL
 test('[seam] policySemantics maps supported versions to frozen capability flags; v1 is today\'s (no flags); anything else is policy_version_unsupported', async () => {
   const { policySemantics, ENGINE_POLICY_VERSION, POLICY_SEMANTICS } = await policy();
   assert.equal(ENGINE_POLICY_VERSION, 1);
-  assert.deepEqual(Object.keys(POLICY_SEMANTICS), Array.from({ length: 24 }, (_, i) => String(i + 1)));
+  // S5: 101-124 are the early-checks twins of 1-24 (config.earlyChecks), derived from the core table
+  assert.deepEqual(Object.keys(POLICY_SEMANTICS), [...Array.from({ length: 24 }, (_, i) => String(i + 1)), ...Array.from({ length: 24 }, (_, i) => String(i + 101))]);
+  for (let v = 1; v <= 24; v++) assert.deepEqual(policySemantics(v + 100), { ...policySemantics(v), earlyChecks: true }, `v${v + 100} is v${v} with early checks`);
   assert.deepEqual(policySemantics(1), {});
   assert.deepEqual(policySemantics(2), { testKinds: true }, 'v2 (S-01b2 P5r) adds the test-kind freeze gate');
   assert.deepEqual(policySemantics(3), { securityObligations: true }, 'v3 (F12a) binds a format-3 security block (dropped pairs)');
@@ -134,7 +136,7 @@ test('[seam] policySemantics maps supported versions to frozen capability flags;
     assert.equal(policySemantics(v).durableRun, undefined, `v${v} has no durable flag`);
   }
   assert.ok(Array.from({ length: 24 }, (_, i) => i + 1).every((v) => Object.isFrozen(policySemantics(v))) && Object.isFrozen(POLICY_SEMANTICS));
-  for (const v of [25, 0, -1, 1.5, '1', null, undefined]) {
+  for (const v of [25, 100, 125, 0, -1, 1.5, '1', null, undefined]) {
     assert.throws(() => policySemantics(v), (e) => e.code === 'policy_version_unsupported', `version ${JSON.stringify(v)}`);
   }
 });

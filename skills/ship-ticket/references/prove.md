@@ -218,6 +218,67 @@ worker's own claim: re-run `run` yourself before freeze.
 call `verify` at freeze and the carrier does not require `t0`. That freeze integration and mutation validity are
 separate slices (S-01b2, S-01c); the risk-triggered test kinds are below.
 
+## Early checks and the pre-review proof (`gate prove`, opt-in)
+
+A DAG with `config.earlyChecks: { version: 1 }` (bound by the DAG digest, never defaulted) moves the working-tree checks
+and the bounded proof before REVIEW. Without it nothing on this page changes: ship-ready runs the proof after review, as
+before. With it, after the builders finish and after every repair:
+
+```text
+node scripts/run-engine.mjs gate prove --repo <repo> --ticket <key> --run-id <id> --input <file holding {}>
+```
+
+- **Early checks** are the T0 declaration above (`.ship-ticket/t0.json`, read from the merge base, the same scan set
+  and argv), run by the engine itself, each check under the engine's runner protocol with its own `timeout_ms` (kept
+  as declared, 100 ms to 30 min) and with every `GIT_*` variable removed, as standalone T0 runs it. The record
+  `early_checks` holds names, enums and numbers only. No copy of a check's output is ever written to disk, also when
+  its runner is refused or interrupted: a secrets scanner echoes the secret. No declaration is `not_declared`, which
+  passes.
+- **Prove generations.** Each `gate prove` starts a generation and persists it as `running`, unbinding the earlier
+  early-check and proof records, BEFORE any command is released. Only a generation that completed successfully on the
+  current candidate makes REVIEW eligible. An interrupted generation (the engine killed, a crash) or a refused one
+  (`quiescence_unknown`, drift) stays not proven through resume and recovery, and per-entry reuse draws only on the proof
+  of a completed generation.
+- **The bounded proof** is the same `testCommands` run ship-ready performs, in declaration order. An entry may set its
+  own deadline `timeoutMs` (1 s to 1 h; default `config.timeoutMs`). A timed-out entry is named
+  (`proof_entry_timeout`), and the next `gate prove` re-runs the entries without a reusable pass and their dependency
+  closure: their declared `after` setups, every entry that declares `after` on a re-run entry, and every setup,
+  consumer and teardown of a resource any re-run entry declares. A consumer that passed against an earlier setup
+  execution is therefore re-run with the new one, never reused. Under security policy 2 every entry re-runs, and prove
+  (and REVIEW) also refuse `control_unproven` while an effective, unwaived pair spec is not `pass` (skipped, missing or
+  truncated report), as ship-ready does. A runner whose deadline kill fails is recorded `unknown` after a 30 s grace
+  (shown in-process and with a real surviving child: the engine releases its lock, drops its handles to the launcher
+  and its process exits; the survivor itself is not stopped, and later work waits on the `unknown` attempt).
+- **Executables.** Each entry's command is resolved once the way exec resolves it (a slash path or each PATH component
+  relative to the repository, the first regular file with the execute bit), that file is fingerprinted, and the engine
+  runs that resolved path. An unresolved command (missing, not executable, or Windows, where PATHEXT is not modelled)
+  is never reusable and its proof cannot bind a REVIEW. Not fingerprinted: a script's interpreter and files reached
+  through its arguments; the file can still change between the fingerprint and the exec.
+- **Reuse needs equal inputs.** A proof row is reused, at the next prove or at ship-ready, only while the candidate,
+  the base commit, the environment identity and the entry's command identity are all unchanged. Anything else runs
+  fresh. The environment identity is UNQUALIFIED: platform, architecture, Node version, PATH and each command's
+  resolved executable. It does not cover files a command reads through its arguments, other variables, services or
+  images. There are no gate-row keys and no reuse across a rebase here.
+- **Policy version.** An opted-in run records the early-checks twin of its version (core version + 100,
+  [execution-harness.md](execution-harness.md) "Policy version"), so an engine without this step refuses to resume it.
+  Unit reviews (`gate unit-review`) are not gated by prove; the final review is.
+- **Review waits for it.** An original review or a confirmation is refused with `prove_required` unless early checks
+  and the proof of the current candidate passed and their inputs still hold. Ship-ready refuses the same way without
+  passing early checks, and it re-runs a proof whose inputs changed.
+- **The final committed/range run is kept.** Early checks scan the working tree only (`scope: 'working-tree'`). A
+  history or commit-range check, such as `gitleaks git <base>..HEAD`, sees nothing before the single SHIP commit, so
+  a secret added and then removed is caught only by the final run. SHIP_READY of such a run reports
+  `final_gates: 'required'`; nothing here satisfies the final run.
+
+**Setup/consumer/teardown contract (D8).** The run order is the declaration order, and the engine never reorders a
+digest-bound DAG. Entries that share state declare it: `resource` (a name), `role` (`setup`, `consumer` or `teardown`),
+and `after` (names of entries declared earlier). Preflight and init refuse (`dag_invalid`) when:
+- an `after` names an entry declared later;
+- a consumer does not declare every setup of its resource (for example a reset declared after a reader);
+- a teardown does not declare every consumer of its resource.
+
+Shared state that no entry declares cannot be detected.
+
 ## Risk-triggered test kinds (T1-S)
 
 Opt-in per plan or per repository. When the plan opts in (a `test-triggers:` line, or a repository

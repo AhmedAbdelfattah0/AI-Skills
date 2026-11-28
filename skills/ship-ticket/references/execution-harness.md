@@ -403,6 +403,12 @@ Limits:
   file is the trust anchor, and any process of the user can rewrite it.
 - S1: versions 13-24 are 1-12 plus `durableRun` (every new run; the escape hatch records 1-12). A run's `durableRun` flag,
   its `S.durable` record and its placement must agree at every load (`durable_state_missing` otherwise).
+- S5: every core version v (< 100) has an early-checks twin v + 100 (the same flags plus `earlyChecks`), derived from the
+  core table, so it composes with any later core flag. `init` records it for a DAG with `config.earlyChecks`; an engine
+  without S5 refuses such a run (`policy_version_unsupported`). The flag and `config.earlyChecks` must agree at every load
+  (`early_checks_state_missing` otherwise). The offset is a ceiling on the core table: building the table refuses
+  (`policy_table_ceiling`) a core row at or above 100, so a later doubling that grows the core past 99 rows must move the
+  offset first.
 - The resolved semantics (`E.policy`) are consumed by the test-kind activation (`testKinds`) and by
   the check that a run's §3a block format matches `securityObligations`. Tests cover recording,
   preservation and enforcement, including commands that refuse when the recorded version's
@@ -926,7 +932,8 @@ is no prune.
 - Worker worktree isolation and join are deferred: ownership checks plus content
   fingerprints cover today's failure modes.
 - Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready|unit-review
-  --repo <dir> --ticket <key> --run-id <id> --input <json-file>`: under the engine
+  --repo <dir> --ticket <key> --run-id <id> --input <json-file>` (and, with `config.earlyChecks`, `gate prove`:
+  the pre-review early checks and bounded proof, [prove.md](prove.md)): under the engine
   lock it computes the candidate itself (pinned exclusions), calls `gate.mjs`,
   commits the result and, on ship-ready, appends `SHIP_READY` to RUN-STATE once.
   Exit 0 accepted, 2 refused or judgment point, 1 usage error.

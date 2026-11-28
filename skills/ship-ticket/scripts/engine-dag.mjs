@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks'];
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -175,6 +175,51 @@ function validateSecurity(nodes, c, bad) {
   if (c.controlCoverage.length && !Object.values(c.testCommands ?? {}).some(e => e.format))
     bad('config.controlCoverage needs a formatted config.testCommands runner (the proof parses each pair spec\'s result)');
 }
+/**
+ * S5 (P5a): `config.earlyChecks` (exactly { version: 1 }, opt-in, never defaulted, bound by the DAG digest) enables the pre-review
+ * `gate prove` (engine-prove.mjs): the repository's declared working-tree early checks and the bounded proof, both before REVIEW.
+ * Only with it may a testCommands entry carry the per-entry fields below; a DAG without it is validated and run as before.
+ *   timeoutMs  the entry's own deadline (1 s .. 1 h; default config.timeoutMs)
+ *   resource, role ('setup' | 'consumer' | 'teardown'), after [entry names]: the D8 setup/consumer/teardown contract.
+ * The run order is the declaration order (bound by the DAG digest): the engine never reorders entries. `after` may name only an
+ * EARLIER entry, and for each declared resource every consumer must declare (directly or through `after`) every setup of it, and
+ * every teardown every consumer, so a reset declared after a reader, or a reader with no declared setup, is refused at preflight and
+ * init. Shared state no entry declares is not detectable (stated limit).
+ */
+export const earlyChecksOn = (S) => S?.config?.earlyChecks?.version === 1;
+const EARLY_ENTRY_FIELDS = ['timeoutMs', 'resource', 'role', 'after'];
+export const ENTRY_ROLES = ['setup', 'consumer', 'teardown'];
+/** Every `after` ancestor of entry `name` (transitive) in `cmds` (validated entries). */
+export function entryAncestors(cmds, name, seen = new Set()) {
+  for (const a of cmds[name]?.after ?? []) if (!seen.has(a)) { seen.add(a); entryAncestors(cmds, a, seen); }
+  return seen;
+}
+function validateEarlyChecks(c, bad) {
+  if (c.earlyChecks === undefined) return;
+  if (!(isObj(c.earlyChecks) && Object.keys(c.earlyChecks).join() === 'version' && c.earlyChecks.version === 1)) bad('config.earlyChecks must be exactly { version: 1 }');
+  const cmds = c.testCommands ?? {}, names = Object.keys(cmds);
+  for (const [i, name] of names.entries()) {
+    const e = cmds[name];
+    if (e.timeoutMs !== undefined && !(Number.isInteger(e.timeoutMs) && e.timeoutMs >= 1000 && e.timeoutMs <= 3600000))
+      bad(`config.testCommands.${name}.timeoutMs must be an integer in [1000, 3600000] (the entry's own deadline)`);
+    if ((e.role === undefined) !== (e.resource === undefined)) bad(`config.testCommands.${name}: resource and role are declared together`);
+    if (e.role !== undefined && !ENTRY_ROLES.includes(e.role)) bad(`config.testCommands.${name}.role must be ${ENTRY_ROLES.join('|')}`);
+    if (e.resource !== undefined && !(typeof e.resource === 'string' && SAFE_NAME.test(e.resource))) bad(`config.testCommands.${name}.resource must be a safe name`);
+    if (e.after !== undefined && !(strings(e.after) && new Set(e.after).size === e.after.length)) bad(`config.testCommands.${name}.after must be distinct entry names`);
+    const later = (e.after ?? []).find(a => !names.slice(0, i).includes(a));
+    if (later !== undefined) bad(`config.testCommands.${name}.after names ${J(later)}, which is not an entry declared before it: the run order is the `
+      + 'declaration order (bound by the DAG digest) and the engine never reorders it; declare dependent entries in their order');
+  }
+  // D8: per declared resource, every consumer declares every setup, and every teardown every consumer (a reset after a reader is refused).
+  const byRole = (res, role) => names.filter(n => cmds[n].resource === res && cmds[n].role === role);
+  for (const res of new Set(names.map(n => cmds[n].resource).filter(r => r !== undefined))) {
+    for (const [late, early] of [['consumer', 'setup'], ['teardown', 'consumer']]) for (const x of byRole(res, late)) {
+      const missing = byRole(res, early).find(y => !entryAncestors(cmds, x).has(y));
+      if (missing !== undefined) bad(`config.testCommands: undeclared interdependence on resource ${J(res)}: ${late} ${x} does not declare ${early} ${missing} `
+        + `(directly or through after), so the order between them is undeclared (D8: a ${early} must be declared before, and named by, each ${late})`);
+    }
+  }
+}
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
 // REPAIR is never a DAG node: the engine dispatches repairs from review records only (it would fail 'dispatch refused').
@@ -208,7 +253,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   if (!isObj(c.testCommands ?? {})) bad('config.testCommands must map name -> { cmd, args, format? }');
   for (const [name, e] of Object.entries(c.testCommands ?? {})) {
     if (!SAFE_NAME.test(name) || !isObj(e)) bad(`config.testCommands.${name} must be a { cmd, args, format? } entry with a safe name`);
-    only(e, ['cmd', 'args', 'format', 'evidence'], `testCommands.${name}`);
+    only(e, ['cmd', 'args', 'format', 'evidence', ...(c.earlyChecks !== undefined ? EARLY_ENTRY_FIELDS : [])], `testCommands.${name}`);
     if (typeof e.cmd !== 'string' || !e.cmd || !strings(e.args ?? [])) bad(`config.testCommands.${name} needs cmd and args: [string]`);
     if (e.format !== undefined && !RUNNER_FORMATS.includes(e.format)) bad(`config.testCommands.${name}.format must be ${RUNNER_FORMATS.join('|')}`);
     const v = e.evidence;
@@ -225,6 +270,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   // placement; `{ version: 1 }` states the default explicitly. An engine without S1 refuses the field (unknown config).
   if (c.durableRun !== undefined && c.durableRun !== false && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1))
     bad('config.durableRun must be false (the legacy per-worktree placement) or exactly { version: 1 }');
+  validateEarlyChecks(c, bad);
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
@@ -422,6 +468,7 @@ const GATE_FIELDS = {
   review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file',
     'units_consumed'],
   'ship-ready': ['risk_evidence', 'artifacts', 'exclusions', 'candidate_id'],
+  prove: [], // S5: everything prove runs comes from the bound DAG and the base's early-check declaration
   'unit-review': ['unit', 'review_execution', 'kind', 'approved_plan_digest', 'dag_digest', 'base_commit', 'primary', 'second_opinion',
     'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file'],
 };
@@ -433,7 +480,7 @@ const GATE_FIELDS = {
  */
 export function gateInput(kind, doc) {
   const bad = (m) => { throw coded('bad_input', `gate ${kind}: ${m}`); };
-  if (!Object.hasOwn(GATE_FIELDS, kind ?? '')) bad('kind must be red, review, ship-ready, unit-review or reassess');
+  if (!Object.hasOwn(GATE_FIELDS, kind ?? '')) bad('kind must be red, review, ship-ready, unit-review, reassess or prove');
   if (!isObj(doc)) bad('input must be a JSON object');
   const extra = Object.keys(doc).filter(k => !GATE_FIELDS[kind].includes(k));
   if (extra.length) bad(`unknown input field(s): ${extra.join(', ')} (commands, formats, resources and local proof come from the bound DAG)`);
