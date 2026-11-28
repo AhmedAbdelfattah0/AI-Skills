@@ -20,9 +20,8 @@
  * Trust bound (D1): `state.json` is same-user trusted; load checks the record's SHAPE against the retained line, and owner
  * commands compare that line with the approved narrative. Neither authenticates state.
  */
-import { accessSync, statSync, constants } from 'node:fs';
-import { join, delimiter, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
+import { resolveExecutable } from './engine-prove.mjs'; // S5's resolver (side-effect-free module): one PATH semantics for proof and feasibility
 
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -127,25 +126,28 @@ function visibleIndexes(raw) {
   return new Set([...first].filter(i => fenced.has(i) && a[i] === raw[i] && b[i] === raw[i]));
 }
 
-/** Whether `cmd` resolves to an executable regular file (a path relative to the repository root, an absolute path, or a PATH entry). */
-function executable(cmd, root, env = process.env) {
-  const ok = (p) => { try { if (!statSync(p).isFile()) return false; accessSync(p, constants.X_OK); return true; } catch { return false; } };
-  if (isAbsolute(cmd)) return ok(cmd);
-  if (cmd.includes('/')) return ok(join(root, cmd));
-  return (env.PATH ?? '').split(delimiter).filter(Boolean).some(d => ok(join(d, cmd)));
-}
+/**
+ * Whether `cmd` resolves to an executable regular file, by S5's `resolveExecutable` (a path with `/` relative to the
+ * repository root, else each PATH entry, an empty or relative entry resolved against the root). It resolves nothing on
+ * win32, so a stage run there is refused (fail closed; stage runs are POSIX-only and UNQUALIFIED).
+ */
+const executable = (cmd, root, env = process.env, platform = process.platform) => resolveExecutable(cmd, env, root, platform) !== null;
 
 /**
  * The plan-feasibility checks preflight AND init run for a flagged run (refusals thrown as coded errors):
  * - required_artifact_outside_contract: a repository-required artifact (today the design-parity artifact of a `ui` run)
  *   is not declared in `artifacts` (a node never writes under .specs/, so the first reassess would see it outside the
  *   Design Contract: a sticky REAPPROVAL);
+ * - proof_runner_missing (review R1 MAJOR-1): no config.testCommands entry at all; the local proof at SHIP_READY needs at
+ *   least one command, so such a plan can never ship;
  * - stage_deferral_invalid: a deferred row names a check this run executes (a testCommands entry or a node check);
- * - red_runner_missing: a RED or pair spec that no formatted, non-evidence testCommands entry NAMES verbatim as an argument
- *   (gate red runs `cmd + args` as given and parses formatted output; an evidence entry is refused by gate red). The check is
- *   a NECESSARY condition only and deliberately has no selector parser: a directory, a glob or an option-shaped reach is
- *   refused as UNPROVEN rather than guessed. Naming is not execution: an entry that names the spec but runs something
- *   else (`node x.mjs --test spec`) passes here and fails closed at gate red;
+ * - red_runner_missing: for each RED-bearing node, no ONE eligible runner (formatted, non-evidence, executable) names
+ *   EVERY spec file pinned to that node verbatim as an argument (review R1 MAJOR-2: gate red runs one runner per
+ *   invocation and checks the node's complete pinned spec set against that one output, and a subset cannot be selected;
+ *   control-pair specs count for their node). An evidence entry is refused by gate red. The check is a NECESSARY
+ *   condition only and deliberately has no selector parser: a directory, a glob or an option-shaped reach is refused as
+ *   UNPROVEN rather than guessed. Naming is not execution: an entry that names the specs but runs something else
+ *   (`node x.mjs --test spec`) passes here and fails closed at gate red;
  * - runner_not_executable: a testCommands cmd that does not resolve to an executable file;
  * - surface_inventory_incomplete: the existing security-plan path pre-scan (inventoryGaps, L4: path-only) of planned writes.
  * Returns the full path signal pre-scan so the plan sees each signal its writes will raise.
@@ -156,14 +158,17 @@ export function feasibility({ policy, config, nodes, ticket, repoRoot, riskLabel
   const missing = required.filter(a => !policy.artifacts.includes(a));
   if (missing.length) throw coded('required_artifact_outside_contract', `the repository requires ${missing.join(', ')} (design-parity.md, a ui run) but the stage policy does not declare it in artifacts: the first reassess would see it outside the Design Contract (a sticky REAPPROVAL); declare it and re-approve`);
   const tc = config.testCommands ?? {};
+  if (!Object.keys(tc).length) throw coded('proof_runner_missing', 'config.testCommands is empty: the local proof at SHIP_READY needs at least one command, so this plan can never ship; declare the proof command and re-approve');
   const inRun = new Set([...Object.keys(tc), ...nodes.flatMap(n => n.checks ?? [])]);
   const runHere = policy.deferred.filter(d => inRun.has(policy.rows.find(r => r.id === d.row).check));
   if (runHere.length) throw coded('stage_deferral_invalid', `deferred row(s) ${runHere.map(d => d.row).join(', ')} name a check this run executes (config.testCommands or a node check): a current-stage control is never deferred`);
-  const runners = Object.values(tc).filter(e => e.format && e.evidence === undefined);
-  const specs = [...new Set([...nodes.flatMap(n => (n.redSpecs ?? []).map(s => (typeof s === 'string' ? s : s.file))),
-    ...(config.controlCoverage ?? []).flatMap(c => c.specs.map(s => s.file))])].sort();
-  const unnamed = specs.filter(f => !runners.some(e => (e.args ?? []).includes(f)));
-  if (unnamed.length) throw coded('red_runner_missing', `no formatted, non-evidence config.testCommands entry names RED/proof spec(s) ${unnamed.join(', ')} verbatim as an argument (directory, glob and option reach are unproven): a designed harness is needed before approval`);
+  const eligible = Object.values(tc).filter(e => e.format && e.evidence === undefined && executable(e.cmd, repoRoot, env));
+  const pinned = new Map();
+  const pin = (node, file) => pinned.set(node, new Set([...(pinned.get(node) ?? []), file]));
+  for (const n of nodes) for (const s of n.redSpecs ?? []) pin(n.id, typeof s === 'string' ? s : s.file);
+  for (const c of config.controlCoverage ?? []) for (const s of c.specs) pin(c.node, s.file);
+  const unnamed = [...pinned].filter(([, set]) => !eligible.some(e => [...set].every(f => (e.args ?? []).includes(f))));
+  if (unnamed.length) throw coded('red_runner_missing', `no ONE formatted, non-evidence, executable config.testCommands entry names every RED/proof spec of node(s) ${unnamed.map(([id, set]) => `${id} (${[...set].sort().join(', ')})`).join('; ')} verbatim as arguments (gate red runs one runner per invocation; directory, glob and option reach are unproven): a designed harness is needed before approval`);
   const notExec = Object.entries(tc).filter(([, e]) => !executable(e.cmd, repoRoot, env)).map(([k, e]) => `${k} (${e.cmd})`);
   if (notExec.length) throw coded('runner_not_executable', `config.testCommands ${notExec.join(', ')} does not resolve to an executable file`);
   if (!sp) return { signal_prescan: [] };

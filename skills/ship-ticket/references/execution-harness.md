@@ -313,8 +313,10 @@ refuse an infeasible plan: a row whose stage neither exists nor is deferred (`st
 stage, of the merge stage, of another stage than its row's, of a section 3a pair or of a check this run executes
 (`stage_deferral_invalid`: a current-stage control is never deferred); a deferral with no trigger and no tracker
 (`obligation_trigger_missing`); a design-parity artifact of a `ui` run not declared in `artifacts`
-(`required_artifact_outside_contract`); a RED or pair spec that no formatted, non-evidence test command names verbatim as an
-argument (`red_runner_missing`: a necessary condition only, with no selector parser, so a directory, glob or option reach is
+(`required_artifact_outside_contract`); a run with no test command at all (`proof_runner_missing`: the local proof at
+SHIP_READY needs at least one, with or without RED specs); a RED-bearing node for which no ONE formatted, non-evidence,
+executable test command names every pinned spec (its RED and control-pair specs) verbatim as arguments, since gate red runs
+one runner per invocation (`red_runner_missing`: a necessary condition only, with no selector parser, so a directory, glob or option reach is
 refused as unproven; naming is not execution, and an entry that names the spec but runs something else fails closed at
 `gate red`); a test command that is not executable (`runner_not_executable`); and a file-shaped planned write that raises a
 surface signal no surface lists (`surface_inventory_incomplete`, the existing path pre-scan, any block format). Each deferral

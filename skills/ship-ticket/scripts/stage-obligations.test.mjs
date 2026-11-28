@@ -294,6 +294,34 @@ test('[P6-N6b] 124 RED for a new client file: a RED spec no runner entry NAMES i
   await rejects(pf(secRun(t, { config: { testCommands: { unit: UNIT, lint: { cmd: 'no-such-binary-s4', args: [] } } } })), 'runner_not_executable');
 });
 
+test('[P6-N6d] review R1 MAJOR-1: a stage run with no test command at all is refused at preflight AND init (the local proof needs one), with or without RED specs', { skip: WIN_SKIP }, async (t) => {
+  for (const testCommands of [{}, undefined]) {
+    const bare = stageRun(t, { extra: { testCommands } });
+    assert.equal(initCode(bare.cli('init', { dag: bare.dagFile })), 'proof_runner_missing', `init, testCommands ${J(testCommands)}`);
+  }
+  // a security run whose evidenced assessment selects no pair ([] controlCoverage) and has no RED spec: only PR-3 refuses it
+  const bools = Object.keys(REAL.catalog.fact_vocabulary).filter((k) => REAL.catalog.fact_vocabulary[k].type === 'bool');
+  const sel = SP.selectControls(REAL, { security_policy: 2, surfaces: [], facts: Object.fromEntries(bools.map((b) => [b, false])), evidence: Object.fromEntries(bools.map((b) => [b, 'README.md:none'])) });
+  assert.equal(sel.ok, true, J(sel));
+  const none = fixture(t, { commit: true, narrativeExtra: SP.renderSection3a(sel) + '\n\n' + stageLine(LOCAL_ONLY()) + '\n\n',
+    config: { width: 1, testCommands: {}, securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: [], stagePolicy: { version: 1 } } });
+  await rejects(pf(none), 'proof_runner_missing');
+  assert.equal(initCode(none.cli('init', { dag: none.dagFile })), 'proof_runner_missing');
+});
+
+test('[P6-N6e] review R1 MAJOR-2: ONE eligible runner must name EVERY spec pinned to a RED node (gate red runs one runner per invocation); two runners splitting a node\'s specs are refused at preflight AND init', { skip: WIN_SKIP }, async (t) => {
+  const A = 'apps/admin/a.test.mjs', B = 'apps/admin/b.test.mjs';
+  const node = { id: 'client', deps: [], writes: ['apps/admin'], redSpecs: [{ file: A, name: 'a' }, { file: B, name: 'b' }] };
+  const r = (files) => ({ cmd: process.execPath, args: ['--test', '--test-reporter=tap', ...files], format: 'tap' });
+  const split = () => secRun(t, { nodes: [node], config: { testCommands: { unit: UNIT, redA: r([A]), redB: r([B]) } } });
+  await rejects(pf(split()), 'red_runner_missing');
+  const s2 = split();
+  assert.equal(initCode(s2.cli('init', { dag: s2.dagFile })), 'red_runner_missing');
+  assert.equal((await pf(secRun(t, { nodes: [node], config: { testCommands: { unit: UNIT, redAB: r([A, B]) } } }))).code, 'preflight_ok', 'one runner naming both');
+  // a runner that names the set but is not executable is not eligible (the other entry is refused as not executable too)
+  await rejects(pf(secRun(t, { nodes: [node], config: { testCommands: { unit: UNIT, redAB: { ...r([A, B]), cmd: './missing-runner' } } } })), 'red_runner_missing');
+});
+
 test('[P6-N6c] signal pre-scan of planned writes (the existing classifier): a file-shaped route write with no surface is refused before approval; the pre-scan is printed', { skip: WIN_SKIP }, async (t) => {
   await rejects(pf(secRun(t, { nodes: [{ id: 'route', deps: [], writes: ['src/routes/admin.ts'] }] })), 'surface_inventory_incomplete');
   const r = await pf(secRun(t, { nodes: [{ id: 'dep', deps: [], writes: ['package.json'] }] }));
@@ -399,9 +427,9 @@ test('[P6-R1] the stage record is checked against the retained approved line on 
 });
 
 test('[P6-R1b] every owner command compares the retained line with the approved narrative: a consistently re-forged record (line + record) is refused at the binding', { skip: WIN_SKIP }, async (t) => {
-  const { parseStagePolicy, initialStage } = await SO();
   const fx = stageRun(t);
   okc(fx.cli('init', { dag: fx.dagFile }), 'init');
+  const { parseStagePolicy, initialStage } = await SO(); // after the behavioural step: on an engine without PR-3, init fails first
   fx.editState((st) => { const p = POLICY_236(); p.deferred[0].tracker_ref = 'TRK-forged'; st.stage = initialStage(parseStagePolicy(stageLine(p))); });
   okc(fx.cli('status'), 'a self-consistent forged record loads (state alone cannot tell; same-user bound D1)');
   const g = fx.gate('ship-ready', {});
@@ -444,6 +472,9 @@ test('[P6-R3] a stage run records a distinguishable policy version (core v+24); 
 });
 
 test('[P6-R4] the approved stage line must be visible (not in an HTML comment or code fence, under either lexing order); preflight echoes the authorizing fields', { skip: WIN_SKIP }, async (t) => {
+  // behavioural first: init refuses a stage line hidden in an HTML comment (an engine without PR-3 gives dag_invalid instead)
+  const hidden = fixture(t, { commit: true, narrativeExtra: `<!--\n${stageLine(POLICY_236())}\n-->\n\n`, config: { testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, stagePolicy: { version: 1 } } });
+  assert.equal(initCode(hidden.cli('init', { dag: hidden.dagFile })), 'stage_policy_invalid');
   const { parseStagePolicy } = await SO();
   const L = stageLine(POLICY_236());
   const code = (n) => { try { parseStagePolicy(n, { ticket: 'T-1' }); return 'ok'; } catch (e) { return e.code; } };
