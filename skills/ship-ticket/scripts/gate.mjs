@@ -333,7 +333,7 @@ export async function gateRed(input, deps) {
     attempt.pid = launch.pid; attempt.pgid = launch.pgid; attempt.leader_start = leaderStart(launch.pgid); attempt.status = 'running';
     armAttempt(state, attempt, timeoutMs, deps.deadlineClock); // S1: durable run (S.durable) only
     await deps.commit(snapshot());
-    launch.release();
+    launch.release(attempt); // PR-1b: the runner's owner decides against this attempt's persisted deadline
     run = await launch.done;
   } catch (err) {
     if (!(await finish({ exitCode: null, timedOut: false, error: String(err?.message ?? err) }))) return unquiet();

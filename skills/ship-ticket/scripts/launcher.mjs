@@ -286,6 +286,20 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
 `;
 
 const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
+/**
+ * PR-1b: `monoStamp: true` (durable-run workers launched under the UNQUALIFIED enforcement opt-in only) selects LAUNCHER_STAMPED, whose envelope adds `mono_ns`, the
+ * launcher's uv_hrtime at the envelope write, so a settlement can position the envelope on the attempt's deadline without
+ * the wall clock. Without it the launcher script and argv stay byte-identical (AC5 pins).
+ */
+const LAUNCHER_STAMPED = LAUNCHER.replace('ended_at: new Date().toISOString(),', 'ended_at: new Date().toISOString(), mono_ns: String(process.hrtime.bigint()),');
+if (LAUNCHER_STAMPED === LAUNCHER) throw new Error('launcher: the monotonic stamp anchor is missing');
+/** PR-1b round 1: the sealed runner launcher under the opt-in (`monoStamp`) adds `mono_ns` to its result frame header. */
+const SEALED_LAUNCHER_STAMPED = SEALED_LAUNCHER.replace('report_eof: repEof };', 'report_eof: repEof, mono_ns: String(process.hrtime.bigint()) };')
+  // round 3: a `<envelope>.result` marker is created BEFORE the stamp (round 4, m14: with the launcher's own CREATE flags,
+  // O_EXCL|O_NOFOLLOW, so a planted FIFO or symlink there can neither block nor redirect it), so the sweep sees "result in progress" from the instant
+  // the stamp exists (the frame and the forensic copies follow), never signalling a runner that is publishing its result
+  .replace('    const head = {', "    try { if (spec.envelopeFile) fs.closeSync(fs.openSync(spec.envelopeFile + '.result', CREATE, 0o600)); } catch {}\n    const head = {");
+if (!SEALED_LAUNCHER_STAMPED.includes('mono_ns') || !SEALED_LAUNCHER_STAMPED.includes("'.result'")) throw new Error('launcher: the sealed monotonic stamp anchors are missing');
 const SEALED_KEYS = ['outFile', 'envelopeFile', 'attemptId'];
 const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 
@@ -297,11 +311,11 @@ const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 export function launcherArgs(spec) {
   const sample = spec.sample === false || process.env[SAMPLER_OFF] === '1' ? { sample: false } : {};
   if (spec.sealed === true) {
-    return ['-e', SEALED_LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell,
+    return ['-e', spec.monoStamp === true ? SEALED_LAUNCHER_STAMPED : SEALED_LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell,
       ...Object.fromEntries(SEALED_KEYS.map(k => [k, spec[k]])), ...(spec.report === true ? { report: true } : {}),
       ...(spec.testHooks ? { testHooks: spec.testHooks } : {}), ...sample })];
   }
   const durable = typeof spec.envelopeFile === 'string' ? Object.fromEntries(DURABLE_KEYS.map(k => [k, spec[k]])) : {};
-  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable, ...sample })];
+  return ['-e', durable.envelopeFile && spec.monoStamp === true ? LAUNCHER_STAMPED : LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable, ...sample })];
 }
 

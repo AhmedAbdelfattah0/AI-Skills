@@ -284,7 +284,7 @@ async function runCheck(E, u, name, resources) {
     armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
     await E.commit();
     await io.boundary(E.ctx.hooks, 'unit-check-running', { attempt_id: a.attempt_id, unit: u, check: name });
-    launch.release();
+    launch.release(a); // PR-1b: the runner's owner decides against this attempt's persisted deadline
     result = await launch.done;
   } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
   if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited', { owned: true }))) {

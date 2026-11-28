@@ -4,11 +4,12 @@
  * STATUS: the measurement mechanism below is UNQUALIFIED. Its design and the G0 falsification fixtures (§8 P1-M a-f) are in
  * lib/deadline-g0.test-helper.mjs and the S1 report; not every fixture can run on a host in-session (a real wall-clock
  * step, host sleep and reboot cannot), so G0 has NOT passed and `MEASUREMENT_QUALIFIED` is false. While it is false the
- * engine never derives a signal from a measurement: the real clock is bound for ARMING only (the persisted origin), never
- * for enforcement; the sweep (`run-engine.mjs reconcile --deadlines`) classifies identity and records the attempt as
- * unmeasured, and the launcher's in-process timers stay the only enforcer. `resolveSweepClock` is the gate: the real clock
- * when MEASUREMENT_QUALIFIED, else only a clock created by `testClock()` (in-process tests; the CLI never passes one);
- * any other injected clock is refused (`deadline_clock_refused`).
+ * engine by default never derives a signal from a measurement: the real clock is bound for ARMING only (the persisted
+ * origin), never for enforcement; the lock-free sweep (`run-engine.mjs reconcile --deadlines`) classifies identity, reports,
+ * and writes nothing, and the launcher's in-process timers stay the only enforcer. `resolveSweepClock` is the gate: the real
+ * clock when MEASUREMENT_QUALIFIED or under the explicit operator opt-in ENFORCEMENT_ENV=1 (PR-1b: still UNQUALIFIED), else
+ * only a clock created by `testClock()` (in-process tests; the CLI never passes one); any other injected clock is refused
+ * (`deadline_clock_refused`).
  *
  * Mechanism (as designed, for falsification):
  * - Clock: `process.hrtime.bigint()`, libuv `uv_hrtime`. On darwin with libuv 1.51 (Node 22) it was MEASURED on the S1 host
@@ -32,7 +33,9 @@
  * - Unknown boot id (neither source readable): nothing is measured; the observation is recorded as unmeasured.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync, lstatSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 
 export const DEADLINE_SCHEMA = 'ship-ticket-deadline-v0';
 export const CLOCK_ID = 'uv_hrtime+boot_id';
@@ -62,26 +65,44 @@ export function realClock() {
   return { nowNs: () => process.hrtime.bigint(), bootId: memoBoot.id };
 }
 
+/**
+ * PR-1b: the ONE explicit operator opt-in to the still UNQUALIFIED enforcement: this environment variable set to exactly '1'
+ * in the process that sweeps (it binds the real clock for that sweep) and/or the process that drives (its attempts are armed
+ * with `enforcement: 'unqualified_opt_in'`, so their settlement applies the deadline-precedence rule). Nothing sets it by
+ * default; MEASUREMENT_QUALIFIED stays false. Enabling it is an operator decision to run an UNQUALIFIED mechanism (G0 c, d and
+ * the reboot half of e have not passed on a physical host).
+ */
+export const ENFORCEMENT_ENV = 'SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT';
+export const OPT_IN = 'unqualified_opt_in';
+export const enforcementOptIn = (env = process.env) => env?.[ENFORCEMENT_ENV] === '1';
+
 const TEST_CLOCK = Symbol('ship-ticket unqualified test clock');
 /** A clock for in-process tests of the persisted-deadline logic: `{ bootId, nowNs }` tagged as a test clock. */
 export const testClock = (clock) => Object.assign(clock, { [TEST_CLOCK]: true });
+/** Whether `clock` was made by testClock(). */
+export const isTestClock = (clock) => clock?.[TEST_CLOCK] === true;
 /**
  * S1 (L5): the clock the deadline sweep may enforce with. MEASUREMENT_QUALIFIED -> the real clock (an injected one only when
- * it is a testClock); otherwise a testClock or null (nothing measured, nothing signalled). Throws `deadline_clock_refused`
- * for any other injected clock, so no caller can enable unqualified enforcement by passing one.
+ * it is a testClock); otherwise a testClock, the real clock under the explicit opt-in (`env` ENFORCEMENT_ENV=1, PR-1b), or
+ * null (nothing measured, nothing signalled). Throws `deadline_clock_refused` for any other injected clock, so no caller can
+ * enable unqualified enforcement by passing one.
  */
-export function resolveSweepClock(injected) {
+export function resolveSweepClock(injected, env = process.env) {
   if (injected !== undefined && injected !== null && injected[TEST_CLOCK] !== true)
     throw Object.assign(new Error('deadline_clock_refused: the D5 measurement is unqualified; only a testClock() may be injected'), { code: 'deadline_clock_refused' });
   if (injected) return injected;
-  return MEASUREMENT_QUALIFIED ? realClock() : null;
+  return MEASUREMENT_QUALIFIED || enforcementOptIn(env) ? realClock() : null;
 }
 
-/** The persisted deadline of a just-launched attempt (its group is the attempt's pgid): limit and clock origin. */
-export function armRecord(limitMs, clock = realClock()) {
+/**
+ * The persisted deadline of a just-launched attempt (its group is the attempt's pgid): limit and clock origin. PR-1b: armed
+ * under the opt-in (`env`), it also carries `enforcement: 'unqualified_opt_in'` (absent otherwise: default bytes unchanged).
+ */
+export function armRecord(limitMs, clock = realClock(), env = process.env) {
   const start = clock.nowNs();
   return { schema: DEADLINE_SCHEMA, limit_ms: limitMs, clock: CLOCK_ID, boot_id: clock.bootId, start_ns: String(start),
-    observed_ns: String(start), charged_ms: 0, unmeasured: [], measurement: MEASUREMENT_QUALIFIED ? 'qualified' : 'unqualified' };
+    observed_ns: String(start), charged_ms: 0, unmeasured: [], measurement: MEASUREMENT_QUALIFIED ? 'qualified' : 'unqualified',
+    ...(!MEASUREMENT_QUALIFIED && enforcementOptIn(env) ? { enforcement: OPT_IN } : {}) };
 }
 
 /**
@@ -109,4 +130,172 @@ export function observe(rec, clock) {
   rec.charged_ms = Math.max(rec.charged_ms, elapsed);
   if (now > BigInt(rec.observed_ns)) rec.observed_ns = String(now);
   return { charged_ms: rec.charged_ms, expired: rec.charged_ms >= rec.limit_ms, boot_ended: false, measured: true };
+}
+
+// ---- PR-1b: the sweep's own file, and the deadline precedence a locked settlement derives from persisted facts -----------
+
+/**
+ * The sweep's own append-only file in the run's attempts directory (archived and retired with it). The lock-free sweep writes
+ * ONLY here, never the driver's state: one JSON line per observation (`observe`: the charge it measured) and, BEFORE any
+ * signal, one `signal` receipt: "this attempt's deadline expired while its group was positively verified alive" (attempt id,
+ * pgid, leader_start, deadline origin, charge). Each line is a single append + fsync, so concurrent sweeps never lose each
+ * other's lines; a reader skips a torn or foreign line.
+ */
+export const SWEEP_FILE = 'deadline-sweep.jsonl';
+export const SWEEP_SCHEMA = 'ship-ticket-deadline-sweep-v0';
+
+/** Append record `rec` (one line, fsynced) to the sweep file of the attempts directory `dir`. */
+export function appendSweep(dir, rec) {
+  // no mkdir: a released attempt's directory exists; recreating one retired meanwhile would strand a file in it (m8)
+  const fd = openSync(join(dir, SWEEP_FILE), 'a', 0o600);
+  try { writeSync(fd, JSON.stringify({ schema: SWEEP_SCHEMA, ...rec }) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+/** Every well-formed sweep record of attempt `a` (same attempt id, pgid and deadline origin) in `dir`. */
+export function sweepRecords(dir, a) {
+  let text;
+  try { text = readFileSync(join(dir, SWEEP_FILE), 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of text.split('\n')) {
+    let r;
+    try { r = JSON.parse(line); } catch { continue; }
+    if (r?.schema !== SWEEP_SCHEMA || r.attempt_id !== a?.attempt_id || r.pgid !== a?.pgid) continue;
+    if (a.deadline && r.start_ns !== a.deadline.start_ns) continue;
+    if (a.leader_start !== undefined && r.leader_start !== undefined && r.leader_start !== a.leader_start) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+/** The signal receipt of attempt `a` (the first), or null: the persisted evidence that it overran while verified alive. */
+export const signalReceipt = (dir, a) => sweepRecords(dir, a).find(r => r.type === 'signal') ?? null;
+
+/** The largest charge any sweep recorded for `a` (0 when none): a later observation never reports less. */
+export const recordedCharge = (dir, a) => sweepRecords(dir, a).reduce((m, r) => Math.max(m, Number.isFinite(r.charged_ms) ? r.charged_ms : 0), 0);
+
+/**
+ * The position of envelope `env` on the deadline `rec` (ms of consumed execution at the moment the launcher wrote it), from the
+ * launcher's monotonic stamp `mono_ns` (same uv_hrtime clock as the origin, same boot: a launcher never outlives its boot);
+ * null when the envelope carries no stamp. Never the wall clock (`ended_at`, mtimes): a clock step cannot move it.
+ */
+export function envelopePosition(env, rec) {
+  if (typeof env?.mono_ns !== 'string' || !/^\d+$/.test(env.mono_ns) || typeof rec?.start_ns !== 'string') return null;
+  const d = BigInt(env.mono_ns) - BigInt(rec.start_ns);
+  if (d < 0n) return null; // round 4 (m12): a stamp before the attempt's own origin is invalid (treated as unstamped)
+  return Number(d / 1000000n);
+}
+
+/** The envelope file of attempt `a` in the attempts directory `dir` (a worker records it; a sealed runner's is by id). */
+export const envelopeFileOf = (a, dir) => a.envelope_file ?? join(dir, `${a.attempt_id}.envelope.json`);
+const readEnvelope = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
+/**
+ * Round 4: the publish grace. The sweep stands down (no claim, no signal) for an attempt whose result is being published
+ * (`resultFiles` .tmp/.result) only while its measured charge is below limit + PUBLISH_GRACE_MS; then it claims and kills
+ * regardless. A candidate able to plant a regular file there can therefore delay the sweep's kill by at most this grace (the
+ * owner's own timers kill independently of these files while the driver lives).
+ */
+export const PUBLISH_GRACE_MS = 5000;
+
+/** lstat-only regular-file test: ENOENT or ANY non-regular entry (FIFO, symlink, directory, device) is false; never opened. */
+const regularFile = (p) => { try { return lstatSync(p).isFile(); } catch { return false; } };
+
+/**
+ * Round 4: which result files of attempt `a` exist as REGULAR files (lstat only; nothing is ever opened, so a planted FIFO or
+ * a symlink to a device can neither block nor be trusted): `envelope` (the published result), `publishing` (the worker's
+ * envelope temp file, opened BEFORE its stamp is taken, or the sealed runner's `.result` marker, created BEFORE its stamp).
+ * Ordering: any result stamped on time has one of these present before the sweep's past-limit check, so a file that appears
+ * after a claim belongs to a late stamp; no post-claim check is needed or made.
+ */
+export function resultFiles(a, dir) {
+  const f = envelopeFileOf(a, dir);
+  return { envelope: regularFile(f), publishing: regularFile(f + '.tmp') || regularFile(f + '.result') };
+}
+
+// ---- PR-1b round 2: ONE atomic arbitration per attempt ---------------------------------------------------------------
+
+/**
+ * The per-attempt DECISION file `attempts/<id>.decision`: created EXCLUSIVELY, once, with `expired` (the sweep, before it
+ * signals) or `accepted` (a settler, before it records a result that is not provably on time). Whoever creates it first
+ * decides; it is never rewritten. Published like the N4 recovery marker: a complete fsynced temp file hard-linked into
+ * place (link fails EEXIST when it exists), with an exclusive create (`wx`) fallback where the filesystem has no hard links.
+ * No lock, no wait, no re-read window: an envelope published after an `expired` claim is late by construction, and a
+ * result accepted first stops the sweep from ever signalling.
+ */
+export const decisionFile = (dir, id) => join(dir, `${id}.decision`);
+const DECISIONS = new Set(['expired', 'accepted']);
+const LINKLESS = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS', 'EMLINK']);
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * The decision of attempt `id` in `dir`: 'expired', 'accepted', null (no file) or 'indeterminate': the file exists but holds
+ * no valid decision after a bounded re-read (~100 ms; a `wx`-fallback writer that crashed mid-create, or a delayed writer).
+ * INDETERMINATE is never acceptance and never a timeout: each side refuses to act on it (fail closed, a named judgment).
+ */
+export function readDecision(dir, id) {
+  for (let i = 0; i < 50; i++) {
+    let v;
+    try { v = readFileSync(decisionFile(dir, id), 'utf8').trim(); } catch (e) { if (e.code === 'ENOENT') return null; v = ''; }
+    if (DECISIONS.has(v)) return v;
+    pause(2);
+  }
+  return 'indeterminate';
+}
+
+/** Claim the decision `value` for attempt `id`: { won, decision } (decision: the one that holds, ours or the earlier one). */
+export function claimDecision(dir, id, value) {
+  if (!DECISIONS.has(value)) throw new Error(`claimDecision: ${value}`);
+  const file = decisionFile(dir, id), tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  let won = false;
+  try {
+    const fd = openSync(tmp, 'wx', 0o600);
+    try { writeSync(fd, value); fsyncSync(fd); } finally { closeSync(fd); }
+    try { linkSync(tmp, file); won = true; } catch (e) {
+      if (e.code === 'EEXIST') { /* someone decided first */ } else if (LINKLESS.has(e.code)) {
+        let fd2;
+        try { fd2 = openSync(file, 'wx', 0o600); } catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+        if (fd2 !== undefined) { try { writeSync(fd2, value); fsyncSync(fd2); } finally { closeSync(fd2); } won = true; }
+      } else throw e;
+    }
+  } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
+  return { won, decision: won ? value : readDecision(dir, id) };
+}
+
+/**
+ * THE deadline decision, for every decider (worker settle(), the sealed runner owner gateRunner, the sweep), from persisted
+ * facts: FIRST a valid monotonic stamp of the result (authoritative: at or before the limit 'ontime', else 'late'), else the decision
+ * file for an UNSTAMPED result (who claimed first decides; 'indeterminate' when unreadable), else a legacy receipt's
+ * envelope_present:false. `env` overrides the envelope read (a sealed runner's frame header, or null for
+ * "no result"). Returns 'ontime' | 'late' | 'timed_out' | 'indeterminate' | 'unknown' ('unknown' = the FROZEN rule: the launcher's own timer;
+ * a result is recorded). A settler about to record a result that is not provably on time claims `accepted` first
+ * (acceptClaimNeeded / claimDecision) and decides from what the claim returns, never from a snapshot.
+ */
+export function deadlineVerdict(a, dir, { env } = {}) {
+  const result = env !== undefined ? env : readEnvelope(envelopeFileOf(a, dir));
+  const decision = readDecision(dir, a.attempt_id);
+  const receipt = signalReceipt(dir, a);
+  const rec = a.deadline ?? (receipt ? { start_ns: receipt.start_ns, limit_ms: receipt.limit_ms } : null);
+  // round 3: a VALID monotonic stamp is authoritative for its own result, whatever any decision file or receipt says: a
+  // result can be stamped before the deadline and become visible (rename, frame + copies) just after it
+  const pos = result && rec ? envelopePosition(result, rec) : null;
+  if (pos !== null && (decision !== null || receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified')) return pos > rec.limit_ms ? 'late' : 'ontime'; // round 4: on time when stamp <= deadline (inclusive)
+  if (decision === 'indeterminate') return 'indeterminate';
+  // the decision file arbitrates UNSTAMPED results only
+  if (decision === 'expired') return result ? 'late' : 'timed_out';
+  if (decision === 'accepted') return result ? 'ontime' : receipt ? 'timed_out' : 'unknown';
+  if (!rec) return 'unknown';
+  if (result) return pos === null && receipt?.envelope_present === false ? 'late' : 'unknown';
+  return receipt ? 'timed_out' : 'unknown';
+}
+
+/**
+ * Whether a settler must claim `accepted` before recording result `env` of attempt `a`: the result is not stamped on time,
+ * and a sweep may be arbitrating it: the attempt was armed under the opt-in, or any sweep record or decision exists for it.
+ * Read AFTER the result was seen, so a sweep that had not yet observed the attempt will find the result before it could claim
+ * (it observes, then checks the envelope, then claims). Without the opt-in and without a sweep, nothing is written (frozen).
+ */
+export function acceptClaimNeeded(a, dir, env) {
+  if (!a?.deadline || !env) return false;
+  const pos = envelopePosition(env, a.deadline);
+  if (pos !== null && pos <= a.deadline.limit_ms) return false;
+  return a.deadline.enforcement === OPT_IN || sweepRecords(dir, a).length > 0 || readDecision(dir, a.attempt_id) !== null;
 }

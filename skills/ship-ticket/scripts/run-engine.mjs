@@ -51,7 +51,7 @@ import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2:
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
-import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock } from './lib/deadline.mjs';
+import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock, readDecision, claimDecision, resultFiles, PUBLISH_GRACE_MS } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
 
@@ -835,77 +835,164 @@ export async function archive(ctx) {
 }
 
 /**
- * S1 (P1): the deadline sweep, `reconcile --deadlines true`: an enforcer that is NOT the launcher of the attempts it
- * checks. Invoked in-session (no scheduler is installed). It runs under the run's lock: a driving process holds that lock
- * for its whole command, so while one is alive (even hung) the sweep waits for the lock and that driver's in-process timers
- * are the only bound. Durable runs only (`deadlines_unsupported` otherwise: a legacy attempt has no persisted deadline). It
- * may run from another worktree than the run's (its own may be gone); it then never observes that caller's plan and never
- * records ownership or fingerprints against the caller's tree (an expired attempt is settled by the timeout branch only).
+ * S1 (P1), PR-1b: the deadline sweep, `reconcile --deadlines true`: an enforcer that is NOT the launcher of the attempts it
+ * checks. Invoked in-session or by a scheduler (none is installed). Durable runs only (`deadlines_unsupported` otherwise).
  *
- * The D5 measurement is UNQUALIFIED (lib/deadline.mjs MEASUREMENT_QUALIFIED false), and resolveSweepClock is the gate: the
- * CLI binds no clock, so the sweep measures nothing and signals nothing; each released LIVE attempt with a persisted
- * deadline records `deadline.last_sweep { measured: false, reason: 'measurement_unqualified', identity }`. With a clock
- * (only an in-process testClock() until G0 passes):
- * - expired while the group is 'verified' (engine-quiesce.mjs groupIdentity: leader alive with exactly the recorded
- *   `leader_start`): `deadline.over_while_alive` is recorded, the group is killed, and the attempt is settled through
- *   settle(..., { timedOut, deadlineWins }): `timed_out`, an envelope written after the deadline kept as `late_envelope`.
- * - expired with identity 'unknown' (null or mismatched leader_start, a failed probe, a dead leader with live members): NO
- *   signal; status `unknown`, a quiescence_unknown judgment, every lock kept (capacity stays charged).
- * - group 'gone': a timeout only when an over-limit charge was recorded while it was verified alive (L1); otherwise the
- *   charge cannot tell when it ended, nothing is invented: the attempt is left to `resume` (action none).
- * - another boot id: proven gone by boot identity (no probe, no signal), settled through settle(..., { bootEnded }) in the
- *   owning worktree (an envelope from before the reboot is recorded normally); the unmeasured interval is recorded.
- * `deadline.timed_out` is written only when the attempt really ends `timed_out`.
- * Returns { ticket, run_id, measurement, swept: [{ attempt_id, kind, identity, action, charged_ms?, status }] }.
+ * Phase A, LOCK-FREE (it never waits on the run lock a live or hung `drive` holds for its whole command): it reads the
+ * atomically published state.json (write-to-temp + rename, so the snapshot is consistent) and writes NOTHING to the driver's
+ * state. For each released LIVE attempt with a persisted deadline it computes the charge from the persisted origin
+ * (lib/deadline.mjs observe(), on a copy; never decreasing below any charge an earlier sweep recorded) and appends an
+ * `observe` line to its own file (lib/deadline.mjs SWEEP_FILE). Only an attempt whose deadline expired while its group is
+ * POSITIVELY verified (groupIdentity 'verified', re-checked immediately before the receipt and again before the first
+ * signal) is signalled: a `signal` receipt is appended and fsynced FIRST, then the group is killed (killGroup, monotonic
+ * grace). 'unknown' identity (null or mismatched leader_start, a reused pid, a failed probe, a dead leader with live members):
+ * no signal ever; a group already gone: nothing is invented (L1).
+ *
+ * Phase B, LOCKED settlement (one lock attempt, never a wait): when something was signalled, expired unverified, or ended by a
+ * reboot, the ordinary settlement runs under the run's lock: settle() derives the timeout from the persisted receipt (FU-2:
+ * the deadline wins over an envelope positioned after it), a runner is retired `timed_out`, an expired unverified attempt
+ * becomes `unknown` with a quiescence_unknown judgment and keeps its locks, another boot id settles by boot identity
+ * (FU-1). If a live driver holds the lock, `settlement: 'deferred'` (exit 0): that driver's own settlement reads the same
+ * receipt, so the attempt still ends `timed_out`. From another worktree the settlement never records against the caller's
+ * tree (only the timeout and boot branches; an envelope positioned before the limit is left to the owner).
+ *
+ * Measurement: MEASUREMENT_QUALIFIED is false. Without the explicit opt-in (lib/deadline.mjs ENFORCEMENT_ENV=1 in this
+ * process) the CLI binds no clock: the sweep reads, classifies identity and reports, and writes, signals and locks nothing
+ * (frozen behaviour). With the opt-in it enforces with the real clock, UNQUALIFIED (G0 c, d, e-reboot not passed physically).
+ * Returns { ticket, run_id, measurement, settlement, swept: [{ attempt_id, kind, identity, action, charged_ms?, status }] }.
  */
 export async function reconcileDeadlines(ctx) {
-  const clock = resolveSweepClock(ctx.deadlineClock); // throws deadline_clock_refused for any non-test injected clock
+  const clock = resolveSweepClock(ctx.deadlineClock, ctx.env ?? process.env); // throws deadline_clock_refused for any non-test injected clock
+  const P = locate(ctx);
+  if (P.placement !== 'durable') throw coded('deadlines_unsupported', `${ctx.ticket} is not a durable run: its attempts carry no persisted deadline`);
+  if (!existsSync(P.state)) throw coded('no_state', `no engine state for ${ctx.ticket}; run init`);
+  const S = JSON.parse(readFileSync(P.state, 'utf8')); // lock-free snapshot of the atomically renamed state
+  if (S.run_id !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${S.run_id}, not ${ctx.runId}`);
+  runPolicy(S, ctx.policy); // fail closed, as every locked load does: an unsupported policy_version is never swept
+  if (!S.durable) throw coded('durable_state_missing', `${P.state} has no durable run record: a partial durable run is never swept`);
+  const alive = (pgid) => (ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)))(pgid);
+  const measurement = clock === null ? 'unqualified' : MEASUREMENT_QUALIFIED ? 'qualified' : isTestClock(clock) ? 'test_clock' : 'unqualified_opt_in';
+  const swept = [];
+  for (const a of S.attempts ?? []) {
+    if (!LIVE.includes(a.status) || !a.deadline || a.pid === undefined || a.pid === null) continue;
+    const identity = groupIdentity(a, alive);
+    const row = { attempt_id: a.attempt_id, kind: a.kind, identity };
+    if (clock === null) { swept.push({ ...row, action: 'none', reason: 'measurement_unqualified', status: a.status }); continue; }
+    const rec = structuredClone(a.deadline);
+    rec.charged_ms = Math.max(rec.charged_ms ?? 0, recordedCharge(P.attempts, a));
+    const m = observe(rec, clock);
+    row.charged_ms = m.charged_ms;
+    const base = { attempt_id: a.attempt_id, pgid: a.pgid, leader_start: a.leader_start ?? null, start_ns: a.deadline.start_ns, limit_ms: a.deadline.limit_ms,
+      charged_ms: m.charged_ms, measurement, sweeper_pid: process.pid };
+    appendSweep(P.attempts, { type: 'observe', ...base, identity, measured: m.measured, expired: m.expired, boot_ended: m.boot_ended, unmeasured: rec.unmeasured });
+    if (m.boot_ended) { swept.push({ ...row, identity: 'gone_by_boot', action: 'settle', status: a.status, observation: rec }); continue; }
+    // round 4: a result is on time when its stamp <= the deadline (inclusive), so the sweep acts only STRICTLY past it
+    if (!m.measured || !m.expired || m.charged_ms <= a.deadline.limit_ms) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
+    // m7: the row is classified from the RE-CHECK made right before any receipt, never from the first read
+    const now = groupIdentity(a, alive);
+    const records = sweepRecords(P.attempts, a);
+    const receipted = records.some(r => r.type === 'signal');
+    // m4: the kill of this expiry is complete when the group was seen gone or SIGKILL itself was delivered (a zombie leader of a
+    // stopped driver stays "alive" after SIGKILL: waiting on it again would change nothing)
+    const signalled = records.some(r => r.type === 'signalled' && (r.result === 'gone' || r.signals?.includes('SIGKILL')));
+    const files = resultFiles(a, P.attempts); // round 4: lstat only, regular files only; nothing is opened
+    const inGrace = m.charged_ms < a.deadline.limit_ms + PUBLISH_GRACE_MS;
+    const prior = readDecision(P.attempts, a.attempt_id);
+    const kill = async (reason) => {
+      // ONE atomic arbitration: the expiry is CLAIMED (exclusive create of the decision file) before any signal; a settler that
+      // accepted first wins and nothing is signalled. An earlier sweep's claim (it died before completing its kill) is honoured,
+      // and an indeterminate decision past the grace is killed without a claim (it can never be accepted). No post-claim
+      // result check: by the ordering of resultFiles, anything published after the claim carries a late stamp.
+      await io.boundary(ctx.hooks, 'sweep-before-claim', { attempt_id: a.attempt_id });
+      const claim = prior === 'expired' || prior === 'indeterminate' ? { decision: prior } : claimDecision(P.attempts, a.attempt_id, 'expired');
+      if (claim.decision === 'accepted') return swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
+      if (claim.decision === 'indeterminate' && inGrace) return swept.push({ ...row, identity: 'verified', action: 'none', reason: 'decision_indeterminate', status: a.status, observation: rec });
+      if (!receipted) appendSweep(P.attempts, { type: 'signal', ...base, envelope_present: false });
+      await io.boundary(ctx.hooks, 'sweep-after-claim', { attempt_id: a.attempt_id });
+      const sent = [];
+      const after = await io.killGroup(a.pgid, alive, { verify: () => groupIdentity(a, alive) === 'verified', onSignal: (sig) => sent.push(sig) });
+      // a kill is recorded only for signals really delivered (a refused verification records nothing; later sweeps may retry)
+      if (sent.length) appendSweep(P.attempts, { type: 'signalled', ...base, signals: sent, result: after === false ? 'gone' : after === null ? 'unverified' : 'alive' });
+      return swept.push({ ...row, identity: 'verified', action: sent.length ? 'killed' : 'claimed', ...(reason ? { reason } : {}), status: a.status, observation: rec });
+    };
+    if (now === 'gone') {
+      // L1: a group already gone proves no timeout unless an earlier sweep claimed its expiry (its decision or receipt)
+      swept.push({ ...row, identity: 'gone', action: prior === 'expired' || prior === 'indeterminate' || receipted ? 'settle' : 'none', status: a.status, observation: rec });
+    } else if (now !== 'verified') {
+      swept.push({ ...row, identity: 'unknown', action: 'no_signal', status: a.status, observation: rec });
+    } else if (prior === 'accepted') {
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
+    } else if (prior === 'indeterminate') {
+      // round 4 (C2): never accepted, never left running: past the grace the group is killed and the node fails indeterminate
+      if (inGrace) swept.push({ ...row, identity: 'verified', action: 'none', reason: 'decision_indeterminate', status: a.status, observation: rec });
+      else await kill('decision_indeterminate');
+    } else if (prior !== 'expired' && files.envelope) {
+      // M1: the launcher already published its result (a zombie or exiting leader is still "verified"): no claim, no signal;
+      // the owner's settlement decides it (its stamp, or the frozen rule)
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'envelope_present', status: a.status, observation: rec });
+    } else if (prior !== 'expired' && files.publishing && inGrace) {
+      // round 4: the pre-claim stand-down for a result being published is BOUNDED by PUBLISH_GRACE_MS
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'publishing', status: a.status, observation: rec });
+    } else if (prior === 'expired' && signalled) {
+      // m4: this expiry was claimed and its kill completed: no new claim, receipt or grace wait; settlement only
+      swept.push({ ...row, identity: 'verified', action: 'settle', reason: 'already_signalled', status: a.status, observation: rec });
+    } else await kill(files.publishing ? 'publish_grace_spent' : undefined);
+  }
+  const due = swept.filter(r => ['killed', 'claimed', 'settle', 'no_signal'].includes(r.action));
+  let settlement = 'none';
+  if (due.length) {
+    try { await settleSwept(ctx, due); settlement = 'settled'; } catch (e) { if (e.code !== 'lock_held') throw e; settlement = 'deferred'; }
+  }
+  return { ticket: ctx.ticket, run_id: ctx.runId, measurement, settlement, swept: swept.map(({ observation: _o, ...r }) => r) };
+}
+
+/**
+ * PR-1b phase B: the ordinary settlement of the attempts phase A signalled, found expired unverified, or found ended by a
+ * reboot, under the run's lock (ONE attempt: a held lock throws lock_held, the caller reports `deferred`). Each `row` is
+ * re-checked against the locked state: an attempt the driver settled meanwhile is left as it is (`settled_by: driver`).
+ */
+async function settleSwept(ctx, rows) {
   return locked(ctx, async (E) => {
     if (E.P.placement !== 'durable') throw coded('deadlines_unsupported', `${ctx.ticket} is not a durable run: its attempts carry no persisted deadline`);
     if (E.S.run_id !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${E.S.run_id}, not ${ctx.runId}`);
-    const measurement = clock === null ? 'unqualified' : MEASUREMENT_QUALIFIED ? 'qualified' : 'test_clock';
-    const swept = [];
+    const runner = (a) => RUNNER_KINDS.includes(a.kind);
     const unknown = (a, reason) => {
       a.status = 'unknown';
       if (!E.S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === a.node)) E.S.judgments.push(judgment('quiescence_unknown', a.node, reason));
     };
-    const runner = (a) => RUNNER_KINDS.includes(a.kind);
-    for (const a of E.S.attempts) {
-      if (!LIVE.includes(a.status) || !a.deadline || a.pid === undefined || a.pid === null) continue;
-      const identity = groupIdentity(a, E.alive);
-      const row = { attempt_id: a.attempt_id, kind: a.kind, identity };
-      if (clock === null) {
-        a.deadline.last_sweep = { measured: false, reason: 'measurement_unqualified', identity };
-        swept.push({ ...row, action: 'none', reason: 'measurement_unqualified', status: a.status });
-        continue;
-      }
-      const m = observe(a.deadline, clock);
-      row.charged_ms = m.charged_ms;
-      if (m.boot_ended) {
+    const merge = (a, rec) => { // the measured charge becomes part of the settled record (never lower than what it had)
+      if (!rec) return;
+      a.deadline.charged_ms = Math.max(a.deadline.charged_ms ?? 0, rec.charged_ms);
+      if (BigInt(rec.observed_ns) > BigInt(a.deadline.observed_ns)) a.deadline.observed_ns = rec.observed_ns;
+      for (const u of rec.unmeasured) if (!a.deadline.unmeasured.some(x => x.reason === u.reason)) a.deadline.unmeasured.push(u);
+    };
+    const settledRows = [];
+    for (const row of rows) {
+      const a = E.S.attempts.find(x => x.attempt_id === row.attempt_id);
+      if (!a || !LIVE.includes(a.status) || a.deadline?.start_ns === undefined) { row.status = a?.status ?? 'missing'; row.settled_by = 'driver'; continue; }
+      merge(a, row.observation);
+      if (row.identity === 'gone_by_boot') {
         if (runner(a) || E.foreign) {
           await retire(E.S, a, E.alive, runner(a) ? 'abandoned' : 'crashed', { bootEnded: true });
           const item = a.kind === 'repair' ? E.S.repairs.find(r => r.id === a.node) : E.S.nodes[a.node];
           if (!runner(a) && item) { item.state = 'failed'; item.reason = 'the host rebooted during the attempt (settled from another worktree; ownership not checked)'; }
         } else await settle(E, a, { bootEnded: true });
-        swept.push({ ...row, identity: 'gone_by_boot', action: 'settled', status: a.status });
-        continue;
+      } else if (row.action === 'no_signal') {
+        unknown(a, `deadline of ${a.attempt_id} expired (${row.charged_ms}/${a.deadline.limit_ms} ms) but its process group ${a.pgid ?? a.pid} has no verified identity: not signalled, its capacity stays charged`);
+      } else {
+        const receipt = signalReceipt(E.P.attempts, a);
+        if (!receipt && readDecision(E.P.attempts, a.attempt_id) !== 'expired') { row.settled_by = 'none'; continue; }
+        if (runner(a)) {
+          if (await retire(E.S, a, E.alive, 'timed_out')) a.deadline.timed_out = { charged_ms: receipt?.charged_ms ?? row.charged_ms ?? null, signalled: true };
+          else unknown(a, `cannot prove ${a.kind} runner group ${a.pgid} has exited after its deadline`);
+        } else if (E.foreign && io.readJson(a.envelope_file) && !['late', 'timed_out'].includes(deadlineVerdict(a, E.P.attempts))) {
+          row.settled_by = 'owner'; continue; // a result positioned before the limit is recorded by the owner, never against the caller's tree
+        } else await settle(E, a, {});
       }
-      if (identity === 'verified' && m.measured && m.expired) a.deadline.over_while_alive = { charged_ms: m.charged_ms };
-      const overAlive = a.deadline.over_while_alive !== undefined;
-      if (!m.measured || !m.expired || (identity === 'gone' && !overAlive)) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
-      if (identity === 'unknown') {
-        unknown(a, `deadline of ${a.attempt_id} expired (${m.charged_ms}/${a.deadline.limit_ms} ms) but its process group ${a.pgid ?? a.pid} has no verified identity: not signalled, its capacity stays charged`);
-        swept.push({ ...row, action: 'no_signal', status: a.status });
-        continue;
-      }
-      if (identity === 'verified') await io.killGroup(a.pgid, E.alive);
-      if (runner(a)) { if (!(await retire(E.S, a, E.alive, 'timed_out'))) unknown(a, `cannot prove ${a.kind} runner group ${a.pgid} has exited after its deadline`); }
-      else await settle(E, a, { timedOut: true, deadlineWins: true });
-      if (a.status === 'timed_out') a.deadline.timed_out = { charged_ms: m.charged_ms, signalled: identity === 'verified' };
-      swept.push({ ...row, action: identity === 'verified' ? 'killed' : 'settled', status: a.status });
+      row.status = a.status;
+      settledRows.push(row);
     }
-    if (swept.length) note(E.S, 'DEADLINE_SWEEP', { measurement, swept: swept.map(r => ({ attempt_id: r.attempt_id, action: r.action, status: r.status })) });
-    return { ticket: ctx.ticket, run_id: ctx.runId, measurement, swept };
+    if (settledRows.length) note(E.S, 'DEADLINE_SWEEP', { swept: settledRows.map(r => ({ attempt_id: r.attempt_id, action: r.action, status: r.status })) });
   }, { foreign: true });
 }
 

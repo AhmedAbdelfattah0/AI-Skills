@@ -14,7 +14,7 @@ import { prepareDispatch, childEnv, spawnSpec, workerRunStateAppend } from './ca
 import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
-import { armAttempt } from './lib/deadline.mjs';
+import { armAttempt, signalReceipt, deadlineVerdict, envelopePosition, enforcementOptIn, readDecision, claimDecision, acceptClaimNeeded } from './lib/deadline.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
@@ -209,8 +209,16 @@ const unquiet = (S, a, item) => {
  * quiescence); only then is it recorded. A live group without an envelope -> 'live' (never a
  * duplicate writer); unknown quiescence -> judgment, locks kept; quiescent with no relevant writes
  * (or never released) -> re-queued.
+ *
+ * PR-1b: a worker's deadline outcome, for every settler (the launcher, resume/reconcile, the sweep's locked settlement), is
+ * lib/deadline.mjs deadlineVerdict(), computed from the persisted facts after the liveness wait and the retirement, never the
+ * settling process's own clock or opt-in; a result that is not provably on time is recorded only after this settler wins the
+ * attempt's exclusive decision (`accepted`; an earlier `expired` claim of the sweep makes it late): 'late' keeps the
+ * envelope as `late_envelope` evidence and ends `timed_out` (the timeout wins, FU-2); 'timed_out' (a receipt, no envelope)
+ * ends `timed_out`; 'ontime' records the envelope even when a timer fired after it; 'unknown' is the frozen rule (the
+ * launcher's timer; an envelope is recorded; this includes an unstamped envelope the sweep found already present).
  */
-export async function settle(E, a, { timedOut = false, wait = 0, owned = false, deadlineWins = false, bootEnded = false } = {}) {
+export async function settle(E, a, { timedOut = false, wait = 0, owned = false, bootEnded = false } = {}) {
   const { S } = E;
   const item = itemOf(S, a);
   // S1: `owned` is the launcher's own process (runAttempt); every other settle is recovery and, in a durable run, signals
@@ -222,22 +230,50 @@ export async function settle(E, a, { timedOut = false, wait = 0, owned = false, 
     if (await retire(S, a, E.alive, 'abandoned', how)) item.state = 'pending'; else unquiet(S, a, item);
     return;
   }
-  if (!env) {
+  // a receipt only decides the liveness gate below ('live' is not returned for a receipted attempt); the outcome is decided later
+  if (S.durable && a.deadline && (['expired', 'indeterminate'].includes(readDecision(E.P.attempts, a.attempt_id)) || signalReceipt(E.P.attempts, a))) timedOut = true;
+  // FU-1: after a reboot (bootEnded) the pgid number may name an unrelated live group: no liveness wait, no 'live'.
+  if (!env && !bootEnded) {
     let alive = E.alive(a.pgid);
-    for (const until = Date.now() + wait; alive === true && Date.now() < until && !env; alive = E.alive(a.pgid)) { await io.delay(50); env = io.readJson(a.envelope_file); }
+    // PR-1b: the wait is measured on a monotonic clock (a wall-clock step neither extends nor cuts it)
+    for (const until = performance.now() + wait; alive === true && performance.now() < until && !env; alive = E.alive(a.pgid)) { await io.delay(50); env = io.readJson(a.envelope_file); }
     env ??= io.readJson(a.envelope_file);
     if (!env && alive === true && !timedOut) return 'live';
   }
   if (!(await retire(S, a, E.alive, 'exited', how))) return unquiet(S, a, item);
-  // S1 (Codex 4): a deadline the sweep proved expired while the group was alive wins over an envelope written after it:
-  // the envelope is kept as evidence (late_envelope), never recorded as the attempt's result.
-  if (env && deadlineWins) { a.late_envelope = { file: a.envelope_file, exit_code: env.exit_code ?? null }; env = null; }
+  // the decision: the evidence is read again NOW (after the wait and the retirement), never taken from the snapshot above
+  env = io.readJson(a.envelope_file) ?? env;
+  let verdict = S.durable && a.deadline ? deadlineVerdict(a, E.P.attempts, { env }) : 'unknown';
+  // round 2: a result that is not provably on time is recorded only after this settler WINS the attempt's decision
+  // (`accepted`, exclusive create); an `expired` claim made first by the sweep makes it late. Decided by the claim, not a re-read.
+  if (env && verdict !== 'late' && S.durable && acceptClaimNeeded(a, E.P.attempts, env)) {
+    await io.boundary(E.ctx.hooks, 'settle-before-accept', { attempt_id: a.attempt_id });
+    const claimed = claimDecision(E.P.attempts, a.attempt_id, 'accepted').decision;
+    verdict = claimed === 'expired' ? 'late' : claimed === 'accepted' ? 'ontime' : 'indeterminate';
+    await io.boundary(E.ctx.hooks, 'settle-after-accept', { attempt_id: a.attempt_id, verdict });
+  }
+  if (verdict === 'indeterminate') {
+    // round 3: an unreadable/empty decision file is neither acceptance nor a timeout: fail closed with a named judgment
+    a.undecided_envelope = env ? { file: a.envelope_file, exit_code: env.exit_code ?? null } : null;
+    // m13: its usage is unknown, never zero (the result is not recorded)
+    S.usage.push({ provider: a.provider, run_id: S.run_id, node_id: a.node, phase: a.phase, role: a.role, attempt_id: a.attempt_id, source: 'engine', source_execution_id: a.attempt_id });
+    item.state = 'failed'; item.reason = 'deadline decision indeterminate: the attempt\'s decision file holds no valid decision (never accepted, never timed out blindly)';
+    pushJudgment(S, 'deadline_decision_indeterminate', a.node, item.reason);
+    return;
+  }
+  const receipt = verdict === 'late' || verdict === 'timed_out' ? signalReceipt(E.P.attempts, a) : null;
+  if (verdict === 'late') { a.late_envelope = { file: a.envelope_file, exit_code: env.exit_code ?? null, position_ms: envelopePosition(env, a.deadline) }; env = null; }
+  if (verdict === 'late' || verdict === 'timed_out') timedOut = true;
   if (env) return record(E, a, item, env);
   // Released and ran, but left no envelope (timeout, crash): its usage is unknown, never zero, so the
   // budget is flagged unenforceable instead of admitting a redispatch against an under-count.
   S.usage.push({ provider: a.provider, run_id: S.run_id, node_id: a.node, phase: a.phase, role: a.role, attempt_id: a.attempt_id,
     source: 'engine', source_execution_id: a.attempt_id });
-  if (timedOut) { a.status = 'timed_out'; item.state = 'failed'; item.reason = 'timeout (never retried automatically)'; return; }
+  if (timedOut) {
+    a.status = 'timed_out'; item.state = 'failed'; item.reason = 'timeout (never retried automatically)';
+    if (verdict === 'late' || verdict === 'timed_out') a.deadline.timed_out = { charged_ms: receipt?.charged_ms ?? a.late_envelope?.position_ms ?? null, signalled: receipt !== null };
+    return;
+  }
   const changed = changes(E, a);
   if (changed === null) {
     a.status = 'crashed'; item.state = 'failed'; item.reason = 'worker died without an envelope; ownership check unavailable';
@@ -335,7 +371,7 @@ async function runAttempt(E, job) {
     await E.commit();
     await io.boundary(ctx.hooks, 'after-intent', { attempt_id: id, node: item.id });
     const child = io.startLauncher({ spawnFn: ctx.spawn, spec, cwd: ctx.repoRoot, env, platform,
-      files: { promptFile: plan.promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id } });
+      files: { promptFile: plan.promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id, ...(S.durable && enforcementOptIn() ? { monoStamp: true } : {}) } });
     const exited = new Promise(r => { child.on('exit', r); child.on('error', r); });
     child.stdin.on('error', () => {});
     await io.boundary(ctx.hooks, 'after-spawn', { attempt_id: id });

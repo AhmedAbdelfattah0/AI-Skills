@@ -301,7 +301,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs reconcile --deadlines true --repo <R> --ticket <T> --run-id <ID>   # durable run only: the persisted-deadline sweep (measurement UNQUALIFIED: it measures and signals nothing yet)
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs reconcile --deadlines true --repo <R> --ticket <T> --run-id <ID>   # durable run only: the lock-free persisted-deadline sweep (measurement UNQUALIFIED: without SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT=1 it measures, writes and signals nothing)
 ```
 
 The engine runs the process (dispatch, retries, staleness, resume) and leaves
@@ -329,8 +329,39 @@ group (leader alive with the recorded start time); otherwise the attempt stays `
 (`quiescence_unknown`), including a dead leader whose group still has members, which then needs ending by hand. Start
 times are read time-zone and locale independently. Each launched attempt of a durable run carries a persisted `deadline`
 (limit and clock origin, `scripts/lib/deadline.mjs`); the consumed-execution measurement is UNQUALIFIED (its G0 fixtures
-have not all passed), so `reconcile --deadlines` measures nothing and sends no signal, and the launcher's in-process timers
-remain the only enforcer. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
+have not all passed on a physical host), so by default `reconcile --deadlines` measures nothing, writes nothing and sends no
+signal, and the launcher's in-process timers remain the only enforcer. `reconcile --deadlines` never waits on the run lock:
+it reads the atomically published state without the lock, so a live or hung `drive` holding the lock does not block it. An
+operator may opt in to the UNQUALIFIED enforcement for a process by setting `SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT=1`
+(nothing sets it by default): the sweep then measures with the real clock and signals only an attempt whose deadline expired
+while its group is positively verified (leader alive with the recorded start time, re-checked immediately before the
+signal), after appending a receipt to its own file `attempts/deadline-sweep.jsonl` (never the driver's state). The ordinary
+settlement stays under the run lock: the sweep settles in one lock attempt when no driver holds it (`settlement: settled`),
+else `deferred`, and every settler (the driver, `resume`, the sweep) derives the timeout from the persisted receipt, so the
+attempt ends `timed_out` and is never re-queued. A `drive` started with the variable arms its attempts with
+`enforcement: 'unqualified_opt_in'` and its workers' envelopes carry the launcher's monotonic `mono_ns`; for such an attempt an
+envelope written at or past the deadline is kept as `late_envelope` evidence while the attempt ends `timed_out`.
+The sweep never receipts or signals an attempt whose envelope already exists (its launcher finished; a stopped driver may
+leave it a zombie that still reads as alive); the receipt records the envelope ABSENT at or after the limit, so an unstamped
+envelope that appears later is late. By design, in a mixed setup (the sweep opted in, the driver not), an unstamped envelope
+already present when the sweep looks is settled by the frozen rule (recorded). Each attempt's outcome is arbitrated ONCE by an exclusively
+created decision file `attempts/<id>.decision`: the sweep claims `expired` before it signals, and a settler (the driver,
+`resume`, the sealed-runner owner) claims `accepted` before it records a result that is not provably on time; whoever creates
+it first decides for an UNSTAMPED result, so one published after the expiry claim is late, and one accepted first is never
+signalled. A result carrying a valid monotonic stamp is positioned by its stamp regardless of any decision (at or before the
+limit it is on time, otherwise late; a stamp before the attempt's origin is invalid). The sweep acts only strictly past the
+limit, and stands down before claiming while a REGULAR result file exists (lstat only, never opened; a FIFO, symlink or
+directory is not trusted): the envelope (the result is published), or the worker's envelope temp file / the sealed runner's
+pre-stamp `.result` marker (being published), the latter only within `PUBLISH_GRACE_MS` (5 s) past the limit. A planted
+regular file can therefore delay the sweep's kill by at most that grace; the owner's timers kill independently while the
+driver lives. There is no post-claim check: a file that appears after the claim belongs to a late stamp. An empty or unreadable decision file is INDETERMINATE:
+it is never accepted; past the grace the sweep kills the group, and the settler fails the node with
+`deadline_decision_indeterminate` (usage recorded as unknown). In a mixed
+setup (the sweep opted in, the driver not), an unstamped late success is accepted when the settler claims first: lateness
+is not enforceable for unstamped results. `lib/deadline.mjs` `deadlineVerdict` is the one decision function. Without the opt-in and without any sweep record no decision file is
+written. The kill escalation grace (SIGTERM to SIGKILL) is measured on a monotonic clock, and
+the identity is re-verified immediately before each signal. The supervisor's own journal sweep also binds the real clock
+under the opt-in and labels it `unqualified-optin`. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
 
 **Stage obligations** (PR-3, S4-min: `config.stagePolicy: { version: 1 }`, opt-in, UNQUALIFIED; `scripts/stage-obligations.mjs`).
 The stage policy is ONE visible `stage-policy-v1: <json>` line of the approved narrative (never inside an HTML comment or

@@ -160,6 +160,7 @@ jobs:
           skills/ship-ticket/scripts/engine-identity.test.mjs
           skills/ship-ticket/scripts/run-engine-identity.test.mjs
           skills/ship-ticket/scripts/run-engine-substrate.test.mjs
+          skills/ship-ticket/scripts/run-engine-deadline-enforcement.test.mjs
           skills/ship-ticket/scripts/run-engine-prove.test.mjs
           skills/ship-ticket/scripts/run-engine-prove-r1.test.mjs
           skills/ship-ticket/scripts/run-engine-prove-r2.test.mjs
