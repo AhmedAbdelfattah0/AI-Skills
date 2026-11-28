@@ -122,8 +122,12 @@ test('[seam] policySemantics maps supported versions to frozen capability flags;
   // PR-3: 25-48 are the stage-obligation twins of 1-24 (config.stagePolicy); S5: 101-148 are the early-checks twins of 1-48
   // PR-2: 2xx/3xx are the host-claim twins (+200) of every DURABLE row (13-24, 37-48, 113-124, 137-148), derived last
   const DURABLE = [13, 37, 113, 137].flatMap((b) => Array.from({ length: 12 }, (_, i) => b + i));
+  // PR-4b: 4xx-7xx are the succession twins (+400) of every pinned durable row without repoIdentity (17-20 and their stage,
+  // early-checks and host-claim twins), derived outermost
+  const PINNED_DURABLE = [17, 41, 117, 141, 217, 241, 317, 341].flatMap((b) => Array.from({ length: 4 }, (_, i) => b + i));
   assert.deepEqual(Object.keys(POLICY_SEMANTICS), [...Array.from({ length: 48 }, (_, i) => String(i + 1)), ...Array.from({ length: 48 }, (_, i) => String(i + 101)),
-    ...DURABLE.map((v) => String(v + 200))]);
+    ...DURABLE.map((v) => String(v + 200)), ...PINNED_DURABLE.map((v) => String(v + 400))]);
+  for (const v of PINNED_DURABLE) assert.deepEqual(policySemantics(v + 400), { ...policySemantics(v), succession: true }, `v${v + 400} is v${v} with succession`);
   for (let v = 1; v <= 24; v++) {
     assert.deepEqual(policySemantics(v + 24), { ...policySemantics(v), stageObligations: true }, `v${v + 24} is v${v} with stage obligations`);
     assert.equal(policySemantics(v).stageObligations, undefined, `v${v} has no stage flag`);
@@ -144,7 +148,7 @@ test('[seam] policySemantics maps supported versions to frozen capability flags;
     assert.equal(policySemantics(v).durableRun, undefined, `v${v} has no durable flag`);
   }
   assert.ok(Array.from({ length: 48 }, (_, i) => i + 1).every((v) => Object.isFrozen(policySemantics(v))) && Object.isFrozen(POLICY_SEMANTICS));
-  for (const v of [49, 100, 149, 201, 212, 225, 236, 249, 301, 325, 349, 0, -1, 1.5, '1', null, undefined]) {
+  for (const v of [49, 100, 149, 201, 212, 225, 236, 249, 301, 325, 349, 400, 413, 416, 421, 425, 445, 513, 745, 0, -1, 1.5, '1', null, undefined]) {
     assert.throws(() => policySemantics(v), (e) => e.code === 'policy_version_unsupported', `version ${JSON.stringify(v)}`);
   }
 });
@@ -199,6 +203,7 @@ const ENTRY = [
   ['gate ship-ready', (fx) => fx.gate('ship-ready', {}), 2],
   ['gate unit-review', (fx) => fx.gate('unit-review', { unit: 'u1', approved_plan_digest: 'x', dag_digest: 'x', base_commit: 'x' }), 2],
   ['gate reassess', (fx) => fx.gate('reassess', {}), 2],
+  ['succeed', (fx) => fx.cli('succeed', { plan: 'true' }), 2], // PR-4b
   ['eval report', (fx) => evalReport(fx), 1],
 ];
 

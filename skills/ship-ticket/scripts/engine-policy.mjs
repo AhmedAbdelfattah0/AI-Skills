@@ -99,7 +99,30 @@ export function withHostClaimTwins(table) {
   return Object.freeze({ ...table, ...Object.fromEntries(Object.entries(table).filter(([, f]) => f.durableRun === true)
     .map(([v, f]) => [Number(v) + HOST_CLAIM_OFFSET, Object.freeze({ ...f, hostClaimRequired: true })])) });
 }
-export const POLICY_SEMANTICS = withHostClaimTwins(withEarlyChecksTwins(CORE_SEMANTICS));
+/**
+ * PR-4b (STAB S3-min, P4): the outermost additive offset. Every row v of the merged table that a succession run can record
+ * (successionEligible: pinnedBase and durableRun, without repoIdentity) has a succession twin v + SUCCESSION_OFFSET with the
+ * same flags plus succession (config.succession: in-run successor generations, engine-succession.mjs). DERIVED from the merged
+ * table (core, stage, early checks, host claims), never hand-assigned, so every flag combination composes. Applied LAST, in the
+ * table and in run-engine newRunPolicy. An engine without PR-4b has no version >= 400 and refuses such a run
+ * (policy_version_unsupported) instead of resuming it without its generations. Every run without the flag keeps its version.
+ */
+export const SUCCESSION_OFFSET = 400;
+/** The ONE predicate for which rows get a succession twin and which DAG configs may set config.succession (engine-dag.mjs). */
+export const successionEligible = (f) => f?.pinnedBase === true && f?.durableRun === true && f?.repoIdentity !== true;
+/** `table` plus the succession twin of each eligible row; refuses (policy_table_ceiling) any row at or above the offset or already flagged. */
+export function withSuccessionTwins(table) {
+  const bad = Object.entries(table).filter(([v, f]) => !(Number(v) < SUCCESSION_OFFSET) || f.succession === true).map(([v]) => v);
+  if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: policy version(s) ${bad.join(', ')} reach SUCCESSION_OFFSET ${SUCCESSION_OFFSET} or already carry succession`), { code: 'policy_table_ceiling' });
+  return Object.freeze({ ...table, ...Object.fromEntries(Object.entries(table).filter(([, f]) => successionEligible(f))
+    .map(([v, f]) => [Number(v) + SUCCESSION_OFFSET, Object.freeze({ ...f, succession: true })])) });
+}
+export const POLICY_SEMANTICS = withSuccessionTwins(withHostClaimTwins(withEarlyChecksTwins(CORE_SEMANTICS)));
+/** The succession twin of eligible `version` in `table`, or null when that engine has none (ineligible, or an engine without PR-4b). */
+export const successionVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Number.isInteger(version) && version < SUCCESSION_OFFSET ? version + SUCCESSION_OFFSET : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].succession === true ? w : null;
+};
 /** The host-claim twin of durable `version` in `table`, or null when that engine has none (non-durable, or an engine without PR-2). */
 export const hostClaimVersion = (version, table = POLICY_SEMANTICS) => {
   const w = Number.isInteger(version) && version < HOST_CLAIM_OFFSET ? version + HOST_CLAIM_OFFSET : null;

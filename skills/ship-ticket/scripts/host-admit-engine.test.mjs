@@ -22,7 +22,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POSIX, fixture } from './engine-test-fixture.mjs';
+import { POSIX, fixture, withOrigin } from './engine-test-fixture.mjs';
 import { fakeHost } from './host-claims.test-helper.mjs';
 const WIN_UNSUPPORTED = process.platform === 'win32' ? 'host claims are POSIX-only: on win32 the claimer start identity is unrecordable, so the store holds every claim (held_claimer_identity, fail-closed); Windows is NOT SUPPORTED (execution-harness.md N7)' : false;
 
@@ -452,6 +452,27 @@ test('COMPOSE stage + earlyChecks + hostClaimRequired together record the combin
   const { status } = await import('./run-engine.mjs');
   await assert.rejects(status(fx.ctx({ policy: noHost })), { code: 'policy_version_unsupported' });
   // and the combined run's heavy commands still need a claim
+  const d = fx.cli('drive');
+  assert.equal(d.status, 1); assert.match(d.stderr, /host_claim_required/);
+});
+
+test('COMPOSE stage + earlyChecks + hostClaimRequired + succession (PR-4b): the succession twin is applied LAST (17 -> 41 -> 141 -> 341 -> 741); an engine without it refuses the run', { skip: SKIP }, async (t) => {
+  const POL = await import('./engine-policy.mjs');
+  const STAGE = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'unit + negative spec', stage: 'local' }], deferred: [] };
+  const fx = fixture(t, { narrativeExtra: 'stage-policy-v1: ' + JSON.stringify(STAGE) + '\n\n',
+    config: { width: 1, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, stagePolicy: { version: 1 }, earlyChecks: { version: 1 }, ...REQUIRED,
+      base: 'main', pinnedBase: { remote: 'origin' }, succession: { version: 1 }, redEnvironment: { setup: [] } } });
+  withOrigin(fx).feature();
+  const init = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const v = fx.readState().policy_version;
+  assert.equal(v, POL.successionVersion(POL.hostClaimVersion(POL.earlyChecksVersion(POL.stageVersion(17)))));
+  assert.equal(v, 741);
+  assert.deepEqual({ ...POL.POLICY_SEMANTICS[v] }, { pinnedBase: true, durableRun: true, stageObligations: true, earlyChecks: true, hostClaimRequired: true, succession: true });
+  assert.deepEqual({ ...POL.POLICY_SEMANTICS[POL.successionVersion(17)] }, { pinnedBase: true, durableRun: true, succession: true });
+  const noSuccession = { current: 1, semantics: POL.withHostClaimTwins(POL.withEarlyChecksTwins(POL.PRE_EARLY_CHECKS_SEMANTICS)) };
+  const { status } = await import('./run-engine.mjs');
+  await assert.rejects(status(fx.ctx({ policy: noSuccession })), { code: 'policy_version_unsupported' });
   const d = fx.cli('drive');
   assert.equal(d.status, 1); assert.match(d.stderr, /host_claim_required/);
 });
