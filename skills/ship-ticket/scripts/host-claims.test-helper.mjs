@@ -14,7 +14,7 @@
  *                   `leaderStart` when given, else its real start time), write `out`, exit 0
  */
 import { spawn } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { HOST_SNAPSHOT_SCHEMA, isEntrypoint } from './harness.mjs';
 
@@ -34,6 +34,8 @@ export function fakeHost({ pressure = 2, start = 1_000_000 } = {}) {
 }
 
 const hang = () => setInterval(() => {}, 1 << 30);
+/** The result file appears complete or not at all (the parent polls for it): temp write, then rename. */
+const put = (file, text) => { writeFileSync(file + '.tmp', text); renameSync(file + '.tmp', file); };
 
 async function main() {
   const o = JSON.parse(process.argv[2]);
@@ -44,20 +46,20 @@ async function main() {
   if (o.mode === 'race') {
     while (!existsSync(o.barrier)) await sleep(5);
     const r = await claim(req);
-    writeFileSync(o.out, JSON.stringify(r));
+    put(o.out, JSON.stringify(r));
     if (r.admit) hang();
     return;
   }
   const r = await claim(req);
-  if (!r.admit) { writeFileSync(o.out, JSON.stringify(r)); process.exit(3); }
-  if (o.mode === 'claim-then-hang') { writeFileSync(o.out, JSON.stringify(r)); hang(); return; }
+  if (!r.admit) { put(o.out, JSON.stringify(r)); process.exit(3); }
+  if (o.mode === 'claim-then-hang') { put(o.out, JSON.stringify(r)); hang(); return; }
   if (o.mode === 'bind-then-hang') {
     const { launcherArgs } = await import('./launcher.mjs');
     const { leaderStart } = await import('./engine-quiesce.mjs');
     const args = launcherArgs({ file: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(o.ranFile)}, 'ran')`], shell: false });
     const child = spawn(process.execPath, args, { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
     await bindClaim({ dir: o.dir, opId: o.opId, pgid: child.pid, leaderStart: leaderStart(child.pid) });
-    writeFileSync(o.out, JSON.stringify({ ...r, pgid: child.pid }));
+    put(o.out, JSON.stringify({ ...r, pgid: child.pid }));
     hang(); // the release byte is never written: killing this process closes the launcher's stdin before it
     return;
   }
@@ -67,7 +69,7 @@ async function main() {
     child.unref();
     const start = o.leaderStart ?? leaderStart(child.pid);
     await bindClaim({ dir: o.dir, opId: o.opId, pgid: child.pid, leaderStart: start });
-    writeFileSync(o.out, JSON.stringify({ ...r, pgid: child.pid }));
+    put(o.out, JSON.stringify({ ...r, pgid: child.pid }));
     process.exit(0);
   }
   throw new Error(`unknown mode ${o.mode}`);
