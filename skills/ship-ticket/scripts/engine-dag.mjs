@@ -8,6 +8,7 @@ import { posix, isAbsolute } from 'node:path';
 import { validateNodes, schedule, RISK_EVIDENCE, CONTROL_ID, HOST_POLICY } from './harness.mjs';
 import { exactExclusions } from './gate.mjs';
 import { BEGIN, END } from './run-state.mjs';
+import { successionEligible } from './engine-policy.mjs';
 export { BEGIN, END, runStateEvents } from './run-state.mjs';
 /** Digest in the skill's canonical `sha256:<hex>` form (the form real START events carry). */
 export const sha = (data) => 'sha256:' + createHash('sha256').update(data).digest('hex');
@@ -44,6 +45,7 @@ const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'wid
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
   'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks', 'stagePolicy',
   'hostClaimRequired'];
+CONFIG_FIELDS.push('succession', 'redEnvironment'); // PR-4b (S3-min, P4): opt-in in-run succession and its declared RED environment
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -215,6 +217,38 @@ function validateHostClaimRequired(c, nodeCount, bad) {
   const w = driveWeight(c, nodeCount);
   if (w > HOST_POLICY.heavy_slots_healthy) bad(`width_exceeds_host_capacity: config.hostClaimRequired: the drive weight min(config.width ${c.width}, nodes ${nodeCount}) = ${w} exceeds the host maximum of ${HOST_POLICY.heavy_slots_healthy} heavy slots, so it could never be admitted; lower config.width`);
 }
+/**
+ * PR-4b (S3-min, P4): `config.succession` (exactly { version: 1 }, opt-in, never defaulted, bound by the DAG digest) records
+ * in-run successor generations (engine-succession.mjs) instead of the archive/new-run route. It is allowed exactly where the
+ * policy table has a succession twin (engine-policy.mjs successionEligible, the ONE predicate): config.pinnedBase, the durable
+ * placement (never config.durableRun false), no config.repoIdentity. `config.redEnvironment` ({ setup: [{ cmd, args? }] },
+ * only with succession) declares how the base worktree is prepared before RED renews there (D-RED); an empty setup is an
+ * explicit "nothing to install". A node's `redBaseline` [{ path, harness }] (only with succession, on a RED-bearing node) names a
+ * designed baseline harness for a file the candidate adds.
+ */
+export const successionOn = (S) => S?.config?.succession !== undefined;
+const successionAllowed = (c) => successionEligible({ pinnedBase: c.pinnedBase !== undefined, durableRun: c.durableRun !== false, repoIdentity: c.repoIdentity !== undefined });
+function validateSuccession(nodes, c, bad) {
+  if (c.succession !== undefined) {
+    if (!(isObj(c.succession) && Object.keys(c.succession).join() === 'version' && c.succession.version === 1)) bad('config.succession must be exactly { version: 1 }');
+    if (!successionAllowed(c)) bad('config.succession needs config.pinnedBase, a durable run (not config.durableRun false) and no config.repoIdentity: a supervised run never reads the HEAD fallback');
+  }
+  if (c.redEnvironment !== undefined) {
+    if (c.succession === undefined) bad('config.redEnvironment needs config.succession');
+    const step = (x) => isObj(x) && Object.keys(x).every(k => ['cmd', 'args'].includes(k)) && typeof x.cmd === 'string' && x.cmd.length > 0
+      && (x.args === undefined || strings(x.args));
+    if (!(isObj(c.redEnvironment) && Object.keys(c.redEnvironment).join() === 'setup' && Array.isArray(c.redEnvironment.setup) && c.redEnvironment.setup.every(step)))
+      bad('config.redEnvironment must be exactly { setup: [{ cmd, args? }] } (an empty setup declares that the base worktree needs nothing installed)');
+  }
+  for (const n of nodes) {
+    if (n.redBaseline === undefined) continue;
+    if (c.succession === undefined) bad(`node ${n.id}: redBaseline needs config.succession`);
+    if (!Array.isArray(n.redBaseline) || !n.redBaseline.every(b => isObj(b) && Object.keys(b).sort().join() === 'harness,path' && normalRel(b.path) && normalRel(b.harness) && b.path !== b.harness)
+      || new Set(n.redBaseline.map(b => b.path)).size !== n.redBaseline.length)
+      bad(`node ${n.id}: redBaseline must be [{ path, harness }] of distinct normalized repository paths`);
+    if (!(n.redSpecs ?? []).length) bad(`node ${n.id}: redBaseline belongs to a RED-bearing node (redSpecs)`);
+  }
+}
 function validateEarlyChecks(c, bad) {
   if (c.earlyChecks === undefined) return;
   if (!(isObj(c.earlyChecks) && Object.keys(c.earlyChecks).join() === 'version' && c.earlyChecks.version === 1)) bad('config.earlyChecks must be exactly { version: 1 }');
@@ -243,6 +277,7 @@ function validateEarlyChecks(c, bad) {
 }
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
+NODE_FIELDS.push('redBaseline'); // PR-4b (P4): a designed baseline harness for a file the candidate adds, only with config.succession
 // REPAIR is never a DAG node: the engine dispatches repairs from review records only (it would fail 'dispatch refused').
 const NODE_PHASES = ['BUILD', 'PROVE', 'SHIP'];
 const PINNED_PLAN = /^\.specs\/plans\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
@@ -329,6 +364,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   validateUnits(nodes, c, bad);
   validateSecurity(nodes, c, bad);
   validateHostClaimRequired(c, nodes.length, bad);
+  validateSuccession(nodes, c, bad);
   if (c.auditRecord !== undefined && typeof c.auditRecord !== 'boolean') bad('config.auditRecord must be a boolean');
   if (c.pinnedBase !== undefined && !(isObj(c.pinnedBase) && Object.keys(c.pinnedBase).join() === 'remote' && typeof c.pinnedBase.remote === 'string'
     && SAFE_REMOTE.test(c.pinnedBase.remote))) bad('config.pinnedBase must be exactly { remote: <remote name> }');

@@ -19,6 +19,7 @@ import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeou
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
 import { baseCandidate, baseCommit } from './engine-base-read.mjs';
+import { recordRepaired } from './engine-succession.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -196,6 +197,7 @@ function completeRepair(E, repair, a, paths) {
   note(S, 'REPAIR_RECORDED', { review_execution: repair.review_execution, new_candidate: c.candidate_id });
   S.freeze = { candidate: c.candidate_id, seq: S.seq, ...(S.freeze?.base ? { base: S.freeze.base } : {}) }; // S-28a: the base of record is kept
   S.frozen_candidate = c.candidate_id;
+  recordRepaired(E, c.candidate_id, c.paths ?? []); // PR-4b: a succession run records the repaired candidate's manifest (no-op otherwise)
 }
 
 const unquiet = (S, a, item) => {

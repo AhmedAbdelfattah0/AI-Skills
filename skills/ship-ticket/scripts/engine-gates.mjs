@@ -25,6 +25,8 @@ import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './e
 import { shipStage, retainedStagePolicy } from './stage-obligations.mjs';
 import { earlyChecksOn } from './engine-dag.mjs';
 import { proveGate, proveRefusal, staleProofRefusal, proofInputs, sameInputs, proofExtras, entryTimeout } from './engine-prove.mjs'; // S5
+import { successionOn, parserOf, prepareRedTree, removeRedTree, generationReview, successionShipRefusal, recordReviewed, recordRenewal } from './engine-succession.mjs'; // PR-4b
+import { spawnSpec } from './carrier.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -97,13 +99,35 @@ async function redGate(E, input, candidate) {
   const pin = pinnedSpecs(node, input.specs, addendumSpecs);
   if (pin.code) return gateNo(pin.code, [pin.reason]);
   const baseCommit = baseCommit_(E.ctx.repoRoot, E.S);
-  const v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
-    specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}) }, runnerDeps(E));
+  // PR-4b D-RED (config.succession only): RED runs in a detached worktree of the APPROVED BASE, prepared by the declared
+  // environment, plus the approved test-input overlay; never on the candidate tree, never with the checkout's dependencies.
+  let tree = null;
+  if (successionOn(E.S)) {
+    const prep = await prepareRedTree(E, node, pin.specs, baseCommit, (dir) => baseTreeDeps(E, dir));
+    if (!prep.ok) return prep;
+    tree = prep.tree;
+  }
+  let v;
+  try {
+    v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
+      specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}),
+      ...(tree ? { parser: parserOf(E.S) } : {}) }, tree ? baseTreeDeps(E, tree.dir) : runnerDeps(E));
+  } finally { if (tree) removeRedTree(E.ctx.repoRoot, tree.dir); }
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
-  if (v.ok && slot) Object.assign(E.S.gates.red_addendum[slot.key], { command: runner.name, base_commit: baseCommit });
-  else if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit }); delete E.S.gates.red_invalid?.[node.id]; }
+  // PR-4b: the evidence names the parser that read it and the base worktree it ran in (succession runs only)
+  const where = tree ? { parser: parserOf(E.S), base_tree: { commit: tree.commit, overlay: tree.overlay, environment: tree.environment } } : {};
+  if (v.ok && slot) { Object.assign(E.S.gates.red_addendum[slot.key], { command: runner.name, base_commit: baseCommit, ...where }); recordRenewal(E.S, 'red_addendum', slot.key, v.evidence.attempt_id); }
+  else if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit, ...where }); delete E.S.gates.red_invalid?.[node.id]; recordRenewal(E.S, 'red', node.id, v.evidence.attempt_id); }
   const { state: _s, ...out } = v;
   return out;
+}
+
+/** PR-4b: gateRed deps that run inside the base worktree `dir` (the RED command, and each setup step) and read spec digests there. */
+function baseTreeDeps(E, dir) {
+  const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
+  return io.gateRedDeps({ repoRoot: dir, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn, ...(ctx.killGraceMs ? { killGraceMs: ctx.killGraceMs } : {}),
+    commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
+    verifyBinding: () => E.verifyBinding(), deadlineClock: ctx.deadlineClock });
 }
 
 /** RED-bearing nodes whose barrier a ready pending/stale node, or a pending repair, waits on. */
@@ -139,7 +163,7 @@ export async function refreshRed(E, transient) {
     const c = baseCandidate(E.ctx.repoRoot, E.S, E.S.pinned_exclusions);
     const v = c.candidate_id ? await redGate(E, { node: d, command: inv.command, specs: inv.evidence.specs }, c.candidate_id)
       : gateNo('candidate_unavailable', [c.reason]);
-    const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red')?.attempt_id ?? null;
+    const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red' && a.setup === undefined)?.attempt_id ?? null; // PR-4b: not a RED setup step
     note(E.S, 'RED_RERUN', { node: d, attempt_id, ok: v.ok, code: v.code });
     const rerun = { attempt_id, ok: v.ok, code: v.code, reasons: v.reasons ?? [] };
     if (v.ok) transient.push(judgment('red_invalidated', d, `${invalidCause(d, inv)}; the engine re-ran RED (attempt ${attempt_id}): `
@@ -186,8 +210,11 @@ async function reviewGate(E, input, candidate) {
   if (unproved) return unproved;
   if (unitExecution(S, input.review_execution)) return gateNo('chain_broken', [`review_execution ${input.review_execution} belongs to a unit review chain`]);
   const originals = S.review_chain.filter(r => r.kind === 'original');
+  // PR-4b (C2 (a)): a review-opening succession generation authorizes ONE fresh original naming it (no RETRY is written or synthesized)
+  const byGeneration = generationReview(S, input);
+  if (byGeneration && !byGeneration.ok) return byGeneration;
   let retry = null;
-  if (input.kind === 'original' && originals.length) {
+  if (input.kind === 'original' && originals.length && !byGeneration) {
     const predecessor = originals.at(-1).review_execution;
     const found = retryEvent(E.S, input.review_execution, predecessor);
     retry = found.retry;
@@ -196,7 +223,7 @@ async function reviewGate(E, input, candidate) {
     if (!retry) return gateNo('retry_unauthorized', [`review ${predecessor} already ran; a new original review needs a RUN-STATE RETRY `
       + `{ review_execution: ${input.review_execution}, predecessor: ${predecessor}, authorized_by } (a fresh id alone is refused)`]);
   }
-  if (S.freeze && !retry && candidate !== S.freeze.candidate) {
+  if (S.freeze && !retry && !byGeneration && candidate !== S.freeze.candidate) {
     return gateNo('stale_candidate', [`the work tree is ${candidate}, frozen is ${S.freeze.candidate}: unexpected drift after the freeze`]);
   }
   // S-28a: the repository identity, then the remote base (null unless config.repoIdentity); a refusal writes none of the protected fields
@@ -204,8 +231,8 @@ async function reviewGate(E, input, candidate) {
   if (idAt && !idAt.ok) return idAt;
   const tk = await ensureEvidence(E, input.kind === 'confirmation' ? 'F4' : 'F1');
   if (tk && !tk.ok) return tk; // F1/F4 (S-01b2 P5r): before gateReview, so a refusal writes none of the protected fields
-  const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
-  const { units_consumed: consumedUnits, ...review } = input;
+  const frozen = retry || byGeneration || !S.freeze ? candidate : S.freeze.candidate;
+  const { units_consumed: consumedUnits, generation: _generation, ...review } = input;
   // W3-record: only the bound DAG's config.auditRecord sets recordVerdicts (never an input); absent, the policy is as before.
   const recording = auditOn(S) ? { recordVerdicts: true } : {};
   const v = gateReview({ ...review, state: { ...S, frozen_candidate: frozen, builders: S.builders } },
@@ -238,6 +265,8 @@ async function reviewGate(E, input, candidate) {
     S.review_chain.push({ review_execution: input.review_execution, kind: 'retry', predecessor: retry.predecessor, authorized_by: retry.authorized_by });
     for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
+  if (successionOn(S)) recordReviewed(E, v.record, candidate, baseCandidate(E.ctx.repoRoot, S, S.pinned_exclusions).paths ?? []); // PR-4b
+  if (byGeneration) recordRenewal(S, 'review', null, input.review_execution);
   S.review_chain.push(v.record);
   recordDisputes(S, disputes, input.review_execution); // F12a: run-wide and add-only; disputedRefusal reads it
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0, ...(idAt ? { base: idAt.base } : {}) }; S.frozen_candidate = candidate; }
@@ -295,7 +324,7 @@ export async function runProof(E, { only = null, resolved = null } = {}) { // S5
   // Policy 2 only: the parsed status of every effective pair spec (only pass proves; legacy proof bytes unchanged).
   if (!securityOn(E.S)) return { commands };
   const specs = securityEvents(E.S).pairs.flatMap(p => p.specs);
-  return { commands, spec_results: specResults(specs, runs) };
+  return { commands, spec_results: successionOn(E.S) ? specResults(specs, runs, { parser: parserOf(E.S) }) : specResults(specs, runs) }; // PR-4b: parser 2 on succession runs
 }
 
 export const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.local_proof.commands.length > 0
@@ -339,6 +368,9 @@ async function shipReadyGate(E, input, candidate) {
   // S-28a: identity and the freeze base, before anything is derived or run (null unless config.repoIdentity)
   const idShip = identityStage(E, 'ship-ready');
   if (idShip && !idShip.ok) return idShip;
+  // PR-4b: (candidate, base) evidence: RED on the current base, and a review of the line the latest generation opened (null when off)
+  const succession = successionShipRefusal(E);
+  if (succession) return succession;
   // Derived on every call (and again after the proof): red_accepted from the current RED gates (RED can
   // be invalidated between calls) and exists from the work tree (a git-ignored evidence file can go).
   const rebind = () => {
@@ -422,7 +454,9 @@ async function shipReadyGate(E, input, candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [tk2.code] };
       return tk2;
     }
-    S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}), ...(inputsBefore ? proofExtras(commands, inputsBefore) : {}) };
+    S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}), ...(inputsBefore ? proofExtras(commands, inputsBefore) : {}),
+      ...(successionOn(S) ? { base_commit: S.base.merge_base, generation: S.succession.g } : {}) }; // PR-4b: the proof is bound to the base and generation
+    recordRenewal(S, 'local_proof', null, S.seq);
     if (sec) current.control_pairs = controlPairs(E, sec, candidate);
     // Git-ignored artifacts and evidence are outside the candidate id: re-derive them from what the proof left.
     rebind();
@@ -435,7 +469,10 @@ async function shipReadyGate(E, input, candidate) {
   if (v.ok && S.ship_ready?.candidate_id !== candidate) {
     note(S, 'SHIP_READY', { candidate_id: candidate });
     S.ship_ready = { candidate_id: candidate, seq: S.seq, ...(idShip ? { base: idShip.base } : {}) };
-    S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString(), ...(stage ?? {}) });
+    // PR-4b: each generation's SHIP_READY is its own event (a clean rebase keeps the candidate id); without succession the event is unchanged
+    const gen = successionOn(S) && S.succession.g > 0 ? S.succession.g : null;
+    S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate + (gen ? `-g${gen}` : ''), candidate_id: candidate, timestamp: new Date().toISOString(), ...(stage ?? {}),
+      ...(successionOn(S) ? { generation: S.succession.g } : {}) });
   } else if (v.ok && idShip) S.ship_ready.base = idShip.base; // S-28a: a RETRY re-freeze of the same candidate moves the base of record
   return { judgment_point: false, ...v, ...(stage ? { stage } : {}), ...(earlyChecksOn(S) ? { final_gates: 'required' } : {}), ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
     matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };

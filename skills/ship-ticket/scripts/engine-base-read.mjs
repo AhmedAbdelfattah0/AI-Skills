@@ -26,6 +26,13 @@ import { remoteIdentity, remoteUrl, resolveBaseRef } from './remote-identity.mjs
 import { validIdentityRecord } from './github-identity.mjs';
 
 const no = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: true, reasons, ...extra });
+/**
+ * PR-4b (S3-min): what a moved merge base asks for. The frozen route (archive and start a new run, which pins again) byte for
+ * byte, or, on a config.succession run, an in-run successor generation (run-engine.mjs succeed, engine-succession.mjs).
+ */
+export const movedRoute = (S) => (S?.config?.succession !== undefined
+  ? 'record a successor generation in this run (run-engine.mjs succeed with a { kind: base } record): RED, the proof and the review are renewed on the new base'
+  : 'archive the run and start a new one (it pins the new base)');
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -135,7 +142,7 @@ export function pinnedBaseRefusal(E, record) {
     if (!v.ok) return no(v.code, v.reasons);
     const moved = (observed, reason) => no('base_moved_local', [reason], { expected: B.merge_base, observed });
     if (v.base.merge_base !== B.merge_base) return moved(v.base.merge_base, `merge-base(HEAD, ${B.remote}/${B.ref}) is ${v.base.merge_base}, not the pinned `
-      + `${B.merge_base}: the branch merged or rebased onto another base during the run; archive the run and start a new one (it pins the new base)`);
+      + `${B.merge_base}: the branch merged or rebased onto another base during the run; ${movedRoute(E.S)}`);
     const local = localMergeBase(root, E.S.config);
     if (local !== undefined && local !== B.merge_base) return moved(local, `merge-base(HEAD, local ${E.S.config.base}) is ${local ?? 'none'}, not the pinned `
       + `${B.merge_base}: the local base branch was not moved with the remote (or carries local-only commits); reset it (git fetch ${B.remote}; `

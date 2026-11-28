@@ -45,7 +45,9 @@ import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
 import { repoIdentityOn, earlyChecksOn, hostClaimRequiredOn } from './engine-dag.mjs';
-import { repoIdentityVersion, earlyChecksVersion, stageVersion, hostClaimVersion } from './engine-policy.mjs';
+import { repoIdentityVersion, earlyChecksVersion, stageVersion, hostClaimVersion, successionVersion } from './engine-policy.mjs';
+import { successionOn, isObj } from './engine-dag.mjs';
+import { succeed as succeedGeneration, headOid, transitionPhase } from './engine-succession.mjs'; // PR-4b
 import { stageOn, parseStagePolicy, feasibility, initialStage, stageStateRefusal, stageBindingRefusal } from './stage-obligations.mjs';
 import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2: the CLI entry check only (main), never the library
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
@@ -199,6 +201,10 @@ function open(ctx, prefer) {
       // PR-2: the hostClaimRequired flag of the run's version and config.hostClaimRequired come together or not at all
       if ((E.policy.semantics.hostClaimRequired === true) !== hostClaimRequiredOn(E.S))
         throw coded('host_claims_state_missing', `policy_version ${E.S.policy_version} and config.hostClaimRequired disagree: a partial host-claim run is never resumed`);
+      // PR-4b: the succession flag of the run's version, config.succession and S.succession come together or not at all
+      if (new Set([E.policy.semantics.succession === true, successionOn(E.S), isObj(E.S.succession) && Number.isInteger(E.S.succession.g) && Array.isArray(E.S.succession.generations)]).size !== 1
+        || (Object.hasOwn(E.S, 'succession') && !successionOn(E.S)))
+        throw coded('succession_state_missing', `policy_version ${E.S.policy_version}, config.succession and the succession state disagree: a partial succession run is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -469,9 +475,9 @@ export async function preflight(ctx) {
  */
 function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false, twins = {}) {
   // Merge of PR-2 and PR-3: the two later twin flags are NAMED options, never positional booleans, so they cannot be swapped.
-  if (twins === null || typeof twins !== 'object' || Object.keys(twins).some(k => k !== 'stage' && k !== 'hostClaims'))
-    throw coded('bad_context', 'newRunPolicy: the stage and host-claim twins are named options { stage, hostClaims }');
-  const { stage = false, hostClaims = false } = twins;
+  if (twins === null || typeof twins !== 'object' || Object.keys(twins).some(k => !['stage', 'hostClaims', 'succession'].includes(k)))
+    throw coded('bad_context', 'newRunPolicy: the stage, host-claim and succession twins are named options { stage, hostClaims, succession }');
+  const { stage = false, hostClaims = false, succession = false } = twins;
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
@@ -491,7 +497,10 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false, 
   // PR-2: config.hostClaimRequired records the host-claim twin (engine-policy.mjs HOST_CLAIM_OFFSET), AFTER stage and early checks
   const claimed = hostClaims ? hostClaimVersion(final, engine.semantics) : final;
   if (claimed === null) throw coded('policy_version_unsupported', `no host-claim policy version for policy_version ${final}`);
-  return { policy_version: runPolicy({ policy_version: claimed }, engine).version,
+  // PR-4b: config.succession records the succession twin (engine-policy.mjs SUCCESSION_OFFSET), LAST (the outermost offset)
+  const succeeded = succession ? successionVersion(claimed, engine.semantics) : claimed;
+  if (succeeded === null) throw coded('policy_version_unsupported', `no succession policy version for policy_version ${claimed} (config.succession needs a pinned, durable run without repoIdentity)`);
+  return { policy_version: runPolicy({ policy_version: succeeded }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -581,8 +590,9 @@ async function initLocked(ctx, placement) {
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
       ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag),
-        { stage: stage !== null, hostClaims: hostClaimRequiredOn(dag) }), ...(testKinds ? { test_kinds: testKinds } : {}),
-      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}) };
+        { stage: stage !== null, hostClaims: hostClaimRequiredOn(dag), succession: successionOn(dag) }), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}),
+      ...(successionOn(dag) ? { succession: { g: 0, generations: [], head: headOid(ctx.repoRoot) } } : {}) }; // PR-4b
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
@@ -597,6 +607,27 @@ async function initLocked(ctx, placement) {
   }, { load: false, prefer: placement });
 }
 
+/**
+ * PR-4b (S3-min, P4): record a successor generation in-run (engine-succession.mjs; config.succession runs only). `input` is
+ * the record { kind: base|correction|mode, reason, paths?, rca? }. `mode` 'plan' returns the transition the work tree asks for
+ * (nothing written); 'prepare' records the transition and retains the current HEAD before a rebase. A refusal is a
+ * gate-shaped result (exit 2) and installs no generation. `ctx.beforeSuccessionCommit` (in-process tests only, never the
+ * CLI) runs on the built successor just before its commit.
+ */
+export async function succeed(ctx) {
+  const { input, mode, beforeSuccessionCommit, ...rest } = ctx;
+  try {
+    return await locked(rest, async (E) => {
+      const out = await succeedGeneration(E, input ?? null, { mode: mode ?? 'commit', beforeCommit: beforeSuccessionCommit });
+      if (out.ok && out.code === 'generation_recorded') await deliver(E);
+      return { gate: 'succession', ...out, ...(out.ok && out.code === 'generation_recorded' ? { status: view(E) } : {}) };
+    });
+  } catch (e) {
+    if (!GATE_REFUSALS.has(e.code) && !['base_delta_unavailable', 'not_a_repo'].includes(e.code)) throw e;
+    return { gate: 'succession', ...gateNo(e.code, [e.message], { judgment_point: e.code !== 'lock_held' }) };
+  }
+}
+
 /** Read-only STATUS (freeze drift is reported, nothing is written). */
 export async function status(ctx) {
   const E = open(ctx);
@@ -606,6 +637,7 @@ export async function status(ctx) {
   if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
   if (E.S.base) out.base = baseStatus(E); // S-12: advisory only (never a judgment), and only for a pinned run
   if (E.S.stage) out.stage = { merge_stage: E.S.stage.merge_stage, obligations: E.S.stage.obligations }; // PR-3: open obligations survive every resume
+  if (E.S.succession) out.succession = { g: E.S.succession.g, phase: transitionPhase(E.S), ...(E.S.succession.transition ? { transition: E.S.succession.transition } : {}) }; // PR-4b
   return out;
 }
 
@@ -938,7 +970,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'stage_state_missing', 'stage_state_invalid', 'host_claims_state_missing', 'host_claim_required']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'stage_state_missing', 'stage_state_invalid', 'host_claims_state_missing', 'host_claim_required', 'succession_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -973,9 +1005,14 @@ export function gateAuditFields(kind, input, v) {
 
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
-  const input = gateInput(ctx.gate, ctx.input);
+  // PR-4b: `generation` (gate review) exists only on a config.succession run. Every other run refuses it with the frozen
+  // message, byte for byte: gateInput of the unchanged GATE_FIELDS throws it (the field is unknown there).
+  const generation = ctx.gate === 'review' && isObj(ctx.input) && Object.hasOwn(ctx.input, 'generation');
+  const input = generation ? (() => { const { generation: g, ...rest } = ctx.input; try { return { ...gateInput(ctx.gate, rest), generation: g }; } catch { return gateInput(ctx.gate, ctx.input); } })()
+    : gateInput(ctx.gate, ctx.input);
   try {
     return await locked(ctx, async (E) => {
+      if (generation && !successionOn(E.S)) gateInput(ctx.gate, ctx.input); // throws the frozen unknown-field bad_input
       const unbound = verifyBinding(E);
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
       if (ctx.gate === 'review' && input.units_consumed !== undefined && !unitReviewOn(E.S)) throw coded('bad_input', 'gate review: units_consumed needs a DAG with config.unitReview');
@@ -1029,6 +1066,16 @@ async function main(argv) {
   for (let i = 0; i < rest.length; i += 2) {
     if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i].slice(2))) throw new Error('bad or repeated flag: ' + rest[i]);
     flags[rest[i].slice(2)] = rest[i + 1];
+  }
+  if (cmd === 'succeed') { // PR-4b: its own flags, so every other command's usage is unchanged
+    const extra = Object.keys(flags).filter(k => !['repo', 'ticket', 'run-id', 'input', 'plan', 'prepare'].includes(k));
+    const modes = ['input', 'plan', 'prepare'].filter(k => flags[k] !== undefined);
+    if (extra.length || !flags.repo || !flags.ticket || !flags['run-id'] || modes.length > 1 || (flags.plan !== undefined && flags.plan !== 'true') || (flags.prepare !== undefined && flags.prepare !== 'true'))
+      throw new Error('Usage: run-engine.mjs succeed --repo <dir> --ticket <key> --run-id <id> [--input <record.json> | --plan true | --prepare true]');
+    let input;
+    if (flags.input) try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`succeed input ${flags.input}: ${e.message}`); }
+    return succeed({ repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'], ...(input !== undefined ? { input } : {}),
+      ...(flags.plan ? { mode: 'plan' } : flags.prepare ? { mode: 'prepare' } : {}) });
   }
   if (cmd === 'preflight') { // F12a: plan-time, before approval: no run id, no state, no write
     const extra = Object.keys(flags).filter(k => !['repo', 'ticket', 'dag', 'plan'].includes(k));

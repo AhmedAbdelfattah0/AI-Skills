@@ -154,7 +154,10 @@ export function unitDrift(E) {
     const rec = S.unit_checks[u];
     if (!rec.evidence || rec.stale) return;
     rec.stale = true;
-    if (rec.evidence.state === 'verified') rec.invalidations = (rec.invalidations ?? 0) + 1;
+    // PR-4b: an invalidation a successor generation authorized (engine-succession.mjs rebindUnits) is not churn: no storm count
+    const byGeneration = rec.generation?.storm === true;
+    if (byGeneration) { rec.generation.storm = false; cause = { ...cause, generation: rec.generation.g }; }
+    else if (rec.evidence.state === 'verified') rec.invalidations = (rec.invalidations ?? 0) + 1;
     note(S, 'UNIT_INVALIDATED', { unit: u, evidence: rec.evidence.id, cause, invalidations: rec.invalidations ?? 0 });
     rec.causes = [...(rec.causes ?? []), { seq: S.seq, evidence: rec.evidence.id, cause }].slice(-20);
     if ((rec.invalidations ?? 0) > MAX_UNIT_INVALIDATIONS) pushJudgment(S, 'unit_invalidation_storm', u, `unit ${u} check evidence was invalidated `
@@ -220,6 +223,13 @@ const holds = (S, u, slot) => holdsOf(S).some(h => h.unit === u && h.slots.inclu
 function ceilingReached(E, u) {
   const { S } = E, rec = S.unit_checks[u];
   if (!(rec.rounds > 0)) return false;
+  // PR-4b: the one re-check a successor generation authorized for this unit spends no slot of the run-wide ceiling
+  if (rec.generation?.recheck === true) {
+    rec.generation.recheck = false;
+    delete rec.cleared;
+    note(S, 'UNIT_RECHECK', { unit: u, kind: 'generation', generation: rec.generation.g, used: S.unit_ceiling?.used ?? 0, limit: ceiling(S).limit });
+    return false;
+  }
   const { limit, used } = ceiling(S), held = holds(S, u, 'recheck');
   if (!held && used + heldOf(S) >= limit) {
     pushJudgment(S, 'parent_ceiling', u, `unit ${u} needs a re-check, but this run already spent its ${limit} unit re-check(s) `

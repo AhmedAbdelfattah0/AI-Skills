@@ -363,6 +363,31 @@ a new-route signal raised by a client call such as `this.api.get(` stays unclass
 recording an obligation does not enforce deployment. Section 3b status rules and the SHIP waiver wording in
 [ship.md](ship.md) are unchanged.
 
+**Base and candidate succession** (PR-4b, S3-min: `config.succession: { version: 1 }`, opt-in, UNQUALIFIED;
+`scripts/engine-succession.mjs`). A succession run needs `config.pinnedBase` and the durable placement, and no
+`config.repoIdentity`. A moved merge base or an in-scope change after the review freeze becomes a successor generation in
+the same run (`run-engine.mjs succeed --input <record>`, record `{ kind: base|correction|mode, reason, paths?, rca? }`)
+instead of a new run. `succeed --plan true` names the transition the work tree asks for and writes nothing; `succeed
+--prepare true`, run before a rebase, retains the current HEAD. A correction or mode record must name exactly the changed
+paths, all inside some node's writes (`succession_out_of_scope` otherwise); a mode-only change is kind `mode`; no record
+gives `succession_record_missing`. The predecessor stays authoritative until the successor's one state commit: the
+transition is first recorded `prepared` and the predecessor head is retained under a run-private ref with a create-only
+`git update-ref` (expected old value: none), so a crash leaves the old run, a prepared transition that the next `succeed`
+resumes, or the committed generation (old and new head OIDs and the ref in its `git` record). Every generation that
+follows a review requires ONE fresh full review (primary and second opinion) naming it (`generation: <g>` on `gate
+review`, no RETRY written); there is no assessment and no review retention. It counts in the two-round rule: after two
+unsuccessful rounds a review-opening generation needs `rca { differs, evidence }` (`rca_required`). A base generation
+invalidates every RED and a correction the RED whose spec changed; the proof is always renewed; ship-ready refuses
+`red_renewal_pending` and `review_generation_stale` until both are recorded for the new base. RED on a succession run runs
+in a detached worktree of the approved base (in the OS temp dir, so no checkout `node_modules` is an ancestor; the
+registration lives in the common dir and is removed on every path), with only the approved test inputs overlaid, after the
+declared `config.redEnvironment.setup` steps ran there under the runner protocol inside `gate red` (a heavy command); no
+declared environment gives `red_baseline_missing` (Blocked), and the checkout's dependencies are never linked. The RED
+evidence records `parser: 2` and its `base_tree`. A spec importing a candidate-changed helper outside the RED node's writes
+is refused (`red_helper_dependency`). Completed node outputs, attempts, the review chain, rounds and stage obligations are
+kept; unit evidence is rebound through its own binding, and each unit the generation invalidates gets one re-check and
+unit re-review that spend no `unitRecheckCeiling` slot and count no invalidation storm.
+
 **DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields
 are refused, never dropped.
 
@@ -383,7 +408,8 @@ are refused, never dropped.
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
   node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)),
   `durableRun` (S1: absent or `{ version: 1 }` is the default durable run; `false` is the escape hatch to the legacy
-  per-worktree placement, see Files), `stagePolicy` (PR-3: exactly `{ version: 1 }`, opt-in; see Stage obligations). Billing is
+  per-worktree placement, see Files), `stagePolicy` (PR-3: exactly `{ version: 1 }`, opt-in; see Stage obligations),
+  `succession` and `redEnvironment` (PR-4b: opt-in; see Base and candidate succession). Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
   `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
   `allowApiBilling` exists only for a library caller the user authorized.
@@ -391,7 +417,8 @@ are refused, never dropped.
   `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`,
   `phase` (`BUILD|PROVE|SHIP`; REPAIR is never a node: the engine dispatches repairs from review
   records only, so a REPAIR node is `dag_invalid`), `role` (`builder|repair|evidence`),
-  `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see [units.md](units.md)).
+  `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see [units.md](units.md)); `redBaseline`
+  (PR-4b, succession runs only: `[{ path, harness }]`, a designed baseline harness for a file the candidate adds).
 - `acceptance` and `config.acceptanceIds` are legal on a DAG without units; [units.md](units.md) applies only when a node has `unit`.
 
 `status` prints the compact `ship-ticket-engine-status-v1` view, including
@@ -472,6 +499,10 @@ Limits:
   (`early_checks_state_missing` otherwise). The offset is a ceiling on the core table: building the table refuses
   (`policy_table_ceiling`) a core row at or above 100, so a later doubling that grows the core past 99 rows must move the
   offset first.
+- PR-4b: every row of the merged table that is pinned and durable without repoIdentity (17-20 and their stage, early-checks
+  and host-claim twins) has a succession twin v + 400 (the same flags plus `succession`), derived outermost and recorded
+  last, so it composes with every other flag. An engine without PR-4b refuses such a run (`policy_version_unsupported`).
+  The flag, `config.succession` and `S.succession` must agree at every load (`succession_state_missing` otherwise).
 - The resolved semantics (`E.policy`) are consumed by the test-kind activation (`testKinds`) and by
   the check that a run's §3a block format matches `securityObligations`. Tests cover recording,
   preservation and enforcement, including commands that refuse when the recorded version's
@@ -511,7 +542,8 @@ written), and each is a judgment point:
 - `base_moved_remote`: the remote base no longer descends from the pinned commit (a force-push).
 - `base_moved_local` with `expected` (the pinned merge base) and `observed`: either the local base
   branch disagrees (reset it, or the owner decides, then retry), or the branch merged or rebased
-  onto another base mid-run. In that case, archive the run and start a new one, which pins again.
+  onto another base mid-run. In that case, archive the run and start a new one, which pins again
+  (on a `config.succession` run: record a successor generation instead, see Base and candidate succession).
   The pin is never moved silently.
 
 A remote that advanced with commits the branch lacks has no effect. `status` shows `base_advanced`

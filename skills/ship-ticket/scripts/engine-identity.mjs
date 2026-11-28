@@ -29,7 +29,7 @@
  * ship_ready.base stays the freeze sha); `status` is an advisory read of the configured URL (OD-10), not the snapshot.
  */
 import { repoIdentityOn } from './engine-dag.mjs';
-import { underHardenedGit, wellFormedBase, localMergeBase } from './engine-base-read.mjs';
+import { underHardenedGit, wellFormedBase, localMergeBase, movedRoute } from './engine-base-read.mjs';
 import { verifyBase, authGit } from './engine-base.mjs';
 import { identityRecord, validIdentityRecord } from './github-identity.mjs';
 
@@ -139,7 +139,7 @@ export function verifyFrozenBase(E, recorded, record) {
     if (!v.ok) return no(v.code, v.reasons);
     const moved = (observed, reason) => no('base_moved_local', [reason], { expected: B.merge_base, observed });
     if (v.base.merge_base !== B.merge_base) return moved(v.base.merge_base, `merge-base(HEAD, ${B.remote}/${B.ref}) is ${v.base.merge_base}, not the pinned ${B.merge_base}: `
-      + 'the branch merged or rebased onto another base during the run; archive the run and start a new one (it pins the new base)');
+      + `the branch merged or rebased onto another base during the run; ${movedRoute(S)}`);
     const local = localMergeBase(root, S.config);
     if (local !== undefined && local !== B.merge_base) return moved(local, `merge-base(HEAD, local ${S.config.base}) is ${local ?? 'none'}, not the pinned ${B.merge_base}: `
       + `reset the local base branch (git fetch ${B.remote}; git branch -f ${S.config.base} ${B.remote}/${B.ref}) or the owner decides, then retry`);
