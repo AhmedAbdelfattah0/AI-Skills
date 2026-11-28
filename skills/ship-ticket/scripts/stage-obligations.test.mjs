@@ -322,6 +322,30 @@ test('[P6-N6e] review R1 MAJOR-2: ONE eligible runner must name EVERY spec pinne
   await rejects(pf(secRun(t, { nodes: [node], config: { testCommands: { unit: UNIT, redAB: { ...r([A, B]), cmd: './missing-runner' } } } })), 'red_runner_missing');
 });
 
+test('[P6-N6f] review R2 (delta MAJOR): feasibility follows the engine\'s own RED contract (pinnedSpecs): plain-path pins may be split across runners; named pins may not; mixed pins mirror pinnedSpecs', { skip: WIN_SKIP }, async (t) => {
+  const A = 'apps/admin/a.test.mjs', B = 'apps/admin/b.test.mjs';
+  const r = (files) => ({ cmd: process.execPath, args: ['--test', '--test-reporter=tap', ...files], format: 'tap' });
+  const run = (redSpecs, runners) => secRun(t, { nodes: [{ id: 'client', deps: [], writes: ['apps/admin'], redSpecs }], config: { testCommands: { unit: UNIT, ...runners } } });
+  // plain paths only bound which files an invocation may name: two runners, one file each, is a legal plan (preflight AND init)
+  const plainSplit = () => run([A, B], { redA: r([A]), redB: r([B]) });
+  assert.equal((await pf(plainSplit())).code, 'preflight_ok', 'plain pair split across two runners');
+  const ps = plainSplit();
+  okc(ps.cli('init', { dag: ps.dagFile }), 'init: plain pair split across two runners');
+  assert.equal((await pf(run([A, B], { redAB: r([A, B]) }))).code, 'preflight_ok', 'plain pair, one runner naming both');
+  // a plain pin no eligible runner names is still unreachable
+  await rejects(pf(run([A, B], { redA: r([A]) })), 'red_runner_missing');
+  // named pins: one invocation must carry exactly the named set, so a split is refused (also at init)
+  const namedSplit = () => run([{ file: A, name: 'a' }, { file: B, name: 'b' }], { redA: r([A]), redB: r([B]) });
+  await rejects(pf(namedSplit()), 'red_runner_missing');
+  const ns = namedSplit();
+  assert.equal(initCode(ns.cli('init', { dag: ns.dagFile })), 'red_runner_missing');
+  // mixed: pinnedSpecs uses the named entries and ignores the plain ones, and so does feasibility
+  assert.equal((await pf(run([{ file: A, name: 'a' }, B], { redA: r([A]) }))).code, 'preflight_ok', 'mixed: the named set is covered');
+  await rejects(pf(run([{ file: A, name: 'a' }, B], { redB: r([B]) })), 'red_runner_missing');
+  // an evidence or unformatted entry is never a RED runner, even for plain pins
+  await rejects(pf(run([A], { rawA: { cmd: process.execPath, args: ['--test', A] } })), 'red_runner_missing');
+});
+
 test('[P6-N6c] signal pre-scan of planned writes (the existing classifier): a file-shaped route write with no surface is refused before approval; the pre-scan is printed', { skip: WIN_SKIP }, async (t) => {
   await rejects(pf(secRun(t, { nodes: [{ id: 'route', deps: [], writes: ['src/routes/admin.ts'] }] })), 'surface_inventory_incomplete');
   const r = await pf(secRun(t, { nodes: [{ id: 'dep', deps: [], writes: ['package.json'] }] }));

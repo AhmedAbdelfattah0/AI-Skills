@@ -22,6 +22,7 @@
  */
 import { createHash } from 'node:crypto';
 import { resolveExecutable } from './engine-prove.mjs'; // S5's resolver (side-effect-free module): one PATH semantics for proof and feasibility
+import { pinnedSpecs, redRunner } from './engine-dag.mjs'; // the engine's OWN RED contract (gate red): feasibility never re-implements it
 
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -141,12 +142,15 @@ const executable = (cmd, root, env = process.env, platform = process.platform) =
  * - proof_runner_missing (review R1 MAJOR-1): no config.testCommands entry at all; the local proof at SHIP_READY needs at
  *   least one command, so such a plan can never ship;
  * - stage_deferral_invalid: a deferred row names a check this run executes (a testCommands entry or a node check);
- * - red_runner_missing: for each RED-bearing node, no ONE eligible runner (formatted, non-evidence, executable) names
- *   EVERY spec file pinned to that node verbatim as an argument (review R1 MAJOR-2: gate red runs one runner per
- *   invocation and checks the node's complete pinned spec set against that one output, and a subset cannot be selected;
- *   control-pair specs count for their node). An evidence entry is refused by gate red. The check is a NECESSARY
- *   condition only and deliberately has no selector parser: a directory, a glob or an option-shaped reach is refused as
- *   UNPROVEN rather than guessed. Naming is not execution: an entry that names the specs but runs something else
+ * - red_runner_missing: a RED-bearing node for which no legal `gate red` invocation exists, judged by the engine's own
+ *   contract (review R2: derived, not re-implemented): `redRunner` picks the runner (formatted only; an evidence entry is
+ *   refused by gate red), and `pinnedSpecs` decides which spec set an invocation must carry. Named `{file,name}` pins: ONE
+ *   invocation carries exactly the named set, so one eligible runner must name all of them (plain pins beside named ones
+ *   are ignored, as pinnedSpecs ignores them). Plain-path pins only bound which files an invocation may name, so each
+ *   plain file needs SOME eligible runner whose single-file invocation pinnedSpecs accepts. Control-pair specs are named
+ *   pins of their node (validateEngineDag enforces it). Eligible = what redRunner returns, non-evidence, executable.
+ *   "Names" is verbatim argument equality: a NECESSARY condition only, with no selector parser (a directory, glob or
+ *   option reach is refused as UNPROVEN). Naming is not execution: an entry that names the specs but runs something else
  *   (`node x.mjs --test spec`) passes here and fails closed at gate red;
  * - runner_not_executable: a testCommands cmd that does not resolve to an executable file;
  * - surface_inventory_incomplete: the existing security-plan path pre-scan (inventoryGaps, L4: path-only) of planned writes.
@@ -162,13 +166,17 @@ export function feasibility({ policy, config, nodes, ticket, repoRoot, riskLabel
   const inRun = new Set([...Object.keys(tc), ...nodes.flatMap(n => n.checks ?? [])]);
   const runHere = policy.deferred.filter(d => inRun.has(policy.rows.find(r => r.id === d.row).check));
   if (runHere.length) throw coded('stage_deferral_invalid', `deferred row(s) ${runHere.map(d => d.row).join(', ')} name a check this run executes (config.testCommands or a node check): a current-stage control is never deferred`);
-  const eligible = Object.values(tc).filter(e => e.format && e.evidence === undefined && executable(e.cmd, repoRoot, env));
-  const pinned = new Map();
-  const pin = (node, file) => pinned.set(node, new Set([...(pinned.get(node) ?? []), file]));
-  for (const n of nodes) for (const s of n.redSpecs ?? []) pin(n.id, typeof s === 'string' ? s : s.file);
-  for (const c of config.controlCoverage ?? []) for (const s of c.specs) pin(c.node, s.file);
-  const unnamed = [...pinned].filter(([, set]) => !eligible.some(e => [...set].every(f => (e.args ?? []).includes(f))));
-  if (unnamed.length) throw coded('red_runner_missing', `no ONE formatted, non-evidence, executable config.testCommands entry names every RED/proof spec of node(s) ${unnamed.map(([id, set]) => `${id} (${[...set].sort().join(', ')})`).join('; ')} verbatim as arguments (gate red runs one runner per invocation; directory, glob and option reach are unproven): a designed harness is needed before approval`);
+  const eligible = Object.keys(tc).map(k => redRunner(config, k)).filter(e => e && e.evidence === undefined && executable(e.cmd, repoRoot, env));
+  const names = (e, specs) => specs.every(s => (e.args ?? []).includes(s.file));
+  const unreachable = [];
+  for (const n of nodes.filter(x => (x.redSpecs ?? []).length)) {
+    const named = pinnedSpecs(n); // no input specs: the named set when the node has one, else a refusal (plain pins only)
+    const need = named.specs ? [named.specs] // one invocation, exactly this set
+      : (n.redSpecs ?? []).filter(x => typeof x === 'string').map(file => [{ file, name: file }]).filter(sp => pinnedSpecs(n, sp).specs); // one legal invocation per plain file
+    const missing = need.filter(sp => !eligible.some(e => names(e, sp)));
+    if (missing.length || !need.length) unreachable.push(`${n.id} (${(missing.length ? missing : [[]]).map(sp => sp.map(x => x.file).join(' + ') || 'no legal invocation').join('; ')})`);
+  }
+  if (unreachable.length) throw coded('red_runner_missing', `no legal gate red invocation for node(s) ${unreachable.join('; ')}: no formatted, non-evidence, executable config.testCommands entry names the spec set the engine's RED contract requires (pinnedSpecs) verbatim as arguments (directory, glob and option reach are unproven): a designed harness is needed before approval`);
   const notExec = Object.entries(tc).filter(([, e]) => !executable(e.cmd, repoRoot, env)).map(([k, e]) => `${k} (${e.cmd})`);
   if (notExec.length) throw coded('runner_not_executable', `config.testCommands ${notExec.join(', ')} does not resolve to an executable file`);
   if (!sp) return { signal_prescan: [] };
