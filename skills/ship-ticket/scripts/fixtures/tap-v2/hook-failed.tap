@@ -1,0 +1,48 @@
+TAP version 13
+# Subtest: suite
+    # Subtest: spec in hooked suite
+    not ok 1 - spec in hooked suite
+      ---
+      duration_ms: 0
+      type: 'test'
+      location: '/repo/spec/b.test.mjs:3:85'
+      failureType: 'cancelledByParent'
+      error: 'test did not finish before its parent and was cancelled'
+      code: 'ERR_TEST_FAILURE'
+      ...
+    1..1
+not ok 1 - suite
+  ---
+  duration_ms: 1.01325
+  type: 'suite'
+  location: '/repo/spec/b.test.mjs:3:1'
+  failureType: 'hookFailed'
+  error: |-
+    setup assertion
+    
+    1 !== 2
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    SuiteContext.<anonymous> (file:///repo/spec/b.test.mjs:3:49)
+    TestHook.runInAsyncScope (node:async_hooks:214:14)
+    TestHook.run (node:internal/test_runner/test:1047:25)
+    TestHook.run (node:internal/test_runner/test:1354:18)
+    TestHook.run (node:internal/util:580:20)
+    Suite.runHook (node:internal/test_runner/test:965:20)
+    Suite.run (node:internal/test_runner/test:1436:18)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+1..1
+# tests 1
+# suites 1
+# pass 0
+# fail 0
+# cancelled 1
+# skipped 0
+# todo 0
+# duration_ms 34.140917
