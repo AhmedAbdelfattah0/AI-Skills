@@ -269,7 +269,8 @@ export async function gateRed(input, deps) {
   if (held.length) return refuse(state, 'resource_locked', held.map((r) => `${r} is held by ${state.locks[r]}`));
 
   // Durable attempt protocol: intent -> spawn -> pid/pgid -> release -> envelope.
-  const attempt = { attempt_id: deps.newAttemptId(), kind: 'gate-red', node, status: 'intent', resources: [...resources] };
+  const attempt = { attempt_id: deps.newAttemptId(), kind: 'gate-red', node, status: 'intent', resources: [...resources],
+    ...(input.hostClaim ? { host_claim: { ...input.hostClaim } } : {}) }; // S2: the engine's admitted claim, persisted with the intent
   state.attempts.push(attempt);
   for (const r of resources) state.locks[r] = attempt.attempt_id;
   await deps.commit(snapshot());

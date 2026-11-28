@@ -315,6 +315,6 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
         ...(report === true ? { report: frame.report, report_eof: true, ...(h.report_truncated ? { report_truncated: true, report_bytes: h.report_bytes } : {}) } : {}) };
     })();
     done.catch(() => {});
-    return { pid: child.pid, pgid, release: () => child.stdin.end(RELEASE), done };
+    return { pid: child.pid, pgid, release: () => child.stdin.end(RELEASE), cancel: () => child.stdin.end(), done }; // cancel: no byte, nothing runs (S2)
   };
 }

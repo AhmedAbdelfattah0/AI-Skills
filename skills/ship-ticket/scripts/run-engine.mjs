@@ -44,6 +44,7 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
+import { claimsOn, waitingOf } from './engine-claims.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
@@ -70,6 +71,7 @@ const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
   'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'policy', 'catalogFile', 'now']);
 CTX_KEYS.add('deadlineClock'); // S1: the in-process test clock of the deadline sweep (never set by the CLI)
+CTX_KEYS.add('hostClaims'); // S2: test seam of the host claim store { dir, snapshot, now, docker, loadavg } (the CLI uses the default store)
 const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check', 'evidence'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -296,6 +298,7 @@ function view(E, transient = []) {
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
       ...(budget.phase_unknown.records ? { phase_unknown: budget.phase_unknown } : {}) },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
+    ...(claimsOn(S) ? { waiting: waitingOf(E) } : {}), // S2 (Codex-3): capacity holds are waiting diagnostics, never judgments
     telemetry_degraded: structuredClone(S.telemetry_degraded),
     ...(units ? { units: withReviews(S, unitProjection(S, E.ctx.repoRoot, cache), units), unit_ceiling: ceiling(S) } : {}),
     ...(unitReviewOn(S) ? { unit_reviews_pending: pendingReviews(S, units) } : {}),
@@ -592,6 +595,8 @@ export async function drive(ctx) {
         for (const j of drift(E, { mutate: false })) transient.push(j);
       }
     }
+    // S2: the one host-scoped escalation (an unknown claim holder) is a judgment; a plain capacity hold is `waiting` only.
+    if (E.hostBlocked) transient.push(judgment('host_blocked', null, `unknown host claim holder(s) ${E.hostBlocked.op_ids.join(', ')} stay charged; resolve them (prove the group gone or remove the record); light work continues`));
     await E.commit();
     const out = view(E, transient);
     const finished = Object.values(S.nodes).every(n => ['done', 'cancelled'].includes(n.state))
@@ -924,9 +929,11 @@ export async function gate(ctx) {
       if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
       const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];
-      const v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })
+      let v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })
         : c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });
+      // S2 (m1): on the gate path too, a hold beside an unknown holder escalates as the host-scoped Blocked.
+      if (v.code === 'host_held' && E.hostBlocked) v = gateNo('host_blocked', [`unknown host claim holder(s) ${E.hostBlocked.op_ids.join(', ')} stay charged; resolve them (prove the group gone or remove the record)`, ...(v.reasons ?? [])], { judgment_point: true });
       const S = E.S;
       // W3-record: appended after the existing keys only with config.auditRecord (the binding-drift return above records nothing).
       const audit = auditOn(S) ? () => gateAuditFields(ctx.gate, input, v) : () => ({});

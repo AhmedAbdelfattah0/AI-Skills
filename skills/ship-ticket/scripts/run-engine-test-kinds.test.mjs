@@ -92,8 +92,8 @@ function put(repo, rel, text) { mkdirSync(dirname(join(repo, rel)), { recursive:
  * then rewritten with its risk-floor line on that base (the plan is a pinned exclusion, outside every identity).
  */
 function tkFx(t, { triggers = 'input-path', testCommands = { unit: ENTRY }, testKinds = { policy: 1 }, securityPolicy = true, nodes, behaviour,
-  baseFiles = {}, floor = true, extra = '' } = {}) {
-  const config = { width: 1, testCommands, ...(securityPolicy ? { securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: [] } : {}), ...(testKinds ? { testKinds } : {}) };
+  baseFiles = {}, floor = true, extra = '', extraConfig = {} } = {}) {
+  const config = { width: 1, testCommands, ...(securityPolicy ? { securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: [] } : {}), ...(testKinds ? { testKinds } : {}), ...extraConfig };
   const narrativeExtra = `${SP.renderSection3a(EMPTY_SEL)}\n\n${triggers ? `test-triggers: ${triggers}\n` : ''}${floor ? 'FLOOR_LINE\n' : ''}${extra}`;
   const fx = fixture(t, { commit: true, config, nodes: nodes ?? [{ id: 'a', writes: ['test', 'src'] }], behaviour: behaviour ?? { a: { write: { 'test/a.test.ts': NEG } } }, narrativeExtra });
   put(fx.repo, 'node_modules/.bin/vitest', FAKE_VITEST); chmodSync(join(fx.repo, 'node_modules/.bin/vitest'), 0o755);
@@ -526,4 +526,28 @@ test('[V] status never runs the runner and reports not_computed while an attempt
   assert.equal(fx.runnerRuns().length, 0);
   fx.editState((s) => { s.attempts.push({ attempt_id: 'att-x', kind: 'evidence', node: 'unit', status: 'running', pgid: 999999 }); });
   assert.equal((await statusCmd(fx.ctx())).test_kinds.state, 'not_computed');
+});
+
+test('[S2 evidence] hostClaims: a held evidence run creates no attempt and no record; once admitted the evidence attempt persists and releases its claim', { skip: NOT_DARWIN }, async (t) => {
+  const store = mkdtempSync(join(tmpdir(), 'tk-claims-'));
+  t.after(() => rmSync(store, { recursive: true, force: true }));
+  const shared = join(store, 'shared-node_modules'); mkdirSync(shared);
+  const fx = tkFx(t, { behaviour: { a: { write: { 'test/a.test.ts': PLAIN } } },
+    testCommands: { unit: { ...ENTRY, hostClass: 'light', hostResources: [{ resource: shared, mode: 'R' }] } },
+    extraConfig: { hostClaims: { version: 1, widthReason: 'one node' } }, nodes: [{ id: 'a', writes: ['test', 'src'], hostClass: 'light' }] });
+  fx.env.AI_SKILLS_HOST_RESOURCES_DIR = store;
+  ready(fx);
+  const { claim, releaseClaim } = await import('./host-claims.mjs');
+  assert.equal((await claim({ dir: store, opId: 'npm-ci', cls: 'light', resources: [{ resource: shared, mode: 'W' }] })).admit, true);
+  const held = fx.gate('review', passReview('rx-1', fx.candidate()));
+  refused(held, 'host_held', 'an installer holds the shared installation');
+  assert.equal(held.out.judgment_point, false);
+  assert.equal(fx.evidenceAttempts().length, 0, 'no evidence attempt');
+  assert.equal(fx.runnerRuns().length, 0, 'the runner never ran');
+  assert.equal((await releaseClaim({ dir: store, opId: 'npm-ci' })).released, true);
+  refused(fx.gate('review', passReview('rx-1', fx.candidate())), 'evidence_refreshed', 'admitted: the evidence ran');
+  const ev = fx.evidenceAttempts();
+  assert.equal(ev.length, 1);
+  assert.ok(ev[0].host_claim?.op_id, 'the evidence attempt persisted its claim identity before launch');
+  assert.equal(ev[0].host_claim.released, true);
 });

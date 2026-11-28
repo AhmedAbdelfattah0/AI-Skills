@@ -19,6 +19,7 @@ import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeou
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
 import { baseCandidate, baseCommit } from './engine-base-read.mjs';
+import { claimsOn, admitOp, runClaimed, hostRecord, bindOp, releaseSettledClaims } from './engine-claims.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -290,6 +291,7 @@ export async function reconcile(E, wait) {
     if (!(runner ? ['intent', 'running', 'unknown'] : UNSETTLED).includes(a.status)) continue;
     if ((runner ? await settleRunner(E, a) : await settle(E, a, { wait })) === 'live') live = true;
   }
+  if (claimsOn(E.S)) await releaseSettledClaims(E, LIVE);
   return live;
 }
 
@@ -322,6 +324,7 @@ async function runAttempt(E, job) {
     status: 'intent', resources: [...(job.resources ?? [])], pre_snapshot: pre, pre_snapshot_digest: io.sha(JSON.stringify(pre)),
     plan_before_file: planBefore === null ? null : planBeforeFile, allowed: job.allowed, excluded: [...job.othersOwned],
     envelope_file: join(P.attempts, id + '.envelope.json'), out_file: join(P.attempts, id + '.out'), started_at: new Date().toISOString() };
+  if (job.cx?.claim) a.host_claim = hostRecord(job.cx); // S2: the claim identity is persisted with the intent, before launch
   for (const b of E.live.values()) { b.excluded.push(...job.writes); a.excluded.push(...b.writes); }
   E.live.set(id, Object.assign(a, { writes: job.writes }));
   S.attempts.push(a);
@@ -342,6 +345,8 @@ async function runAttempt(E, job) {
     if (!child.pid) { await exited; await settleSpawnFailure(E, a, item); return true; }
     a.pid = child.pid; a.pgid = platform === 'win32' ? null : child.pid; a.leader_start = leaderStart(a.pgid); a.status = 'launched';
     armAttempt(S, a, timeoutMs, ctx.deadlineClock); // S1: persisted with the pid, before the release byte
+    // S2: bind the claim to the group before the release byte (lock-free); on failure no byte: the launcher exits 125.
+    if (job.cx?.claim) { try { await bindOp(E, job.cx, a.pgid); } catch (e) { child.stdin.end(); throw e; } }
     await E.commit();
     await io.boundary(ctx.hooks, 'after-pid', { attempt_id: id, pid: a.pid, pgid: a.pgid });
     await new Promise(r => child.stdin.end(io.RELEASE, r));
@@ -378,6 +383,8 @@ function fits(E, n, running) {
     complexity: m.complexity, estimatedMemoryMb: m.estimatedMemoryMb }));
   const s = schedule({ phase: n.phase, nodes: plain, maxConcurrency: E.S.config.width, memoryBudgetMb: E.S.config.memoryBudgetMb ?? null });
   if (s.waves[0].nodes.length !== members.length) return false;
+  // The in-run estimate check only. S2: with config.hostClaims a lone heavy node is NOT exempt from host admission: it is
+  // admitted through its host claim (engine-claims.mjs admitOp, before spawn); without hostClaims this is the frozen legacy branch.
   if (members.length === 1) return true;
   const verdict = admit({ phase: n.phase, members: members.length, estimatedMemoryMb: members.reduce((t, m) => t + m.estimatedMemoryMb, 0) },
     E.ctx.admissionProbe ?? {});
@@ -407,8 +414,13 @@ export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
         for (const n of ready) {
           if (!budgetOk(E, transient, n.phase)) { stop = true; break; }
           if (!fits(E, n, running.keys())) continue;
-          running.set(n.id, runAttempt(E, { kind: 'node', item: n, phase: n.phase, writes: n.writes, othersOwned: n.othersOwned,
-            allowed: n.writes, promptFile: n.promptFile, resources: n.resources })
+          // S2: only with config.hostClaims (F4: a legacy dispatch has no added await and no added break).
+          const cx = claimsOn(S) ? await admitOp(E, n.id, { cls: n.hostClass, resources: n.hostResources ?? [], labels: n.hostContainerLabel ? [n.hostContainerLabel] : [] }) : null;
+          if (cx?.held) continue;
+          if (cx?.claim && (failure || S.judgments.length)) { await runClaimed(E, cx, async () => {}); break; } // changed while sampling: released
+          const job = { kind: 'node', item: n, phase: n.phase, writes: n.writes, othersOwned: n.othersOwned,
+            allowed: n.writes, promptFile: n.promptFile, resources: n.resources, ...(cx ? { cx } : {}) };
+          running.set(n.id, (cx?.claim ? runClaimed(E, cx, () => runAttempt(E, job)) : runAttempt(E, job))
             .catch(e => { failure ??= e; }).finally(() => running.delete(n.id)));
         }
       }
@@ -482,7 +494,15 @@ export async function runRepairs(E, transient) {
     const affected = Object.values(S.nodes).filter(n => n.writes.some(w => r.writes.some(p => overlap(w, p))));
     const risk = [...new Set(affected.flatMap(n => n.risk ?? []))].sort();
     const complexity = affected.some(n => n.complexity === 'high') ? 'high' : undefined;
-    await runAttempt(E, { kind: 'repair', item: r, phase: auth.phase, writes: r.writes, othersOwned: [], allowed: auth.allowed,
-      promptFile: r.promptFile, reviewExecution: r.review_execution, onLaunch, risk, complexity });
+    // S2: a repair is classed like the nodes it repairs (heavy if any is), claims their shared host resources and carries
+    // their container labels (Codex-1). Different labels are a permanent condition: a refusal, never a wait (m3).
+    const job = { kind: 'repair', item: r, phase: auth.phase, writes: r.writes, othersOwned: [], allowed: auth.allowed,
+      promptFile: r.promptFile, reviewExecution: r.review_execution, onLaunch, risk, complexity };
+    if (!claimsOn(S)) { await runAttempt(E, job); continue; }
+    const labels = [...new Map(affected.filter(n => n.hostContainerLabel).map(n => [JSON.stringify(n.hostContainerLabel), n.hostContainerLabel])).values()];
+    const cx = await admitOp(E, r.id, { cls: affected.some(n => n.hostClass === 'heavy') ? 'heavy' : 'light', resources: affected.flatMap(n => n.hostResources ?? []), labels });
+    if (cx?.refused) { transientOnce(transient, cx.code, r.id, cx.reason); continue; }
+    if (cx?.held) continue;
+    await runClaimed(E, cx, () => runAttempt(E, { ...job, ...(cx ? { cx } : {}) }));
   }
 }

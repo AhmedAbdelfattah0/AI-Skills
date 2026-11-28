@@ -473,7 +473,7 @@ export function admitHost(snapshot, cls, running, history) {
   const heavy_slots = healthy && !pressure_warn ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
   const reasons = [...holds];
   if (clean && !resumed) reasons.push('held_hysteresis');
-  // HEAVY occupancy comes only from the caller's `running.heavy` (wave journal); real suites are serialized at execution time by the host-provided heavy-suite wrapper (not part of this repository).
+  // HEAVY occupancy is `running.heavy`. S2: its callers (host-admit.mjs, host-claims.mjs) read it from the host claim store, never from a caller-supplied count.
   if (cls === 'HEAVY' && run.heavy >= heavy_slots) reasons.push('held_heavy');
   const admit = reasons.length === 0;
   return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, pressure_warn, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,

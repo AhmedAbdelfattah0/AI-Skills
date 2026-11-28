@@ -243,7 +243,8 @@ function shipReady({ S, X, at }, rev) {
 function refusalOf(S, gate, ix) {
   const events = S.events ?? [];
   const notes = events.filter(e => e.type === 'GATE' && e.gate === gate);
-  const window = notes.slice(notes.findLastIndex(e => e.ok === true && ACCEPT_CODES.has(e.code)) + 1);
+  // S2: a host_held gate result is pending work (a capacity wait), not a refusal: it never counts toward refused/no_progress.
+  const window = notes.slice(notes.findLastIndex(e => e.ok === true && ACCEPT_CODES.has(e.code)) + 1).filter(e => e.code !== 'host_held');
   const refusals = window.filter(e => e.ok === false);
   if (!refusals.length) return null;
   const subject = gate === 'ship-ready' || gate === 'reassess' ? 'run' : '*';
