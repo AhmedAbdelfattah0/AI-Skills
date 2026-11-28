@@ -193,17 +193,30 @@ function commandPaths(cwd, cmd) {
   return out;
 }
 
+/**
+ * What one declared check runs on `prep`'s scan set: `{ skip: 'skipped' | 'checker_modified', files }` (a file-scoped check with no
+ * changed file; a check whose own command path or argument is a changed file) or `{ cmd, args, files }`. Shared by runOne and the
+ * engine's pre-review early checks (engine-prove.mjs, S5), so both run exactly the same argv.
+ */
+export function checkInvocation(cwd, check, prep) {
+  let args = check.cmd.slice(1), files = 0;
+  if (check.files) {
+    if (prep.files.length === 0) return { skip: 'skipped', files };
+    args = args.flatMap((a) => (a === '{files}' ? prep.files : [a]));
+    files = prep.files.length;
+  }
+  if (commandPaths(cwd, check.cmd).some((p) => prep.changedReal.has(norm(p)))) return { skip: 'checker_modified', files };
+  return { cmd: check.cmd[0], args, files };
+}
+
 /** Run one declared check in its own process group. Output goes to a temp FILE; the group is killed on timeout and after exit. */
 function runOne(cwd, check, prep) {
   const base = { name: check.name, kind: check.kind, result: 'fail', exit: null, timed_out: false, duration_ms: 0, files: 0 };
-  let args = check.cmd.slice(1);
-  if (check.files) {
-    if (prep.files.length === 0) return Promise.resolve({ ...base, result: 'skipped' });
-    args = args.flatMap((a) => (a === '{files}' ? prep.files : [a]));
-    base.files = prep.files.length;
-  }
-  const touched = commandPaths(cwd, check.cmd).some((p) => prep.changedReal.has(norm(p)));
-  if (touched) return Promise.resolve({ ...base, code: 'checker_modified' });
+  const inv = checkInvocation(cwd, check, prep);
+  base.files = inv.files;
+  if (inv.skip === 'skipped') return Promise.resolve({ ...base, result: 'skipped' });
+  if (inv.skip) return Promise.resolve({ ...base, code: inv.skip });
+  const args = inv.args;
   const dir = mkdtempSync(join(tmpdir(), 't0-'));
   const fd = openSync(join(dir, 'out'), 'w+');
   const started = Date.now();

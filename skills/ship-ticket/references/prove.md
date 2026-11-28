@@ -218,6 +218,46 @@ worker's own claim: re-run `run` yourself before freeze.
 call `verify` at freeze and the carrier does not require `t0`. That freeze integration and mutation validity are
 separate slices (S-01b2, S-01c); the risk-triggered test kinds are below.
 
+## Early checks and the pre-review proof (`gate prove`, opt-in)
+
+A DAG with `config.earlyChecks: { version: 1 }` (bound by the DAG digest, never defaulted) moves the working-tree checks
+and the bounded proof before REVIEW. Without it nothing on this page changes: ship-ready runs the proof after review, as
+before. With it, after the builders finish and after every repair:
+
+```text
+node scripts/run-engine.mjs gate prove --repo <repo> --ticket <key> --run-id <id> --input <file holding {}>
+```
+
+- **Early checks** are the T0 declaration above (`.ship-ticket/t0.json`, read from the merge base, the same scan set
+  and argv), run by the engine itself, each check under the engine's runner protocol with its own `timeout_ms`. The
+  record `early_checks` holds names, enums and numbers only; a check's output file is deleted once its process group
+  is proven gone. No declaration is `not_declared`, which passes.
+- **The bounded proof** is the same `testCommands` run ship-ready performs, in declaration order. An entry may set its
+  own deadline `timeoutMs` (1 s to 1 h; default `config.timeoutMs`). A timed-out entry is named
+  (`proof_entry_timeout`), and the next `gate prove` re-runs only the entries without a reusable pass, plus their
+  declared setups and the teardowns of their resources. Under security policy 2 every entry re-runs.
+- **Reuse needs equal inputs.** A proof row is reused, at the next prove or at ship-ready, only while the candidate,
+  the base commit, the environment identity and the entry's command identity are all unchanged. Anything else runs
+  fresh. The environment identity is UNQUALIFIED: platform, architecture, Node version, PATH and each command's
+  resolved executable. It does not cover files a command reads through its arguments, other variables, services or
+  images. There are no gate-row keys and no reuse across a rebase here.
+- **Review waits for it.** An original review or a confirmation is refused with `prove_required` unless early checks
+  and the proof of the current candidate passed and their inputs still hold. Ship-ready refuses the same way without
+  passing early checks, and it re-runs a proof whose inputs changed.
+- **The final committed/range run is kept.** Early checks scan the working tree only (`scope: 'working-tree'`). A
+  history or commit-range check, such as `gitleaks git <base>..HEAD`, sees nothing before the single SHIP commit, so
+  a secret added and then removed is caught only by the final run. SHIP_READY of such a run reports
+  `final_gates: 'required'`; nothing here satisfies the final run.
+
+**Setup/consumer/teardown contract (D8).** The run order is the declaration order, and the engine never reorders a
+digest-bound DAG. Entries that share state declare it: `resource` (a name), `role` (`setup`, `consumer` or `teardown`),
+and `after` (names of entries declared earlier). Preflight and init refuse (`dag_invalid`) when:
+- an `after` names an entry declared later;
+- a consumer does not declare every setup of its resource (for example a reset declared after a reader);
+- a teardown does not declare every consumer of its resource.
+
+Shared state that no entry declares cannot be detected.
+
 ## Risk-triggered test kinds (T1-S)
 
 Opt-in per plan or per repository. When the plan opts in (a `test-triggers:` line, or a repository

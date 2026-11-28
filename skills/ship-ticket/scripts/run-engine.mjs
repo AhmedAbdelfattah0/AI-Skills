@@ -15,7 +15,7 @@
  *      run-engine.mjs reconcile --deadlines true ... (S1: the persisted-deadline sweep of a durable run; reconcileDeadlines)
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
  *      run-engine.mjs archive ... [--retire true]; run-engine.mjs adopt ... --from <archive dir> (S-13a, engine-adopt.mjs)
- *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
+ *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess|prove --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
  *      run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]
@@ -44,7 +44,7 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
-import { repoIdentityOn } from './engine-dag.mjs';
+import { repoIdentityOn, earlyChecksOn } from './engine-dag.mjs';
 import { repoIdentityVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
@@ -918,6 +918,7 @@ export async function gate(ctx) {
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
       if (ctx.gate === 'review' && input.units_consumed !== undefined && !unitReviewOn(E.S)) throw coded('bad_input', 'gate review: units_consumed needs a DAG with config.unitReview');
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
+      if (ctx.gate === 'prove' && !earlyChecksOn(E.S)) throw coded('bad_input', 'gate prove: needs a DAG with config.earlyChecks { version: 1 } (S5)');
       await deliver(E);
       reconcileReviews(E);
       const c = baseCandidate(ctx.repoRoot, E.S, E.S.pinned_exclusions);
@@ -958,7 +959,7 @@ async function main(argv) {
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from', 'deadlines'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess|prove --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,

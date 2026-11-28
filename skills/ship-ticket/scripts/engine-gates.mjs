@@ -22,6 +22,8 @@ import { checkedIdentity, identityStage } from './engine-identity.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
+import { earlyChecksOn } from './engine-dag.mjs';
+import { proveGate, proveRefusal, staleProofRefusal, proofInputs, sameInputs, proofExtras, entryTimeout } from './engine-prove.mjs'; // S5
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -179,6 +181,8 @@ async function reviewGate(E, input, candidate) {
   const S = E.S;
   const units = unitsRefusal(E);
   if (units) return units;
+  const unproved = earlyChecksOn(S) ? proveRefusal(E, candidate) : null; // S5: no review before a passing pre-review prove
+  if (unproved) return unproved;
   if (unitExecution(S, input.review_execution)) return gateNo('chain_broken', [`review_execution ${input.review_execution} belongs to a unit review chain`]);
   const originals = S.review_chain.filter(r => r.kind === 'original');
   let retry = null;
@@ -252,10 +256,12 @@ async function reviewGate(E, input, candidate) {
  * otherwise it stays 'unknown' with a durable quiescence_unknown judgment and nothing is recorded.
  * The caller records LOCAL_PROOF only after re-verifying the binding and the candidate.
  */
-async function runProof(E) {
+export async function runProof(E, { only = null } = {}) { // S5: `only` (prove's re-run set); per-entry deadlines with config.earlyChecks
   const run = runnerDeps(E).spawnRunner;
   const commands = [], runs = [];
   for (const [name, c] of Object.entries(E.S.config.testCommands ?? {})) {
+    if (only && !only.has(name)) continue;
+    const timeoutMs = entryTimeout(E.S, c);
     const a = { attempt_id: 'att-' + randomUUID(), kind: 'proof', node: name, status: 'intent', started_at: new Date().toISOString() }; // started_at: telemetry only (eval proof wall)
     E.S.attempts.push(a);
     await E.commit();
@@ -263,9 +269,9 @@ async function runProof(E) {
     const args = c.evidence ? (c.args ?? []).filter(x => x !== '{files}').map(x => x.replace('{report}', REPORT_FD)) : c.args ?? [];
     let result;
     try {
-      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(c.evidence ? { report: true } : {}) });
+      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs, ...(c.evidence ? { report: true } : {}) });
       Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
-      armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
+      armAttempt(E.S, a, timeoutMs, E.ctx.deadlineClock); // S1: durable run only
       await E.commit();
       launch.release();
       result = await launch.done;
@@ -281,7 +287,8 @@ async function runProof(E) {
     // args: an unlocated pass is the spec's only when the command runs exactly that file (gate.mjs soleFile).
     if (c.format) runs.push({ format: c.format, stdout: (c.evidence ? result.report?.toString('utf8') : result.stdout) ?? '', truncated: result.truncated === true || result.timedOut === true || result.report_truncated === true, args: [...args] });
     commands.push({ name, cmd: c.cmd, args: [...args], exit_code: result.exitCode,
-      result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}), ...(result.error_code ? { error_code: result.error_code } : {}) });
+      result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}), ...(result.error_code ? { error_code: result.error_code } : {}),
+      ...(earlyChecksOn(E.S) ? { timed_out: result.timedOut === true, timeout_ms: timeoutMs, attempt_id: a.attempt_id } : {}) });
   }
   await E.commit();
   // Policy 2 only: the parsed status of every effective pair spec (only pass proves; legacy proof bytes unchanged).
@@ -290,7 +297,7 @@ async function runProof(E) {
   return { commands, spec_results: specResults(specs, runs) };
 }
 
-const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.local_proof.commands.length > 0
+export const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.local_proof.commands.length > 0
   && S.local_proof.commands.every(c => c.result === 'pass');
 
 /**
@@ -350,10 +357,13 @@ async function shipReadyGate(E, input, candidate) {
   }
   const tk = await ensureEvidence(E, 'S1');
   if (tk && !tk.ok) return tk;
+  const early = earlyChecksOn(S) ? staleProofRefusal(E, candidate) : null; // S5: passing early checks; a proof with changed inputs is unbound
+  if (early) return early;
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts),
     ...(sec ? { control_pairs: controlPairs(E, sec, candidate) } : {}) };
   let v = gateShipReady({ state: S, current });
   if (!v.ok && v.reasons.every(r => r === 'missing_local_proof') && !proven(S, candidate)) {
+    const inputsBefore = earlyChecksOn(S) ? proofInputs(E, candidate) : null; // S5
     const { refusal, commands, spec_results } = await runProof(E);
     if (refusal) return refusal;
     // The proof ran repository commands, which can move config.base (an empty commit): forget the base
@@ -379,6 +389,11 @@ async function shipReadyGate(E, input, candidate) {
     if (after.candidate_id !== candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
+    }
+    // S5: ...and the proof inputs (base, environment, command identities) must be the ones it ran with.
+    if (inputsBefore && !sameInputs(inputsBefore, proofInputs(E, candidate))) {
+      S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['proof_inputs_changed'] };
+      return gateNo('proof_inputs_changed', ['the proof inputs (base, environment or a command identity) changed while the proof ran']);
     }
     // S-28a Round 1: ...and the identity and the base must still hold: a proof command can re-point the remote or move the local
     // base, and no gate follows ship-ready, so they are read again before SHIP_READY binds them
@@ -406,7 +421,7 @@ async function shipReadyGate(E, input, candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [tk2.code] };
       return tk2;
     }
-    S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}) };
+    S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}), ...(inputsBefore ? proofExtras(commands, inputsBefore) : {}) };
     if (sec) current.control_pairs = controlPairs(E, sec, candidate);
     // Git-ignored artifacts and evidence are outside the candidate id: re-derive them from what the proof left.
     rebind();
@@ -419,7 +434,7 @@ async function shipReadyGate(E, input, candidate) {
     S.ship_ready = { candidate_id: candidate, seq: S.seq, ...(idShip ? { base: idShip.base } : {}) };
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
   } else if (v.ok && idShip) S.ship_ready.base = idShip.base; // S-28a: a RETRY re-freeze of the same candidate moves the base of record
-  return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
+  return { judgment_point: false, ...v, ...(earlyChecksOn(S) ? { final_gates: 'required' } : {}), ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
     matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
 
@@ -850,4 +865,4 @@ export function securityJudgments(S) {
   return out;
 }
 
-export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate, reassess: reassessGate };
+export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate, reassess: reassessGate, prove: proveGate };

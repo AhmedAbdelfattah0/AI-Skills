@@ -926,7 +926,8 @@ is no prune.
 - Worker worktree isolation and join are deferred: ownership checks plus content
   fingerprints cover today's failure modes.
 - Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready|unit-review
-  --repo <dir> --ticket <key> --run-id <id> --input <json-file>`: under the engine
+  --repo <dir> --ticket <key> --run-id <id> --input <json-file>` (and, with `config.earlyChecks`, `gate prove`:
+  the pre-review early checks and bounded proof, [prove.md](prove.md)): under the engine
   lock it computes the candidate itself (pinned exclusions), calls `gate.mjs`,
   commits the result and, on ship-ready, appends `SHIP_READY` to RUN-STATE once.
   Exit 0 accepted, 2 refused or judgment point, 1 usage error.
