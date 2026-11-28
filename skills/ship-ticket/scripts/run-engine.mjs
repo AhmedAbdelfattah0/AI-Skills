@@ -40,6 +40,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
+import { stageVersion } from './engine-policy.mjs';
 import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion, durableVersion } from './engine-policy.mjs';
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
@@ -52,6 +53,7 @@ import { samePath } from './lib/run-log-paths.mjs';
 import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
+import { stageOn, parseStagePolicy, feasibility, initialStage, verifyObligation, stageStateRefusal, stageBindingRefusal } from './stage-obligations.mjs';
 
 export { writeStateAtomic } from './engine-io.mjs';
 /** The ticket's engine lock (S1: in the run's placement: an existing run's, else the default of a new run, durable). */
@@ -167,6 +169,14 @@ function open(ctx, prefer) {
       // V0 single-entry invariant (R1), re-checked on every load: P4r refuses two RECORDS, not two DECLARED entries
       if (E.S.test_kinds && evidenceEntries(E.S.config).map(([n]) => n).join() !== E.S.test_kinds.entry)
         throw coded('multi_entry_unsupported_v0', `the run's evidence entries (${evidenceEntries(E.S.config).map(([n]) => n).join(', ') || 'none'}) are not exactly its bound entry ${E.S.test_kinds.entry}`);
+      // STAB S4: the stageObligations flag of the run's version, config.stagePolicy and S.stage come together or not at all, and
+      // (R1) the stage record is, on EVERY load, exactly the one the approved policy derives (no dropped, added or edited obligation)
+      if (new Set([E.policy.semantics.stageObligations === true, E.S.config?.stagePolicy !== undefined, E.S.stage !== undefined]).size !== 1)
+        throw coded('stage_state_missing', `policy_version ${E.S.policy_version}, config.stagePolicy and the stage obligation state disagree: a partial stage record is never resumed`);
+      if (E.S.stage !== undefined) {
+        const why = stageStateRefusal(E.S); // R2: the retained run-owned policy only; a foreign-worktree command never reads its caller's plan
+        if (why) throw coded('stage_state_invalid', `the stage obligation record does not match the approved stage policy: ${why}; it is never resumed`);
+      }
       // S-12: the pinned-base flag of the run's version, S.base and config.pinnedBase come together or not at all (no partial pin is resumed)
       // (S-12 Round 1: presence is the KEY, so a null/false/0 S.base counts; a pin must be well-formed, never read as no pin)
       if (new Set([E.policy.semantics.pinnedBase === true, Object.hasOwn(E.S, 'base'), pinnedBaseOn(E.S)]).size !== 1)
@@ -251,6 +261,11 @@ function verifyBinding(E) {
   try {
     const approved = approvedPlan(ctx, E.P, S);
     if (approved.digest !== S.plan_digest) out.push(judgment('approval_mismatch', null, 'plan narrative differs from the one bound at init'));
+    else if (S.stage) { // STAB S4 (R2): the retained stage line is the approved one, and every retained verification reached RUN-STATE
+      const t = approved.text, b = t.indexOf(BEGIN), e = t.indexOf(END);
+      const why = stageBindingRefusal(S, b >= 0 && e > b ? t.slice(0, b) + t.slice(e) : t, approved.events);
+      if (why) out.push(judgment('stage_policy_mismatch', null, why));
+    }
     // Grandfathering is by the trusted START's approval time, never by a missing field (AIS-HARNESS-4 Wave B).
     else if (!securityOn(S) && !legacyApproval(approved.start)) out.push(judgment('security_policy_required', null,
       'the trusted START is not approved before the security policy cutoff, and the bound DAG has no config.securityPolicy 2'));
@@ -390,6 +405,19 @@ async function bindObligations(sp, cat, block, nodes, root) {
 }
 
 /**
+ * STAB S4 (P6): the stage policy and plan feasibility of a config.stagePolicy run, run by BOTH preflight and init (so an
+ * unpreflighted infeasible plan is refused at init). Null for every other run (frozen semantics). The policy is the
+ * approved narrative's stage-policy-v1 line only (no DAG field, no gate input, no RUN-STATE line carries a deferral).
+ */
+async function bindStage(ctx, config, nodes, narrative, text) {
+  if (!stageOn(config)) return null;
+  const policy = parseStagePolicy(narrative, { ticket: ctx.ticket });
+  const sp = config.securityPolicy === 2 ? await securityPlan() : null;
+  const f = feasibility({ policy, config, nodes, ticket: ctx.ticket, repoRoot: ctx.repoRoot, sp, block: sp ? sp.parsePlanSecurityBlock(text) : null, env: ctx.env });
+  return { policy, ...f };
+}
+
+/**
  * F12a plan-time preflight: the checks `init` runs on the plan and DAG (validateEngineDag, bindSecurity, and for a
  * format-3 block the obligation matrix and inventory completeness), callable BEFORE approval: no lock, no state, no
  * START and no write. It also refuses a node that reads what a transitive dependent writes (dag_read_write_dependency,
@@ -413,15 +441,20 @@ export async function preflight(ctx) {
   const block = sp.parsePlanSecurityBlock(text);
   const m = sp.obligationMatrix(sp.loadCatalog(catalogOptions(ctx)), block);
   if (!m.ok) throw coded(m.code, `the §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
+  const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
   return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
-    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix };
+    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix,
+    ...(stage ? { stage: { policy_digest: stage.policy.policy_digest, merge_stage: stage.policy.merge_stage, stages: stage.policy.stages,
+      no_runtime_boundary: stage.policy.no_runtime_boundary, obligations: stage.policy.deferred.map(d => d.row),
+      deferrals: stage.policy.deferred.map(d => ({ row: d.row, deferred_stage: d.stage, trigger: d.trigger ?? null, tracker_ref: d.tracker_ref ?? null })),
+      artifacts: stage.policy.artifacts, signal_prescan: stage.signal_prescan } } : {}) };
 }
 
 /**
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, stage = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
@@ -432,7 +465,10 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false, 
   // S1 (M1): a durable run records the durable row of its other flags (13-24); an engine without one cannot start it
   const recorded = durable ? durableVersion(flagged, engine.semantics) : flagged;
   if (recorded === null) throw coded('policy_version_unsupported', `no durable-run policy version for policy_version ${flagged}`);
-  return { policy_version: runPolicy({ policy_version: recorded }, engine).version,
+  // STAB S4 (R1): a stage run records the stage row of its other flags (25-48), so an engine without S4 refuses to resume it
+  const staged = stage ? stageVersion(recorded, engine.semantics) : recorded;
+  if (staged === null) throw coded('policy_version_unsupported', `no stage-obligation policy version for policy_version ${recorded}`);
+  return { policy_version: runPolicy({ policy_version: staged }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -499,6 +535,7 @@ async function initLocked(ctx, placement) {
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
+    const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
     // S-28a: trust on first use from ONE snapshot of the remote's URLs (engine-identity.mjs bindIdentity): remote_ambiguous, or
     // identity_unbound when it names no repository on github.com (nothing written); the pin is then read by that snapshot only
@@ -520,8 +557,8 @@ async function initLocked(ctx, placement) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable'), ...(testKinds ? { test_kinds: testKinds } : {}),
-      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', stage !== null), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
@@ -544,6 +581,7 @@ export async function status(ctx) {
   const out = view(E, drift(E, { mutate: false }));
   if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
   if (E.S.base) out.base = baseStatus(E); // S-12: advisory only (never a judgment), and only for a pinned run
+  if (E.S.stage) out.stage = { merge_stage: E.S.stage.merge_stage, obligations: E.S.stage.obligations }; // S4: open obligations survive every resume
   return out;
 }
 
@@ -876,7 +914,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'stage_state_missing', 'stage_state_invalid']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -909,6 +947,27 @@ export function gateAuditFields(kind, input, v) {
   return out;
 }
 
+/**
+ * STAB S4: record NEW evidence for a deferred stage (stage-obligations.mjs verifyObligation). Evidence, never authority:
+ * the OBLIGATION_VERIFIED event carries no authorized_by. A refusal writes nothing.
+ */
+export async function obligationVerify(ctx) {
+  return locked(ctx, async (E) => {
+    if (!E.S.stage) throw coded('bad_input', 'obligation-verify needs a DAG with config.stagePolicy');
+    const unbound = verifyBinding(E);
+    if (unbound.length) return { obligation: ctx.row, ok: false, code: unbound[0].code, reasons: unbound.map(j => j.reason) };
+    await deliver(E);
+    let ev;
+    try { ev = verifyObligation(E.S, ctx.row, ctx.evidence); }
+    catch (e) { if (typeof e.code === 'string' && e.code.startsWith('obligation_')) return { obligation: ctx.row, ok: false, code: e.code, reasons: [e.message] }; throw e; }
+    note(E.S, 'OBLIGATION_VERIFIED', { row: ctx.row, candidate_id: ev.candidate_id });
+    E.S.outbox.push({ run_id: E.S.run_id, event_id: `obligation-verified-${E.S.run_id}-${ctx.row}-${E.S.seq}`, ...ev, timestamp: new Date().toISOString() });
+    await E.commit();
+    await deliver(E);
+    return { obligation: ctx.row, ok: true, code: 'obligation_verified', ...ev };
+  });
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -918,6 +977,7 @@ export async function gate(ctx) {
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
       if (ctx.gate === 'review' && input.units_consumed !== undefined && !unitReviewOn(E.S)) throw coded('bad_input', 'gate review: units_consumed needs a DAG with config.unitReview');
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
+      if (input.dispositions !== undefined && !E.S.stage) throw coded('bad_input', 'gate reassess: dispositions need a DAG with config.stagePolicy');
       await deliver(E);
       reconcileReviews(E);
       const c = baseCandidate(ctx.repoRoot, E.S, E.S.pinned_exclusions);
@@ -956,9 +1016,9 @@ async function main(argv) {
     if (extra.length || !flags.repo || !flags.ticket || !flags.dag) throw new Error('Usage: run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]');
     return preflight({ repoRoot: resolve(flags.repo), ticket: flags.ticket, dagFile: resolve(flags.dag), ...(flags.plan ? { planFile: resolve(flags.plan) } : {}) });
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from', 'deadlines'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'retire', 'from', 'deadlines', 'id'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate' || cmd === 'obligation-verify') !== Boolean(flags.input) || (cmd === 'obligation-verify') !== Boolean(flags.id)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]\n       run-engine.mjs obligation-verify --repo <dir> --ticket <key> --run-id <id> --id <row> --input <evidence-json> (config.stagePolicy run)');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
@@ -967,6 +1027,8 @@ async function main(argv) {
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
+    'obligation-verify': () => { let evidence; try { evidence = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`obligation-verify input ${flags.input}: ${e.message}`); }
+      return obligationVerify({ ...ctx, row: flags.id, evidence }); },
     archive: () => archive({ ...ctx, ...(flags.retire !== undefined ? { retire: flags.retire === 'true' ? true : flags.retire } : {}),
       ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id', 'retire'].includes(k)) ? { extra: 1 } : {}) }),
     adopt: () => adopt({ ...ctx, from: flags.from, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id', 'from'].includes(k)) ? { extra: 1 } : {}) }),
@@ -983,6 +1045,6 @@ async function main(argv) {
 if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true))) process.exitCode = 2;
+    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.obligation !== undefined && !r.ok)) process.exitCode = 2;
   }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 }

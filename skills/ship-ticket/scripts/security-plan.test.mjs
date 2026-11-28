@@ -933,7 +933,16 @@ test('meta: SECURITY_CODES equals the codes with a refusing case, each with an a
   const reIn = (over = {}) => ({ plan, catalog: syn, inventory: { surfaces: [surf('A', 'request-handler', 'src/a.ts')] },
     changed: { contract_paths: ['src/a.ts', 'package.json'], files: [{ path: 'src/a.ts' }] }, classifications: [], ...over });
   const s = [surf('A', 'request-handler')];
+  // STAB S4: the "no runtime boundary" disposition (opt-in allowDispositions); briefs come from a first reassess.
+  const dIn = (added, over = {}) => ({ plan, catalog: syn, inventory: { candidate_id: 'cand', surfaces: [] }, changed: { contract_paths: ['src/**'], files: [{ path: 'src/x.ts', added }] },
+    classifications: [], allowDispositions: true, ...over });
+  const CL = ['await this.api.get();'], SV = ["router.get('/x', h);"];
+  const brief = (added) => SP.reassess(dIn(added)).disposition_briefs[0];
+  const disp = (b, over = {}) => [{ signal_id: b.signal_id, disposition: 'no-runtime-boundary', brief_digest: b.brief_digest, reviewer: 'r', basis: 'b', ...over }];
   const rows = {
+    disposition_inadmissible: [() => SP.reassess(dIn(SV, { dispositions: disp(brief(SV)) })), () => SP.reassess(dIn(CL, { dispositions: disp(brief(CL)) }))],
+    disposition_stale: [() => SP.reassess(dIn(CL, { dispositions: disp(brief(CL), { brief_digest: 'sha256:' + '0'.repeat(64) }) })), () => SP.reassess(dIn(CL, { dispositions: disp(brief(CL)) }))],
+    disposition_unbound: [() => SP.reassess(dIn(CL, { inventory: { surfaces: [] }, dispositions: disp(brief(CL)) })), () => SP.reassess(dIn(CL, { dispositions: disp(brief(CL)) }))],
     catalog_missing: [() => SP.loadCatalog({ catalogPath: join(tmp(), 'x.json') }), () => SP.loadCatalog({ catalogPath: SYN_PATH })],
     catalog_invalid: [() => SP.loadCatalog({ catalogPath: writeCatalog({ ...SYN, controls: [] }) }), () => SP.loadCatalog({ catalogPath: writeCatalog(SYN) })],
     bad_input: [() => SP.selectControls(syn, { ...input(s), security_policy: 1 }), () => SP.selectControls(syn, { ...input(s), security_policy: 2 })],

@@ -899,7 +899,7 @@ test('T-C2 / T-C3 / T-C6: with every event kind added (and an events-only ticket
   const got = await capture(SCRIPTS, { injectLogs: (logs) => (injected = instrumented(logs)) });
   // S-01b2 P5r (AMD-P5r-2): the ONE intended difference from the pinned base capture. Policy v2 makes the refusal of the
   // policy_version:99 fixture name both supported versions; the golden itself stays the pure origin/main capture.
-  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24;' /* S1: 13-24 (durableRun) */; // F12a: versions 3 and 4 (format-3 security block) are supported too
+  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48;' /* S4: 25-48 (stageObligations) */ /* S1: 13-24 (durableRun) */; // F12a: versions 3 and 4 (format-3 security block) are supported too
   // S-12: versions 5-8 (1-4 with a pinned remote base) are supported too
   // S-28a: versions 9-12 (5-8 with a repository identity) are supported too
   assert.equal(expected.policy_refusal.stderr.split(V1).length, 2, 'the base capture names version 1 exactly once');

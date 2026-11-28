@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'stagePolicy'];
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -225,6 +225,9 @@ export function validateEngineDag(doc, { ticket } = {}) {
   // placement; `{ version: 1 }` states the default explicitly. An engine without S1 refuses the field (unknown config).
   if (c.durableRun !== undefined && c.durableRun !== false && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1))
     bad('config.durableRun must be false (the legacy per-worktree placement) or exactly { version: 1 }');
+  // STAB S4 (P6, opt-in, UNQUALIFIED): stage obligations + plan feasibility; the policy itself is the approved narrative's
+  // stage-policy-v1 line (stage-obligations.mjs). An engine without S4 refuses the field (unknown config).
+  if (c.stagePolicy !== undefined && !(isObj(c.stagePolicy) && Object.keys(c.stagePolicy).join() === 'version' && c.stagePolicy.version === 1)) bad('config.stagePolicy must be exactly { version: 1 }');
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
@@ -418,7 +421,7 @@ const surfaceShape = (s) => isObj(s) && Object.keys(s).length === 4 && ['boundar
 
 const GATE_FIELDS = {
   red: ['node', 'command', 'specs', 'addendum'],
-  reassess: ['classifications', 'surfaces'],
+  reassess: ['classifications', 'surfaces', 'dispositions'],
   review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file',
     'units_consumed'],
   'ship-ready': ['risk_evidence', 'artifacts', 'exclusions', 'candidate_id'],
@@ -447,6 +450,8 @@ export function gateInput(kind, doc) {
   if (kind === 'reassess' && doc.classifications !== undefined && !(Array.isArray(doc.classifications) && doc.classifications.every(c => isObj(c)
     && typeof c.signal_id === 'string' && c.signal_id.length > 0 && Object.keys(c).every(k => ['signal_id', 'facts', 'evidence', 'reason'].includes(k)))))
     bad('classifications must be [{ signal_id, facts?, evidence?, reason? }] (security-plan.mjs reassess)');
+  if (kind === 'reassess' && doc.dispositions !== undefined && !(Array.isArray(doc.dispositions) && doc.dispositions.every(isObj)))
+    bad('dispositions must be [{ signal_id, disposition, brief_digest, reviewer, basis }] (security-plan.mjs reassess, a config.stagePolicy run)');
   if (kind === 'reassess' && doc.surfaces !== undefined && !(Array.isArray(doc.surfaces) && doc.surfaces.every(surfaceShape)))
     bad('surfaces must be [{ boundary_id, kind, path, principals: [string] }] with a printable boundary id that round-trips as a pair id (security-plan.mjs select surfaces)');
   if (['review', 'unit-review'].includes(kind) && doc.repair_prompt_file !== undefined && typeof doc.repair_prompt_file !== 'string') bad('repair_prompt_file must be a path');
