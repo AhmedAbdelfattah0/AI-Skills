@@ -23,6 +23,7 @@
  *   run drive | gate red | gate reassess | gate ship-ready -> a launch op through the host-admission adapter (admittedCommand)
  *   dispatch review original                -> three read-only launch ops (primary, second opinion, reconcile), then ONE
  *                                              collect op that records the assembled input with `gate review` once
+ *                                              (second opinion: the approved manifest routes, see SECOND OPINION below)
  *   dispatch review confirmation            -> primary + second-opinion legs, then the collect op (no reconciliation)
  *   stop owner_publish                      -> recorded ship-ready; merge per the persisted strategy (never merged here)
  *   stop after two failed review rounds     -> an RCA op (routed agent task) -> a different evidence-backed path ->
@@ -47,9 +48,22 @@
  * UNQUALIFIED: lib/deadline MEASUREMENT_QUALIFIED is false (G0 not passed), so in production resolveSweepClock gives no
  * clock and the sweep measures and signals nothing (reported `unmeasured`); tests inject a testClock().
  *
+ * SECOND OPINION (PR-5b, S7 Option A): its routes are the owner's CONFIGURATION, never this file's: the ordered
+ * `review_routes` entries of role `second_opinion` in the approved wave manifest (wave.mjs; digest-bound, persisted in the
+ * wave binding, so a changed list is `wave_plan_changed`). A provider id is resolved only through the carrier's adapter lookup
+ * (supportsAgentProvider; an unknown id or no second_opinion route refuses the wave). ONE attempt per route, in order, each on
+ * its budget (route budget_ms, default SECOND_OPINION_BUDGET_MS); the next route only after the previous one was unusable
+ * (failed, refused, timed out, no artifact such as a usage-limit reply). None usable -> that ticket alone is Blocked
+ * `second_opinion_unavailable`. Provenance: the requested route is stamped at intent; what the carrier adapter built (provider,
+ * model, argv) and, when the provider reports it, the model it served must match it, else `second_opinion_provenance_mismatch`
+ * (a refusal, never a pass and never a fallback). The artifact's route and reviewer_identity are stamped `<provider>:<model>`
+ * from the launch; the collect op records `second_opinion: <provider:model>` and `same_provider` (vs the primary's provider).
+ *
  * PR-2 SEAM: real host admission is `host-admit.mjs run -- <cmd>` (merged with PR-2: claim, derived weight, stdout passed
  * through, a hold exits ADMISSION_HELD_EXIT 75; a permanent refusal exits 2 and reads as nothing_ran). Every heavy command goes
  * through `admittedCommand` only, so it is re-pointed in one place; exit ADMISSION_HELD_EXIT is read as "held, nothing ran".
+ * A hold is never a Block (PR-5b): the next attempt is paced (HOLD_RETRY_*), so the journal grows by at most one op per
+ * HOLD_RETRY_MAX_MS per held op; after HOLD_LONG_MS the tick output flags `long_hold` for the owner, the retries continue.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -58,9 +72,10 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { isEntrypoint } from './harness.mjs';
-import { parseManifest, verifyWave, readTicket, evaluateReadiness, admissionOrder, mergeStrategyOf } from './wave.mjs';
+import { parseManifest, verifyWave, readTicket, evaluateReadiness, admissionOrder, mergeStrategyOf, reviewRoutesOf } from './wave.mjs';
 import { readRun, nextStep } from './engine-accepted.mjs';
-import { prepareAgentTask, childEnv, verifySubscription, spawnSpec } from './carrier.mjs';
+import { prepareAgentTask, childEnv, verifySubscription, spawnSpec, supportsAgentProvider } from './carrier.mjs';
+import { extractUsage } from './usage.mjs';
 import { startLauncher, RELEASE, groupAlive, commonGitDir, boundary } from './engine-io.mjs';
 import { finalMessage } from './worker-report.mjs';
 import { groupIdentity, killGroup, leaderStart, processInfo, sameStart } from './engine-quiesce.mjs';
@@ -81,20 +96,29 @@ export const TICK_BOUND_MS = 15 * 60 * 1000;
 export const DRIVE_BOUND_MS = 4 * 60 * 60 * 1000;
 export const GATE_BOUND_MS = 2 * 60 * 60 * 1000;
 export const AGENT_BOUND_MS = 45 * 60 * 1000;
+/** PR-5b: the policy's per-attempt budget of a second-opinion route (cross-model.md: 10 minutes); a route's budget_ms may lower it. */
+export const SECOND_OPINION_BUDGET_MS = 10 * 60 * 1000;
+const PROVENANCE_MISMATCH = 'second_opinion_provenance_mismatch';
 export const RECONCILE_BOUND_MS = 120 * 1000;
 /** PR-2 seam: the exit status by which `host-admit run` reports "held, the command did not run" (host-admit.mjs owns it). */
 export { ADMISSION_HELD_EXIT };
 /**
  * Outcomes that mean NOTHING RAN (the command never took effect in the engine): re-tried under a derived generation
- * `<gen>.r<k>`, at most this many times each, then the ticket alone is Blocked naming the op. `held`: admission held it;
- * `nothing_ran`: the engine recorded nothing (its run lock was held, a usage/bad_input refusal, a wrapper failure, a kill).
+ * `<gen>.r<k>`. `nothing_ran` (the engine recorded nothing: its run lock was held, a usage/bad_input refusal, an eventless gate
+ * refusal, a wrapper or fork failure, a kill) at most RETRY_LIMITS.nothing_ran times, then the ticket alone is Blocked naming
+ * the op. `held` (admission held it) is NEVER a Block (PR-5b): it is re-tried without a count limit, paced below.
  */
-export const RETRY_LIMITS = Object.freeze({ held: 30, nothing_ran: 4 });
-const RETRYABLE = new Set(Object.keys(RETRY_LIMITS));
+export const RETRY_LIMITS = Object.freeze({ nothing_ran: 4 });
+const RETRYABLE = new Set(['held', 'nothing_ran']);
+/** PR-5b hold pacing: the wait after the k-th consecutive hold is min(MAX, BASE * 2^(k-1)); LONG flags a long hold (no Block). */
+export const HOLD_RETRY_BASE_MS = 60 * 1000;
+export const HOLD_RETRY_MAX_MS = 30 * 60 * 1000;
+export const HOLD_LONG_MS = 24 * 60 * 60 * 1000;
+/** PR-5b: tick and sweep start at decorrelated offsets (launchd starts both at load), so lock collisions do not repeat in lockstep. */
+export const START_JITTER_MS = Object.freeze({ tick: Object.freeze({ base: 0, spread: 15000 }), sweep: Object.freeze({ base: 20000, spread: 20000 }) });
 /** How long a settle waits for a launcher's group to vanish after its envelope before counting a probe. */
 const QUIESCE_WAIT_MS = 3000;
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-const LOCK_CODES = new Set(['lock_held', 'lock_timeout']);
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 /** Two unsuccessful review rounds on a candidate line end the review/repair loop (§7.1 rule 2). */
 export const MAX_FAILED_ROUNDS = 2;
@@ -145,9 +169,8 @@ const defaultDeps = () => ({
   sweepClock: undefined, // resolveSweepClock: no clock while MEASUREMENT_QUALIFIED is false
   reconcile: (t) => runEngine(engineArgv('reconcile', t, ['--deadlines', 'true']), RECONCILE_BOUND_MS),
   succeed: succeedUnavailable,
-  // The second opinion routes through the approved DAG's modelMap like every task: its tier key `review_second`.
-  secondOpinionRoute: (t, S) => (typeof S?.config?.modelMap?.review_second === 'string'
-    ? { provider: S.config.provider, modelMap: { strong: S.config.modelMap.review_second }, billing: S.config.billing } : null),
+  prepareAgent: prepareAgentTask, // the carrier's routing of every agent task (a seam only so a test can drift it)
+  now: () => Date.now(), // hold pacing only (never an op id, never a deadline)
   hooks: undefined,
   env: process.env,
 });
@@ -178,7 +201,25 @@ function loadWave(manifestPath, deps) {
   if (!p.ok) return { ok: false, code: p.problems[0]?.code ?? 'wave_manifest_unreadable', problems: p.problems };
   if (p.digest !== v.digest) return { ok: false, code: 'wave_manifest_moved', problems: [] };
   const unbound = partial ? Object.fromEntries(Object.entries(v.tickets).filter(([, x]) => !x?.ok).map(([k, x]) => [k, x?.reason ?? 'unbound'])) : {};
-  return { ok: true, partial, unbound, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest) };
+  const routes = reviewRoutesCheck(p.manifest);
+  if (!routes.ok) return { ok: false, code: routes.code, problems: [{ code: routes.code, detail: routes.detail }] };
+  return { ok: true, partial, unbound, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest), review_routes: routes.all, second_routes: routes.second };
+}
+
+/**
+ * PR-5b: a supervised wave's review routes (the manifest object itself is checked: wave.mjs validates the shape when it parses
+ * the file). Every provider id must have a verified carrier adapter; a `second_opinion` route is required; its budget is at most
+ * the policy figure. Other roles are optional and not routed by this release.
+ */
+function reviewRoutesCheck(m) {
+  const all = Array.isArray(m?.review_routes) ? m.review_routes : [];
+  const unknown = all.find((r) => !isObj(r) || !supportsAgentProvider(r.provider));
+  if (unknown) return { ok: false, code: 'review_route_provider_unknown', detail: `review route provider ${JSON.stringify(unknown?.provider)} has no verified carrier adapter` };
+  const second = reviewRoutesOf(m, 'second_opinion');
+  if (!second.length) return { ok: false, code: 'second_opinion_route_missing', detail: 'the approved wave manifest names no second_opinion review route: the mandatory second opinion has no route' };
+  const over = second.find((r) => r.budget_ms !== undefined && !(Number.isInteger(r.budget_ms) && r.budget_ms >= 1000 && r.budget_ms <= SECOND_OPINION_BUDGET_MS));
+  if (over) return { ok: false, code: 'second_opinion_budget_invalid', detail: `a second_opinion attempt budget is 1000..${SECOND_OPINION_BUDGET_MS} ms (policy), not ${over.budget_ms}` };
+  return { ok: true, all, second: second.map((r) => ({ provider: r.provider, model: r.model, budget_ms: r.budget_ms ?? SECOND_OPINION_BUDGET_MS })) };
 }
 
 const live = (o) => o.state !== 'recorded';
@@ -204,16 +245,28 @@ function opFiles(dir, id) {
  * deterministic). `spent` names the exhausted cause (RETRY_LIMITS) and `last` the last retried op.
  */
 function launchGen(J, repo, key, op, base) {
-  const counts = { held: 0, nothing_ran: 0 };
-  let last = null;
+  let nothing = 0, held = 0, firstHeld = null, last = null;
   for (let k = 0; ; k++) {
     const gen = k ? `${base}.r${k}` : base;
     const o = J.op(opId(repo, key, op, gen));
     const out = o?.result?.outcome;
-    if (!RETRYABLE.has(out)) return { gen, last, spent: Object.keys(counts).find((c) => counts[c] >= RETRY_LIMITS[c]) ?? null };
-    counts[out] += 1;
+    if (!RETRYABLE.has(out)) return { gen, last, held, firstHeld, spent: nothing >= RETRY_LIMITS.nothing_ran ? 'nothing_ran' : null };
+    if (out === 'held') { held += 1; firstHeld ??= o; } else { nothing += 1; held = 0; firstHeld = null; }
     last = o;
   }
+}
+
+/**
+ * PR-5b: after a hold the next attempt waits (paced, never a Block). Returns the wait to report, or null to launch now. The
+ * clock (deps.now) paces only; an op id never depends on it.
+ */
+function heldWait(ctx, g) {
+  if (g.last?.result?.outcome !== 'held') return null;
+  const now = ctx.deps.now(), at = g.last.result.at;
+  const wait = Math.min(HOLD_RETRY_MAX_MS, HOLD_RETRY_BASE_MS * 2 ** Math.min(Math.max(g.held - 1, 0), 20));
+  const since = g.firstHeld?.result?.at;
+  if (!Number.isFinite(at) || now >= at + wait) return null;
+  return { held: 'admission', attempts: g.held, retry_after_ms: at + wait - now, op_id: g.last.op_id, long_hold: Number.isFinite(since) && now - since >= HOLD_LONG_MS };
 }
 
 /**
@@ -225,9 +278,9 @@ async function act(J, ctx, o) {
   const f = o.files;
   mkdirSync(dirname(f.out), { recursive: true });
   for (const x of [f.out, f.envelope, f.receipt]) rmSync(x, { force: true }); // an earlier unreleased attempt's files: nothing ran
-  let spec, env;
-  try { ({ spec, env } = o.spec_kind === 'agent' ? agentLaunch(ctx, o) : { spec: deps.admitted(o.argv), env: deps.env }); }
-  catch (e) { return J.move(o.op_id, 'recorded', { result: { outcome: 'refused', code: e.code ?? 'refused', reason: e.message } }); }
+  let spec, env, plan;
+  try { ({ spec, env, plan } = o.spec_kind === 'agent' ? agentLaunch(ctx, o) : { spec: deps.admitted(o.argv), env: deps.env }); }
+  catch (e) { return J.move(o.op_id, 'recorded', { result: classify(ctx, o, { launch_error: { code: e.code ?? 'refused', reason: e.message } }) }); }
   if (!existsSync(f.prompt)) writeFileSync(f.prompt, '', { mode: 0o600 });
   writeFileSync(f.receipt, String(o.attempt), { flag: 'wx', mode: 0o600 });
   await boundary(deps.hooks, 'after-receipt', { op_id: o.op_id });
@@ -236,10 +289,10 @@ async function act(J, ctx, o) {
     files: { promptFile: f.prompt, outFile: f.out, envelopeFile: f.envelope, attemptId } });
   child.on('error', () => {});
   child.stdin?.on('error', () => {});
-  if (!child.pid) return J.move(o.op_id, 'recorded', { result: { outcome: 'spawn_failed' } });
+  if (!child.pid) return J.move(o.op_id, 'recorded', { result: classify(ctx, o, { launch_error: { code: 'spawn_failed', reason: 'the launcher did not start' } }) });
   const pgid = process.platform === 'win32' ? null : child.pid;
   await J.update(o.op_id, { pid: child.pid, pgid, leader_start: leaderStart(pgid), attempt_id: attemptId,
-    deadline: armRecord(o.bound_ms, deps.armClock ?? undefined) }, 'after-pid');
+    deadline: armRecord(o.bound_ms, deps.armClock ?? undefined), ...(o.requested ? { launched: { provider: plan.provider, model: plan.model } } : {}) }, 'after-pid');
   await new Promise((r) => child.stdin.end(RELEASE, r));
   await boundary(deps.hooks, 'after-release', { op_id: o.op_id });
   child.unref();
@@ -248,15 +301,26 @@ async function act(J, ctx, o) {
 
 /** The routed, read-only agent task of a review leg or an RCA: prepareAgentTask (tier -> modelMap), billing env, subscription check. */
 function agentLaunch(ctx, o) {
-  const plan = prepareAgentTask({ ...o.route, nodeId: o.node_id, workdir: o.cwd, timeoutMs: Math.min(o.bound_ms, 3600000), promptFile: o.files.prompt });
+  const plan = agentPlan(ctx, { route: o.route, requested: o.requested, nodeId: o.node_id, workdir: o.cwd, timeoutMs: Math.min(o.bound_ms, 3600000), promptFile: o.files.prompt });
   const env = childEnv(plan.provider, plan.billing, ctx.deps.env);
   if (plan.billing === 'subscription' && ctx.deps.verifySubscription(plan.provider, env) === false)
     throw coded('subscription_unverified', `subscription authentication not verified for ${plan.provider}`);
   return { spec: ctx.deps.agentSpec(plan, env), env, plan };
 }
 
+/**
+ * The carrier's plan of an agent task. With `requested` (a second-opinion route) the plan must launch exactly that route: the
+ * adapter's provider and model, and the model in the argv it built; otherwise PROVENANCE_MISMATCH (refused, nothing launched).
+ */
+function agentPlan(ctx, { route, requested, ...task }) {
+  const plan = ctx.deps.prepareAgent({ ...route, ...task });
+  if (requested && (plan.provider !== requested.provider || plan.model !== requested.model || plan.model_applied !== true || !plan.args.includes(requested.model)))
+    throw coded(PROVENANCE_MISMATCH, `route ${requested.provider}:${requested.model} requested, the carrier adapter built ${plan.provider}:${plan.model}`);
+  return plan;
+}
+
 /** Intent (or the existing record) for a launch op, then act on it when it is at intent with no pid. */
-async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, input, collect }) {
+async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, requested, nodeId, input, collect, record }) {
   const id = opId(ctx.repo(t), t.key, op, gen);
   let o = J.op(id);
   if (o && o.state !== 'intent') return { op_id: id, state: o.state, existing: true };
@@ -266,8 +330,8 @@ async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, 
     if (prompt !== undefined) writeFileSync(files.prompt, prompt, { mode: 0o600 });
     if (input !== undefined) writeFileSync(files.input, JSON.stringify(input), { mode: 0o600 });
     o = await J.intent({ op_id: id, ticket: t.key, kind: 'launch', op, gen, cwd: t.worktree, bound_ms: bound, files,
-      seq_at: seqOf(ctx.deps.readState(t)), ...(collect ? { collect } : {}),
-      ...(route ? { spec_kind: 'agent', route, node_id: nodeId } : { spec_kind: 'engine', argv: input !== undefined ? [...argv, '--input', files.input] : argv }) });
+      seq_at: seqOf(ctx.deps.readState(t)), ...(collect ? { collect } : {}), ...(record ?? {}),
+      ...(route ? { spec_kind: 'agent', route, node_id: nodeId, ...(requested ? { requested } : {}) } : { spec_kind: 'engine', argv: input !== undefined ? [...argv, '--input', files.input] : argv }) });
   }
   if (o.pid) return { op_id: id, state: o.state };
   o = await act(J, ctx, o);
@@ -279,27 +343,35 @@ async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, 
  * from the ENGINE'S OWN RECORD, never from the exit code alone:
  *   collect (gate review)  `collected` when the review chain holds this execution; `refused` only when the engine logged a
  *                          review GATE refusal after the launch; otherwise `nothing_ran`.
- *   drive / gate red|reassess|ship-ready  `held` on the admission exit; `ran` when the engine printed its own output (a drive
- *                          status, or a gate decision that is not a lock refusal) or its event seq moved; otherwise
- *                          `nothing_ran` (its run lock was held, a usage/bad_input refusal, a wrapper failure, a kill).
+ *   drive                  `held` on the admission exit; `ran` when the engine printed its status or its event seq moved;
+ *   gate red|reassess|ship-ready  `held` on the admission exit; `ran` only when the engine RECORDED the decision (a GATE event
+ *                          of that gate after the launch: run-engine gate() notes every decision it makes; a refusal it returns
+ *                          without an event, e.g. worktree_mismatch, no_state, lock_*, binding drift, took no effect);
+ *   otherwise `nothing_ran` (its run lock was held, a usage/bad_input refusal, a wrapper failure, a kill).
+ * A launch that never started (`env.launch_error`: the spec threw, the fork failed) is `nothing_ran` for an engine command and
+ * a coded `refused` for an agent task (a review leg's route was refused: its caller decides, e.g. the next second-opinion route).
  */
 function classify(ctx, o, env) {
-  if (o.spec_kind === 'agent') return { outcome: env.exit_code === 0 ? 'ran' : 'failed', exit_code: env.exit_code, out: o.files.out };
+  if (env.launch_error) return o.spec_kind === 'agent' ? { outcome: 'refused', code: env.launch_error.code, reason: env.launch_error.reason }
+    : { outcome: 'nothing_ran', cause: env.launch_error.code, reason: env.launch_error.reason };
+  if (o.spec_kind === 'agent') return { outcome: env.exit_code === 0 ? 'ran' : 'failed', exit_code: env.exit_code, ...(env.spawn_error ? { spawn_error: String(env.spawn_error) } : {}), out: o.files.out };
   const t = ctx.ticket(o.ticket);
   const S = t ? ctx.deps.readState(t) : null;
   const out = readJsonFile(o.files.out);
   const cause = isObj(out) && typeof out.code === 'string' ? out.code : `exit ${env.exit_code ?? env.signal ?? 'unknown'}`;
+  if (o.collect && inChain(S, o.collect)) return { outcome: 'collected' };
+  if (env.exit_code === ADMISSION_HELD_EXIT) return { outcome: 'held', at: ctx.deps.now() }; // collect included (PR-5b)
   if (o.collect) {
-    if (inChain(S, o.collect)) return { outcome: 'collected' };
     const refusal = (S?.events ?? []).find((e) => e.type === 'GATE' && e.gate === 'review' && e.ok === false && e.seq > (o.seq_at ?? 0)
       && (e.review_execution === undefined || e.review_execution === o.collect.rx));
     if (refusal) return { outcome: 'refused', code: refusal.code ?? null, seq: refusal.seq };
     return { outcome: 'nothing_ran', cause };
   }
-  if (env.exit_code === ADMISSION_HELD_EXIT) return { outcome: 'held' };
-  const own = isObj(out) && (o.op === 'drive' ? out.schema === STATUS_SCHEMA && typeof out.outcome === 'string'
-    : typeof out.gate === 'string' && typeof out.ok === 'boolean' && !LOCK_CODES.has(out.code));
-  if (own || seqOf(S) !== (o.seq_at ?? seqOf(S))) return { outcome: 'ran', exit_code: env.exit_code, out: o.files.out };
+  const moved = seqOf(S) !== (o.seq_at ?? seqOf(S));
+  const gate = o.op.startsWith('gate.') ? o.op.slice('gate.'.length) : null;
+  const ran = gate === null ? moved || (isObj(out) && out.schema === STATUS_SCHEMA && typeof out.outcome === 'string')
+    : Array.isArray(S?.events) ? S.events.some((e) => e.type === 'GATE' && e.gate === gate && e.seq > (o.seq_at ?? 0)) : moved;
+  if (ran) return { outcome: 'ran', exit_code: env.exit_code, out: o.files.out };
   return { outcome: 'nothing_ran', cause };
 }
 
@@ -370,34 +442,90 @@ function agentJson(o) {
   try { return JSON.parse(msg.text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { return null; }
 }
 
-/** Review dispatch and collection for one review execution: legs in order, then ONE collect op (gate review once). */
+/** The models a finished agent op's provider reports it served (usage.mjs), or null when the provider names none. */
+function reportedModels(o) {
+  const text = readText(o.files.out);
+  if (text === null) return null;
+  try { const u = extractUsage(o.route.provider, text); return Array.isArray(u?.models_used) && u.models_used.length ? u.models_used : null; } catch { return null; }
+}
+/** A served model id is the requested one, or its dated/variant form (`<id>-<suffix>`, `<id>[...]`). */
+const servedAs = (served, requested) => { const strip = (m) => String(m).replace(/\[[^\]]*\]$/, ''); return strip(served) === strip(requested) || strip(served).startsWith(`${strip(requested)}-`); };
+
+/**
+ * PR-5b: one recorded second-opinion attempt. `usable` with the launch-stamped artifact; `mismatch` when what launched (or what
+ * the provider reports it served) is not the requested route; otherwise unusable with the reason (the next route is tried).
+ */
+function secondVerdict(o) {
+  const r = o.result ?? {};
+  if (r.code === PROVENANCE_MISMATCH) return { mismatch: r.reason ?? r.code };
+  if (r.outcome !== 'ran') return { why: r.code ?? r.outcome ?? 'unknown' };
+  const L = o.launched;
+  if (!isObj(L) || L.provider !== o.requested?.provider || L.model !== o.requested?.model) return { mismatch: `launched ${JSON.stringify(L ?? null)} is not the requested route ${JSON.stringify(o.requested ?? null)}` };
+  const served = reportedModels(o);
+  if (served && !served.some((m) => servedAs(m, L.model))) return { mismatch: `route ${L.provider}:${L.model} requested, the provider reports it served ${served.join(', ')}` };
+  const art = agentJson(o);
+  if (!isObj(art)) return { why: 'no JSON artifact (unavailable, usage limit or unreadable)' };
+  const id = `${L.provider}:${L.model}`;
+  return { usable: true, artifact: { ...art, route: id, reviewer_identity: id } };
+}
+
+/**
+ * Review dispatch and collection for one review execution: legs in order, then ONE collect op (gate review once). The second
+ * opinion takes the approved manifest routes in order, one attempt each (PR-5b, S7 Option A; see the header).
+ */
 async function review(J, ctx, t, S, { kind, rx, facts }) {
   const repo = ctx.repo(t), prefix = kind === 'original' ? 'review' : 'confirmation';
   const primaryRoute = { provider: S?.config?.provider, modelMap: S?.config?.modelMap ?? {}, billing: S?.config?.billing };
-  const secondRoute = ctx.deps.secondOpinionRoute(t, S);
-  if (!secondRoute) return { blocked: await J.block(t.key, 'second_opinion_route_unresolved', 'the approved DAG config has no modelMap.review_second: the second-opinion review has no resolved model') };
+  const soRoutes = ctx.secondRoutes ?? [];
+  const soName = (i) => (i === 0 ? 'second' : `second-${i + 1}`);
+  const soRoute = (r) => ({ provider: r.provider, modelMap: { strong: r.model }, billing: S?.config?.billing });
+  const requestedOf = (r) => ({ provider: r.provider, model: r.model });
   const leg = (name) => J.op(opId(repo, t.key, `${prefix}.${name}`, rx));
-  const routes = { primary: primaryRoute, second: secondRoute, reconcile: primaryRoute };
-  // every leg's route is resolved (tier -> modelMap, the carrier's own refusals) before any leg is launched
-  for (const name of kind === 'original' ? LEGS : LEGS.slice(0, 2)) {
-    try { prepareAgentTask({ ...routes[name], nodeId: `${prefix}-${name}`, workdir: t.worktree, timeoutMs: 1000, promptFile: fileURLToPath(import.meta.url) }); }
-    catch (e) { return { blocked: await J.block(t.key, 'review_route_refused', `${name}: ${e.message}`) }; }
+  // every leg's route is resolved (tier -> modelMap, the carrier's own refusals, second-opinion provenance) before any leg is launched
+  const checks = [['primary', primaryRoute, null], ...(kind === 'original' ? [['reconcile', primaryRoute, null]] : []),
+    ...soRoutes.map((r, i) => [soName(i), soRoute(r), requestedOf(r)])];
+  let primaryPlan = null;
+  for (const [name, route, requested] of checks) {
+    let plan;
+    try { plan = agentPlan(ctx, { route, requested, nodeId: `${prefix}-${name}`, workdir: t.worktree, timeoutMs: 1000, promptFile: fileURLToPath(import.meta.url) }); }
+    catch (e) { return { blocked: await J.block(t.key, e.code === PROVENANCE_MISMATCH ? PROVENANCE_MISMATCH : 'review_route_refused', `${name}: ${e.message}`) }; }
+    if (name === 'primary') primaryPlan = plan;
+    else if (requested && plan.provider === primaryPlan.provider && plan.model === primaryPlan.model)
+      return { blocked: await J.block(t.key, 'second_opinion_not_distinct', `${name}: route ${plan.provider}:${plan.model} is the primary reviewer's own route`) };
   }
+  if (!soRoutes.length) return { blocked: await J.block(t.key, 'second_opinion_route_missing', 'no approved second_opinion route') };
   const started = [];
-  for (const name of ['primary', 'second']) {
-    if (!leg(name)) started.push(await launch(J, ctx, t, { op: `${prefix}.${name}`, gen: rx, bound: AGENT_BOUND_MS, route: routes[name], nodeId: `${prefix}-${name}`,
-      prompt: reviewPrompt(t, name, kind, rx, facts) }));
+  if (!leg('primary')) started.push(await launch(J, ctx, t, { op: `${prefix}.primary`, gen: rx, bound: AGENT_BOUND_MS, route: primaryRoute, nodeId: `${prefix}-primary`,
+    prompt: reviewPrompt(t, 'primary', kind, rx, facts) }));
+  // the second opinion: ONE attempt per approved route, in order; the next only once the previous is recorded unusable
+  let so = null;
+  const attempts = [];
+  for (let i = 0; i < soRoutes.length && so === null; i++) {
+    const o = leg(soName(i));
+    if (!o) {
+      started.push(await launch(J, ctx, t, { op: `${prefix}.${soName(i)}`, gen: rx, bound: soRoutes[i].budget_ms, route: soRoute(soRoutes[i]), requested: requestedOf(soRoutes[i]),
+        nodeId: `${prefix}-${soName(i)}`, prompt: reviewPrompt(t, 'second', kind, rx, facts) }));
+      so = 'started';
+    } else if (live(o)) so = 'live';
+    else {
+      const v = secondVerdict(o);
+      if (v.mismatch) return { blocked: await J.block(t.key, PROVENANCE_MISMATCH, `${o.op_id}: ${v.mismatch}`, { op_id: o.op_id }) };
+      if (v.usable) so = { op: o, artifact: v.artifact };
+      else attempts.push({ op_id: o.op_id, outcome: o.result?.outcome ?? null, why: v.why });
+    }
   }
+  if (so === null) return { blocked: await J.block(t.key, 'second_opinion_unavailable', `no approved second-opinion route produced a usable review (${attempts.map((a) => `${a.op_id}: ${a.why}`).join('; ')})`, { attempts }) };
   if (started.length) return { dispatched: started };
-  const [p, s] = [leg('primary'), leg('second')];
-  if (live(p) || live(s)) return { waiting: 'review legs live' };
-  const failedLeg = [p, s].find((o) => o.result?.outcome !== 'ran');
-  if (failedLeg) return { blocked: await J.block(t.key, 'review_leg_failed', `${failedLeg.op_id} ended ${failedLeg.result?.outcome}`, { op_id: failedLeg.op_id }) };
-  const artifacts = { primary: agentJson(p), second_opinion: agentJson(s) };
-  if (!isObj(artifacts.primary) || !isObj(artifacts.second_opinion)) return { blocked: await J.block(t.key, 'review_leg_unreadable', 'a review leg left no JSON artifact', { op_id: (!isObj(artifacts.primary) ? p : s).op_id }) };
-  if (kind === 'confirmation') return collect(J, ctx, t, { prefix, kind, rx, input: { kind, review_execution: rx, ...artifacts } }); // gate.mjs confirm(): no reconciliation
+  const p = leg('primary');
+  if (live(p) || so === 'live') return { waiting: 'review legs live' };
+  if (p.result?.outcome !== 'ran') return { blocked: await J.block(t.key, 'review_leg_failed', `${p.op_id} ended ${p.result?.outcome}`, { op_id: p.op_id }) };
+  const artifacts = { primary: agentJson(p), second_opinion: so.artifact };
+  if (!isObj(artifacts.primary)) return { blocked: await J.block(t.key, 'review_leg_unreadable', 'a review leg left no JSON artifact', { op_id: p.op_id }) };
+  // provenance of the collected second opinion, recorded on the collect op (never a cross-provider claim for one provider)
+  const provenance = { second_opinion: so.artifact.route, same_provider: so.op.launched.provider === primaryPlan.provider, second_opinion_op: so.op.op_id };
+  if (kind === 'confirmation') return collect(J, ctx, t, { prefix, kind, rx, input: { kind, review_execution: rx, ...artifacts }, provenance }); // gate.mjs confirm(): no reconciliation
   const r = leg('reconcile');
-  if (!r) return { dispatched: [await launch(J, ctx, t, { op: `${prefix}.reconcile`, gen: rx, bound: AGENT_BOUND_MS, route: routes.reconcile, nodeId: `${prefix}-reconcile`,
+  if (!r) return { dispatched: [await launch(J, ctx, t, { op: `${prefix}.reconcile`, gen: rx, bound: AGENT_BOUND_MS, route: primaryRoute, nodeId: `${prefix}-reconcile`,
     prompt: reviewPrompt(t, 'reconcile', kind, rx, facts, artifacts) })] };
   if (live(r)) return { waiting: 'reconcile leg live' };
   const input = r.result?.outcome === 'ran' ? agentJson(r) : null;
@@ -407,7 +535,7 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
     return { blocked: await J.block(t.key, 'review_input_invalid', 'the reconciled gate input is missing, of another execution, or altered a reviewer artifact', { op_id: r.op_id }) };
   // only the review gate's own input fields reach it (an unknown key is the gate's bad_input usage error)
   const fields = Object.fromEntries(Object.entries(input).filter(([k]) => GATE_FIELDS.review.includes(k) && k !== 'repair_prompt_file'));
-  return collect(J, ctx, t, { prefix, kind, rx, input: fields });
+  return collect(J, ctx, t, { prefix, kind, rx, input: fields, provenance });
 }
 
 /** The fixed findings of an original FAIL input (reconciliation disposition `fix`), from both reviewers. */
@@ -435,13 +563,15 @@ function repairBrief(t, rx, findings) {
  * under the journal lock) and the classifier reads the chain or a logged refusal. A nothing-ran outcome (run lock held,
  * usage refusal, wrapper failure, kill) is re-tried under `<rx>.r<k>`, bounded, then the ticket alone is Blocked.
  */
-async function collect(J, ctx, t, { prefix, kind, rx, input }) {
+async function collect(J, ctx, t, { prefix, kind, rx, input, provenance }) {
   const repo = ctx.repo(t);
   if (inChain(ctx.deps.readState(t), { rx, kind })) return { collected: 'in_chain' };
   const g = launchGen(J, repo, t.key, prefix, rx);
   const prior = J.op(opId(repo, t.key, prefix, g.gen));
   if (prior?.state === 'recorded') return prior.result?.outcome === 'collected' ? { collected: prior.op_id } : { parked: 'gate_refused', op_id: prior.op_id, code: prior.result?.code ?? null };
   if (!prior && g.spent) return { blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: gate review recorded nothing ${RETRY_LIMITS[g.spent]} times (${g.last.result?.cause ?? g.spent})`, { op_id: g.last.op_id }) };
+  const wait = prior ? null : heldWait(ctx, g);
+  if (wait) return wait;
   let full = input;
   if (kind === 'original' && input.primary?.outcome === 'FAIL') {
     const findings = fixFindings(input);
@@ -452,7 +582,7 @@ async function collect(J, ctx, t, { prefix, kind, rx, input }) {
       full = { ...input, repair_prompt_file: brief };
     }
   }
-  return { collecting: await launch(J, ctx, t, { op: prefix, gen: g.gen, argv: engineArgv('gate review', t), bound: GATE_BOUND_MS, input: full, collect: { rx, kind } }) };
+  return { collecting: await launch(J, ctx, t, { op: prefix, gen: g.gen, argv: engineArgv('gate review', t), bound: GATE_BOUND_MS, input: full, collect: { rx, kind }, record: provenance }) };
 }
 
 // ---------------------------------------------------------------------------------------------------- recovery (§7.1)
@@ -513,6 +643,8 @@ async function stepTicket(J, ctx, t) {
     if (!prior && g.spent) return { blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: ${cmd} did not run (${g.spent}, last ${g.last.result?.cause ?? g.spent}) ${RETRY_LIMITS[g.spent]} times`, { op_id: g.last.op_id }) };
     // already ran at this engine state: no blind re-run. Parked (recomputed every tick) until the engine state moves.
     if (prior?.state === 'recorded') return { parked: 'no_progress', op_id: prior.op_id, outcome: prior.result?.outcome ?? null };
+    const wait = prior ? null : heldWait(ctx, g);
+    if (wait) return wait;
     return { launched: await launch(J, ctx, t, { op, gen, argv: engineArgv(cmd, t), bound: cmd === 'drive' ? DRIVE_BOUND_MS : GATE_BOUND_MS, input }) };
   };
   if (n.action === 'run') {
@@ -550,7 +682,7 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
   mkdirSync(paths.dir, { recursive: true });
   const byKey = new Map(w.manifest.tickets.map((t) => [t.key, t]));
   const repos = new Map();
-  const ctx = { deps, strategy: w.merge_strategy, ticket: (k) => byKey.get(k) ?? null,
+  const ctx = { deps, strategy: w.merge_strategy, secondRoutes: w.second_routes, ticket: (k) => byKey.get(k) ?? null,
     repo: (t) => { if (!repos.has(t.key)) repos.set(t.key, deps.repoOf(t)); return repos.get(t.key); } };
   try {
     return await withJournal(paths, w.manifest.wave_id, async (J) => {
@@ -560,10 +692,11 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
         J.doc.tick = null; await J.commit();
         return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_unapproved', unbound: w.unbound, reason: 'a wave starts only fully bound' } };
       }
-      if (!J.doc.binding) J.doc.binding = { manifest_digest: w.digest, merge_strategy: w.merge_strategy };
-      else if (J.doc.binding.manifest_digest !== w.digest || J.doc.binding.merge_strategy !== w.merge_strategy) {
+      if (!J.doc.binding) J.doc.binding = { manifest_digest: w.digest, merge_strategy: w.merge_strategy, review_routes: w.review_routes };
+      else if (J.doc.binding.manifest_digest !== w.digest || J.doc.binding.merge_strategy !== w.merge_strategy
+        || JSON.stringify(J.doc.binding.review_routes ?? null) !== JSON.stringify(w.review_routes)) {
         J.doc.tick = null; await J.commit();
-        return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_plan_changed', reason: 'the manifest (or its merge strategy) changed since this wave started: a plan change is the owner\'s' } };
+        return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_plan_changed', reason: 'the manifest (its merge strategy or review routes) changed since this wave started: a plan change is the owner\'s' } };
       }
       await J.commit('after-tick-start');
       const out = { schema: SUPERVISOR_SCHEMA, outcome: 'ticked', wave_id: w.manifest.wave_id, merge_strategy: w.merge_strategy, settled: [], tickets: {} };
@@ -728,9 +861,14 @@ export async function main(argv, deps = {}) {
   const manifestPath = resolve(flags.wave);
   const stateDir = flags['state-dir'] ? resolve(flags['state-dir']) : DEFAULT_STATE_DIR();
   if (!isAbsolute(stateDir)) throw Object.assign(new Error('--state-dir must resolve to an absolute path'), { usage: true });
+  if (cmd === 'tick' || cmd === 'sweep') { // decorrelated start (START_JITTER_MS): launchd fires both jobs together at load
+    const J = START_JITTER_MS[cmd];
+    await (deps.sleep ?? delay)(J.base + Math.floor((deps.random ?? Math.random)() * J.spread));
+  }
   if (cmd === 'tick') {
-    setTimeout(() => process.exit(70), TICK_BOUND_MS).unref(); // the tick's own in-process bound
-    return tick({ manifestPath, stateDir }, deps);
+    const watchdog = setTimeout(() => process.exit(70), TICK_BOUND_MS); // the tick's own in-process bound
+    watchdog.unref();
+    try { return await tick({ manifestPath, stateDir }, deps); } finally { clearTimeout(watchdog); }
   }
   if (cmd === 'sweep') return sweep({ manifestPath, stateDir }, deps);
   return installPlan({ manifestPath, stateDir, remove: cmd === 'uninstall', write: flags.write === 'true', home: deps.home ?? homedir() }, deps);

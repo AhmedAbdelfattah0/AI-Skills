@@ -12,6 +12,9 @@
  * (gate ship-ready) published -> owner_publish. The fake `gate review` keeps the real gate's one-record-per-execution and
  * repair-brief (`repair_prompt_missing`) rules and its unknown-field `bad_input` refusal; behaviour `lock` makes a command
  * fail as the engine does under a held run lock (exit 1, nothing recorded). Other phases: owner_stop (budget_spent), terminal (review_terminal).
+ * PR-5b behaviours: `refuse_noevent` (a gate prints a refusal the engine records no event for); for the fake agent,
+ * `second_provider: { <provider>: 'fail' | 'usage_limit' | 'hang' }` (that second-opinion route is unavailable) and
+ * `report_model: { <leg>: <model> }` (the claude output names the model it served, as `modelUsage` does).
  *
  * CLI (the crash tests): node supervisor.test-helper.mjs tick|sweep <worldDir> [<boundary>:<n> kill|hang]
  *   kill: SIGKILL itself at the n-th hit of that boundary; hang: never resolve there (the journal lock stays held).
@@ -22,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { testClock } from './lib/deadline.mjs';
 import { groupAlive } from './engine-io.mjs';
 import { tick, sweep } from './supervisor.mjs';
+import { manifestDigest } from './wave.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const WAVE_ID = 'W-S';
@@ -41,6 +45,8 @@ fs.appendFileSync(path.join(W, 'effects.jsonl'), JSON.stringify({ kind: sub, tic
   ...(sub === 'gate review' ? (() => { const i = JSON.parse(fs.readFileSync(flag('input'), 'utf8')); return { review_kind: i.kind, rx: i.review_execution }; })() : {}) }) + '\n');
 if (beh === 'hang') { setInterval(() => {}, 1e6); return; }
 if (beh === 'held') process.exit(75);
+// an engine-side gate refusal that writes no engine event (worktree_mismatch, no_state, lock_foreign_host, binding drift ...)
+if (beh === 'refuse_noevent') { process.stdout.write(JSON.stringify({ gate: a[2], ok: false, code: 'worktree_mismatch' })); process.exit(2); }
 if (beh === 'lock') { process.stderr.write('run-engine: lock_held'); process.exit(1); } // the engine refused before doing anything
 if (beh === 'lock_once') { const f = path.join(W, 'lock_once-' + key); if (!fs.existsSync(f)) { fs.writeFileSync(f, '1'); process.stderr.write('run-engine: lock_held'); process.exit(1); } }
 if (beh === 'linger') require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' }).unref();
@@ -103,17 +109,24 @@ process.stdin.on('end', () => {
         : { kind, review_execution: rx, primary: arts.primary, second_opinion: arts.second_opinion, reconciliation: { dispositions }, ...(beh.extra_key ? { notes: 'x' } : {}) };
     } else if (leg === 'rca') out = beh.rca || { hypothesis: 'h', evidence: [], differs: '', path: 'blocked' };
     if (beh['fail_' + leg]) process.exit(3);
+    const sp = leg === 'second' ? (beh.second_provider || {})[provider] : undefined; // a second-opinion route that is unavailable
+    if (sp === 'fail') process.exit(3);
+    if (sp === 'usage_limit') { process.stdout.write(JSON.stringify({ type: 'error', message: 'usage limit reached' }) + '\n'); return; }
     // each provider's real final-message shape (worker-report.mjs finalMessage parses them)
     process.stdout.write(provider === 'codex' ? JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(out) } }) + '\n'
-      : JSON.stringify({ type: 'result', is_error: false, result: JSON.stringify(out) }));
+      : JSON.stringify({ type: 'result', is_error: false, result: JSON.stringify(out), ...((beh.report_model || {})[leg] ? { usage: { input_tokens: 1 }, modelUsage: { [beh.report_model[leg]]: { inputTokens: 1 } } } : {}) }));
   };
-  const slow = (beh.slow || {})[leg];
+  const slow = leg === 'second' && (beh.second_provider || {})[provider] === 'hang' ? 'hang' : (beh.slow || {})[leg];
   if (slow === 'hang') setInterval(() => {}, 1e6); else setTimeout(finish, slow || 0);
 });
 `;
 
-/** Create a world: tickets [{ key, deps?, phase?, behaviour? }]. Returns { dir, manifest, ticket(key) }. */
-export function makeWorld(dir, tickets, { merge_strategy } = {}) {
+/** The default approved review routes of a world: one second-opinion route (the owner's configuration, not the engine's). */
+export const CODEX_ROUTE = Object.freeze({ role: 'second_opinion', provider: 'codex', model: 'codex-strong-x' });
+export const FABLE_ROUTE = Object.freeze({ role: 'second_opinion', provider: 'claude', model: 'claude-fable-x' });
+
+/** Create a world: tickets [{ key, deps?, phase?, behaviour? }]; `routes` = the manifest's review_routes. Returns { dir, manifest }. */
+export function makeWorld(dir, tickets, { merge_strategy, routes = [CODEX_ROUTE] } = {}) {
   mkdirSync(join(dir, 'state'), { recursive: true });
   mkdirSync(join(dir, 'runs'), { recursive: true });
   writeFileSync(join(dir, 'fake-engine.cjs'), FAKE_ENGINE);
@@ -121,6 +134,7 @@ export function makeWorld(dir, tickets, { merge_strategy } = {}) {
   writeFileSync(join(dir, 'effects.jsonl'), '');
   writeFileSync(join(dir, 'clock'), '1000000000');
   const manifest = { schema: 'ship-ticket-wave-v1', wave_id: WAVE_ID, endpoint: 'SHIP_READY', heavy_slots: 1, ...(merge_strategy ? { merge_strategy } : {}),
+    ...(routes ? { review_routes: routes } : {}),
     tickets: tickets.map((t) => ({ key: t.key, plan: `.specs/plans/${t.key}.md`, run_id: `run-${t.key}`, worktree: join(dir, 'wt', t.key), branch: `feat/${t.key}`, deps: t.deps ?? [], dep_mode: 'ship_ready', resources: [] })) };
   for (const t of manifest.tickets) mkdirSync(t.worktree, { recursive: true });
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
@@ -161,7 +175,7 @@ export function worldDeps(dir, over = {}) {
   const manifestPath = join(dir, 'manifest.json');
   const text = readFileSync(manifestPath, 'utf8');
   const manifest = JSON.parse(text);
-  const digest = 'sha256:' + Buffer.from(text).toString('hex').slice(0, 64).padEnd(64, '0');
+  const digest = manifestDigest(text); // the real digest of the manifest bytes: any edit (a route list included) moves it
   return {
     verifyWave: () => ({ ok: true, digest }),
     readManifest: () => ({ ok: true, manifest, digest, problems: [] }),
@@ -177,7 +191,6 @@ export function worldDeps(dir, over = {}) {
     armClock: worldClock(dir),
     sweepClock: worldClock(dir),
     reconcile: (t) => { appendFileSync(join(dir, 'effects.jsonl'), JSON.stringify({ kind: 'reconcile', ticket: t.key }) + '\n'); return { status: 0 }; },
-    secondOpinionRoute: () => ({ provider: 'codex', modelMap: { strong: 'codex-strong-x' } }),
     env: { ...process.env, SUP_WORLD: dir },
     ...over,
   };
