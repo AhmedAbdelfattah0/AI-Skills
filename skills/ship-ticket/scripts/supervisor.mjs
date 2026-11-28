@@ -193,7 +193,7 @@ function runEngine(argv, timeout) {
  * e.g. a finished ticket's worktree removed) is `partial`: those tickets are listed in `unbound` and parked, the others
  * continue. The caller accepts a partial wave only after a fully verified first tick bound the same digest.
  */
-function loadWave(manifestPath, deps) {
+function loadWave(manifestPath, deps, { routes: checkRoutes = true } = {}) {
   const v = deps.verifyWave(manifestPath);
   const partial = !v.ok && v.code === 'wave_unapproved' && typeof v.digest === 'string' && !(v.unlisted ?? []).length && isObj(v.tickets);
   if (!v.ok && !partial) return { ok: false, code: v.code ?? 'wave_unverified', problems: v.problems ?? [] };
@@ -201,7 +201,8 @@ function loadWave(manifestPath, deps) {
   if (!p.ok) return { ok: false, code: p.problems[0]?.code ?? 'wave_manifest_unreadable', problems: p.problems };
   if (p.digest !== v.digest) return { ok: false, code: 'wave_manifest_moved', problems: [] };
   const unbound = partial ? Object.fromEntries(Object.entries(v.tickets).filter(([, x]) => !x?.ok).map(([k, x]) => [k, x?.reason ?? 'unbound'])) : {};
-  const routes = reviewRoutesCheck(p.manifest);
+  // the sweep skips the route check: deadline enforcement of live ops never stops on a route configuration problem
+  const routes = checkRoutes ? reviewRoutesCheck(p.manifest) : { ok: true, all: [], second: [] };
   if (!routes.ok) return { ok: false, code: routes.code, problems: [{ code: routes.code, detail: routes.detail }] };
   return { ok: true, partial, unbound, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest), review_routes: routes.all, second_routes: routes.second };
 }
@@ -735,7 +736,7 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
 /** One sweep: engine reconcile per run, then the journal's own deadlines (lock-free read; signals only verified groups). */
 export async function sweep({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, depsIn = {}) {
   const deps = withDefaults(depsIn);
-  const w = loadWave(manifestPath, deps);
+  const w = loadWave(manifestPath, deps, { routes: false });
   if (!w.ok) return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: w.code } };
   const paths = journalPaths(stateDir, w.manifest.wave_id);
   const doc = readJournal(paths, w.manifest.wave_id);

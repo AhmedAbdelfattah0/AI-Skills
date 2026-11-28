@@ -643,6 +643,12 @@ test('second opinion: Codex unavailable (nonexistent binary; a usage-limit reply
   assert.deepEqual(secondLegs(dir2).map((e) => e.provider), ['codex', 'claude']);
   assert.equal(J2.ops['rtest:T1:review:rx-1'].same_provider, true);
   assert.ok(J2.ship_ready.T1);
+  // a provider whose subscription authentication is not verified (quota/auth) is refused before launch: one fallback attempt
+  const dir4 = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes });
+  const J4 = await settleAll(dir4, { verifySubscription: (p) => p !== 'codex' });
+  assert.equal(J4.ops['rtest:T1:review.second:rx-1'].result.code, 'subscription_unverified');
+  assert.deepEqual(secondLegs(dir4).map((e) => e.provider), ['claude']);
+  assert.ok(J4.ship_ready.T1);
   // the confirmation round takes the same route order
   const dir3 = world(t, [{ key: 'T1', phase: 'confirmation_owed', behaviour: { second_provider: { codex: 'fail' } } }], { routes });
   const J3 = await settleAll(dir3);
@@ -699,6 +705,7 @@ test('wave validation: an unknown provider, a missing second_opinion route or a 
     assert.equal(r.code, 2, JSON.stringify(routes));
     assert.equal(r.out.code, code, JSON.stringify(r.out));
     assert.equal(effects(dir).length, 0);
+    assert.equal((await sweep(opts(dir), worldDeps(dir))).code, 0, 'the sweep never stops enforcing on a route problem');
   }
   // other roles are optional and ignored (no effect on routing)
   const dir = world(t, [{ key: 'T1', phase: 'review_owed' }], { routes: [{ role: 'primary', provider: 'codex', model: 'x' }, CODEX_ROUTE] });
