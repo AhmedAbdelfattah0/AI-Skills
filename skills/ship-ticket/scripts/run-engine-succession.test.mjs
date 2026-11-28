@@ -99,6 +99,7 @@ function baseMoves(fx, o, files, { commit = true } = {}) {
   for (const [p, c] of Object.entries(files)) { mkdirSync(join(up, dirname(p)), { recursive: true }); writeFileSync(join(up, p), c); }
   git('add', '-A'); git('commit', '-q', '-m', 'predecessor merged'); git('push', '-q', 'origin', 'HEAD:refs/heads/main');
   o.fetch();
+  o.pre = o.sha('HEAD'); // the ticket tip the rebase rewrites
   o.git('rebase', '-q', 'origin/main');
   return o.sha('origin/main');
 }
@@ -114,7 +115,6 @@ test('P4-1 base move after the freeze: in-run generation, RED renewed on the new
   assert.equal(before.gates.red.r.parser, 2, 'the RED evidence names the parser that read it');
   assert.equal(before.gates.red.r.base_tree.commit, before.base.merge_base, 'RED ran in a worktree of the approved base, not on the candidate');
   assert.equal(worktrees(o), 1, 'the RED base worktree is removed after RED');
-  const headAtFreeze = before.succession.head;
   const newTip = baseMoves(fx, o, { 'upstream/f1.txt': 'merged predecessor\n' });
   refused(fx.gate('ship-ready', {}), 'candidate_mismatch'); // the candidate against the OLD pin now carries the base delta
   const p = succeed(fx, undefined, { plan: 'true' });
@@ -133,9 +133,10 @@ test('P4-1 base move after the freeze: in-run generation, RED renewed on the new
   assert.equal(gen.review_required, true, 'C2 (a): a full fresh review');
   assert.equal('retention' in gen, false, 'no retention field exists');
   assert.deepEqual(gen.invalidated.red, ['r']);
-  assert.equal(gen.git.old_head, headAtFreeze);
-  assert.equal(gen.git.preserved, true);
-  assert.equal(o.sha(gen.git.retained_ref), headAtFreeze, 'the predecessor head is retained by a run-private ref');
+  assert.notEqual(o.gitRaw('merge-base', '--is-ancestor', o.pre, 'HEAD').status, 0, 'the rebase rewrote the ticket commit');
+  assert.deepEqual([gen.git.old_head, gen.git.old_head_source, gen.git.preserved], [o.pre, 'orig_head', true], 'without --prepare, the rewritten tip (ORIG_HEAD) is found');
+  assert.equal(o.sha(gen.git.retained_ref), o.pre, 'the rewritten predecessor commit is retained by a run-private ref');
+  assert.equal(o.gitRaw('merge-base', '--is-ancestor', before.succession.head, gen.git.retained_ref).status, 0, 'it descends from the head recorded at the freeze');
   assert.equal(gen.git.new_head, o.sha('HEAD'));
   assert.equal(S.succession.transition, undefined, 'the transition record is gone in the same commit');
   assert.equal(S.local_proof, null);
@@ -327,7 +328,7 @@ test('P4-8 crash at each point of the transition: the predecessor stays authorit
   // point 2: ref created, nothing installed
   await assert.rejects(succeedCmd(fx.ctx({ input, hooks: crashAt('succession-retained') })), /crash at succession-retained/);
   S = stateOf(fx);
-  assert.equal(ref(S).stdout.trim(), before.succession.head);
+  assert.equal(ref(S).stdout.trim(), o.pre);
   assert.equal(S.succession.g, 0);
   // point 3: successor built, crash just before its one commit (also a throwing beforeCommit)
   await assert.rejects(succeedCmd(fx.ctx({ input, hooks: crashAt('succession-commit') })), /crash at succession-commit/);
@@ -341,7 +342,7 @@ test('P4-8 crash at each point of the transition: the predecessor stays authorit
   ok(succeed(fx, input), 'resumed');
   S = stateOf(fx);
   assert.deepEqual([S.succession.g, S.succession.generations.length, S.succession.transition], [1, 1, undefined]);
-  assert.equal(o.sha(S.succession.generations[0].git.retained_ref), before.succession.head);
+  assert.equal(o.sha(S.succession.generations[0].git.retained_ref), o.pre);
   refused(succeed(fx, input), 'succession_nothing_changed'); // a repeat never records a second generation
   assert.equal(stateOf(fx).succession.generations.length, 1);
 });
@@ -359,7 +360,7 @@ test('P4-8b --prepare before a destructive rebase retains the pre-rebase head; t
   assert.notEqual(o.gitRaw('merge-base', '--is-ancestor', preRebase, 'HEAD').status, 0, 'the rebase rewrote the ticket commit');
   const g = succeed(fx, { kind: 'base', reason: 'rebase' });
   ok(g);
-  assert.deepEqual([g.out.generation.git.old_head, g.out.generation.git.new_head, g.out.generation.git.preserved], [preRebase, o.sha('HEAD'), true]);
+  assert.deepEqual([g.out.generation.git.old_head, g.out.generation.git.old_head_source, g.out.generation.git.new_head, g.out.generation.git.preserved], [preRebase, 'prepare', o.sha('HEAD'), true]);
   assert.equal(o.sha(g.out.generation.git.retained_ref), preRebase, 'the rewritten predecessor commit stays reachable');
 });
 
@@ -532,4 +533,76 @@ test('P4-12 composition: stage obligations (PR-3) survive a generation; an early
   assert.deepEqual(ship.out.stage, { verified_through: 'merge', obligations_open: ['R2'] }, 'the obligation stays open across the generation');
   S = stateOf(fx);
   assert.deepEqual(S.stage.obligations.map(x => [x.row, x.status]), [['R2', 'open']]);
+});
+
+test('P4-13 (342 replay shape) a rename inside the approved writes after the freeze: a correction generation plus a fresh review, no owner RETRY', { skip: SKIP }, (t) => {
+  const { fx } = run(t, { nodes: [{ id: 'r', writes: ['spec/red.test.mjs'], redSpecs: [{ file: 'spec/red.test.mjs', name: 'fails on assertion' }] },
+    { id: 'impl', deps: ['r'], writes: ['src'] }],
+    behaviour: { r: { write: { 'spec/red.test.mjs': spec() } }, impl: { write: { 'src/impl.mjs': IMPL_V2, 'src/old-name.mjs': 'export const x = 1;\n' } } } });
+  shipped(fx);
+  writeFileSync(join(fx.repo, 'src', 'new-name.mjs'), readFileSync(join(fx.repo, 'src', 'old-name.mjs')));
+  spawnSync('rm', [join(fx.repo, 'src', 'old-name.mjs')]);
+  const p = succeed(fx, undefined, { plan: 'true' });
+  ok(p);
+  assert.deepEqual(p.out.transition.changes, [{ path: 'src/new-name.mjs', change: 'added' }, { path: 'src/old-name.mjs', change: 'removed' }]);
+  refused(succeed(fx, { kind: 'correction', reason: 'rename', paths: ['src/new-name.mjs'] }), 'succession_record_mismatch');
+  const g = succeed(fx, { kind: 'correction', reason: 'rename after the freeze, inside the approved writes', paths: ['src/new-name.mjs', 'src/old-name.mjs'] });
+  ok(g);
+  assert.deepEqual(g.out.generation.invalidated.red, [], 'the spec is unchanged: RED stays on the same base');
+  ok(fx.gate('review', passReview('rx2', candidate(fx, stateOf(fx)), { generation: 1 })), 'fresh review, no RETRY');
+  const ship = fx.gate('ship-ready', {});
+  ok(ship);
+  assert.equal(ship.out.code, 'ship_ready');
+  assert.ok(!/"event":"RETRY"/.test(readFileSync(fx.planFile, 'utf8')));
+});
+
+test('P4-14 a base move never absorbs the candidate\'s own change: a chmod in the rebase window is recorded in the generation; an out-of-scope change is refused', { skip: SKIP }, (t) => {
+  for (const outside of [false, true]) {
+    const { fx, o } = run(t);
+    shipped(fx);
+    baseMoves(fx, o, { 'upstream/f1.txt': 'x\n' });
+    chmodSync(join(fx.repo, 'src', 'impl.mjs'), 0o755);
+    if (outside) writeFileSync(join(fx.repo, 'docs', 'in.txt'), 'a declared READ changed by the ticket: outside every node\'s writes\n');
+    const g = succeed(fx, { kind: 'base', reason: 'rebase' });
+    if (outside) { refused(g, 'succession_out_of_scope'); assert.match(g.out.reasons[0], /docs\/in\.txt/); assert.equal(stateOf(fx).succession.g, 0); continue; }
+    ok(g);
+    assert.deepEqual(g.out.generation.delta.candidate.map(d => [d.path, d.change]), [['src/impl.mjs', 'mode']], 'the chmod is on the record');
+    assert.equal(g.out.generation.review_required, true);
+  }
+});
+
+test('P4-11b unit reviews (config.unitReview): after a base move each rebound unit gets ONE fresh unit review without RETRY or ceiling spend; the final review consumes the new evidence', { skip: SKIP }, (t) => {
+  const { fx, o } = run(t, { config: { ...SUCCESSION, unitReview: true, unitRecheckCeiling: 1, acceptanceIds: ['AC1'] }, testCommands: { unit: TAP, ok: PASS },
+    nodes: [{ id: 'r', unit: 'u-r', checks: ['ok'], acceptance: ['AC1'], writes: ['spec/red.test.mjs'], redSpecs: [{ file: 'spec/red.test.mjs', name: 'fails on assertion' }] },
+      { id: 'impl', deps: ['r'], unit: 'u-impl', checks: ['ok'], writes: ['src/impl.mjs'] }] });
+  const units = () => fx.cli('status').out.units;
+  const unitReview = (u, rx) => { const S = stateOf(fx), ev = units()[u].evidence;
+    return { unit: u, approved_plan_digest: S.plan_digest, dag_digest: S.dag_digest, base_commit: ev.base_commit, ...passReview(rx, ev.id) }; };
+  const consumed = () => Object.entries(units()).map(([unit, p]) => ({ unit, evidence_id: p.evidence.id }));
+  const reviewUnits = (tag) => { for (const u of ['u-r', 'u-impl']) { const { second_opinion: _s, ...input } = unitReview(u, `urx-${u}-${tag}`); ok(fx.gate('unit-review', input), `unit review ${u} ${tag}`); } };
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('drive'));
+  ok(fx.gate('red', { node: 'r', command: 'unit' }));
+  ok(fx.cli('drive'));
+  if (units()['u-r'].review.state === 'unreviewed' && units()['u-impl'].state !== 'verified') ok(fx.cli('drive'));
+  reviewUnits('1');
+  const final = (rx, extra = {}) => ({ ...passReview(rx, candidate(fx, stateOf(fx)), extra), units_consumed: consumed() });
+  ok(fx.gate('review', final('rx1')), 'final review');
+  ok(fx.gate('ship-ready', {}));
+  baseMoves(fx, o, { 'upstream/f1.txt': 'x\n' });
+  const g = succeed(fx, { kind: 'base', reason: 'rebase' });
+  ok(g);
+  assert.deepEqual(g.out.generation.invalidated.units.sort(), ['u-impl', 'u-r']);
+  ok(fx.cli('drive'), 'unit re-checks on the new base');
+  assert.deepEqual(Object.values(units()).map(u => [u.state, u.review.state]), [['verified', 'stale'], ['verified', 'stale']]);
+  reviewUnits('2'); // a stale unit review: one fresh original each, no RETRY
+  const S = stateOf(fx);
+  assert.equal(S.unit_ceiling?.used ?? 0, 0, 'no unit ceiling slot spent by the generation');
+  assert.deepEqual(S.judgments.map(j => j.code), []);
+  assert.ok(S.events.some(e => e.type === 'UNIT_REVIEW_CYCLE' && e.trigger?.cause === 'generation'), 'the free re-review is on the record');
+  ok(fx.gate('red', { node: 'r', command: 'unit' }));
+  ok(fx.gate('review', final('rx2', { generation: 1 })), 'final review of generation 1 consuming the new unit evidence');
+  const ship = fx.gate('ship-ready', {});
+  ok(ship);
+  assert.equal(ship.out.code, 'ship_ready');
 });

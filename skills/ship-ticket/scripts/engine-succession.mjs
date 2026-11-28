@@ -101,7 +101,8 @@ export function candidateDelta(from, to) {
   for (const p of [...new Set([...Object.keys(from ?? {}), ...Object.keys(to ?? {})])].sort()) {
     const a = from?.[p] ?? null, b = to?.[p] ?? null;
     if (a && b && a.kind === b.kind && a.mode === b.mode && a.digest === b.digest) continue;
-    const change = !a ? 'added' : !b ? 'removed' : a.kind !== b.kind ? 'kind' : a.digest !== b.digest ? 'content' : 'mode';
+    const gone = (x) => !x || x.kind === 'deleted'; // a manifest names a deleted path as kind 'deleted'
+    const change = gone(a) ? 'added' : gone(b) ? 'removed' : a.kind !== b.kind ? 'kind' : a.digest !== b.digest ? 'content' : 'mode';
     out.push({ path: p, change, old: a, new: b });
   }
   return out;
@@ -276,6 +277,18 @@ async function setupStep(E, node, s, i, deps) {
 
 /** The HEAD commit of the checkout now (hardened), or null. */
 export const headOid = (root) => { const r = git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']); return r.status === 0 && SHA.test(r.stdout.trim()) ? r.stdout.trim() : null; };
+/**
+ * The predecessor head to retain when no `succeed --prepare` ran before the rebase: ORIG_HEAD when git left it naming the
+ * rewritten tip (it descends from the head recorded at the last freeze, repair or generation and is no longer reachable from
+ * HEAD: a rebase or reset moved past it), else the recorded head. -> { oid, source }.
+ */
+export function predecessorHead(root, recorded) {
+  const orig = git(root, ['rev-parse', '--verify', '--quiet', 'ORIG_HEAD^{commit}']);
+  const o = orig.status === 0 ? orig.stdout.trim() : null;
+  if (o && SHA.test(o) && recorded && o !== recorded && git(root, ['merge-base', '--is-ancestor', recorded, o]).status === 0
+    && git(root, ['merge-base', '--is-ancestor', o, 'HEAD']).status !== 0) return { oid: o, source: 'orig_head' };
+  return { oid: recorded ?? null, source: recorded ? 'recorded' : 'none' };
+}
 /** The run-private ref that retains the predecessor of generation `g` (ticket and run digested: always a valid ref name). */
 export const retainedRef = (S, g) => `refs/ship-ticket/succession/${digest(`${S.ticket}\0${S.run_id}`).slice(7, 23)}/pre-g${g}`;
 
@@ -323,11 +336,13 @@ function plan(E, kind) {
     const c = baseCandidate(root, { ...S, base: { ...S.base, merge_base: p.pin.merge_base } }, S.pinned_exclusions);
     if (!c.candidate_id) return no('candidate_unavailable', [c.reason]);
     const d = baseDelta(root, old_base, p.pin.merge_base);
+    // the candidate's own change in the same window (a rebase conflict resolution, a chmod): recorded and scope-checked, never absorbed
+    const now = M ? candidateManifest(root, [...new Set([...(c.paths ?? []), ...Object.keys(M.files)])]) : null;
     return { ok: true, g, kind: 'base', pin: p.pin, old_base, new_base: p.pin.merge_base, old_candidate: M?.candidate_id ?? authorizingReview(S)?.candidate_id ?? null,
-      new_candidate: c.candidate_id, paths: c.paths ?? [], entries: d.entries, patch_digest: d.patch_digest, candidate_delta: [] };
+      new_candidate: c.candidate_id, paths: c.paths ?? [], entries: d.entries, patch_digest: d.patch_digest, candidate_delta: M ? candidateDelta(M.files, now) : [], ...(now ? { manifest: now } : {}) };
   }
   if (kind === 'base') return no('succession_nothing_changed', [`merge-base(HEAD, ${S.base.remote}/${S.base.ref}) is still the pinned ${old_base}: `
-    + 'rebase the ticket branch onto the new base first (an advanced remote alone never changes the run)']);
+    + 'rebase the ticket branch onto the new base first (an advanced remote alone never changes the run; run succeed --prepare true before the rebase to retain the pre-rebase head)']);
   if (!M) return no('succession_pre_review', ['a correction or mode generation follows a review freeze; before it, changed work is re-run (stale), as before']);
   const c = baseCandidate(root, S, S.pinned_exclusions);
   if (!c.candidate_id) return no('candidate_unavailable', [c.reason]);
@@ -368,12 +383,12 @@ function entryRefusal(E) {
 }
 
 /** Record the transition as prepared (old head, retained ref) and retain the old head. -> { T, kept } | refusal. */
-async function prepare(E, oldHead) {
+async function prepare(E, head) {
   const S = E.S, root = E.ctx.repoRoot;
   let T = S.succession.transition;
   if (!T) {
     const g = S.succession.g + 1;
-    T = { g, phase: 'prepared', old_head: oldHead, retained_ref: retainedRef(S, g), prepared_at_seq: S.seq };
+    T = { g, phase: 'prepared', old_head: head.oid, old_head_source: head.source, retained_ref: retainedRef(S, g), prepared_at_seq: S.seq };
     S.succession.transition = T;
     note(S, 'GENERATION_PREPARED', { g, old_head: T.old_head, retained_ref: T.retained_ref });
     await E.commit();
@@ -414,7 +429,7 @@ export async function succeed(E, input, { mode = 'commit', beforeCommit } = {}) 
   if (bad) return bad;
   S.succession ??= { g: 0, generations: [], head: null };
   if (mode === 'prepare') {
-    const p = await prepare(E, S.succession.transition?.old_head ?? headOid(E.ctx.repoRoot));
+    const p = await prepare(E, { oid: headOid(E.ctx.repoRoot), source: 'prepare' });
     if (p.ok === false) return p;
     return { ok: true, code: 'transition_prepared', judgment_point: false, transition: p.T, preserved: p.kept.preserved, ...(p.kept.reason ? { reason: p.kept.reason } : {}) };
   }
@@ -429,13 +444,17 @@ export async function succeed(E, input, { mode = 'commit', beforeCommit } = {}) 
   if (refused) return refused;
   const t = plan(E, input.kind);
   if (!t.ok) return t;
-  // (F) and mode: the declared paths are exactly the changed paths, all inside the approved scope (some node's writes)
+  // (F) and mode: the declared paths are exactly the changed paths. Every kind (a base move included): the candidate's own
+  // changes stay inside the approved scope (some node's writes)
+  const changed = t.candidate_delta.map(d => d.path);
   if (t.kind !== 'base') {
-    const changed = t.candidate_delta.map(d => d.path), declared = [...new Set(input.paths)].sort();
+    const declared = [...new Set(input.paths)].sort();
     if (declared.join('\0') !== changed.join('\0')) return no('succession_record_mismatch', [`the record declares ${declared.join(', ')}; the candidate changed ${changed.join(', ')}`]);
     if (input.kind === 'mode' && !t.modeOnly) return no('succession_record_mismatch', ['a mode record covers mode-only changes; content changed: use kind correction']);
     if (input.kind === 'correction' && t.modeOnly) return no('succession_record_mismatch', ['a mode-only change is recorded as kind mode']);
-    const writes = Object.values(S.nodes).flatMap(n => [...(n.writes ?? []), ...(n.redSpecs ?? []).filter(isObj).map(s => s.file)]);
+  }
+  {
+    const writes = Object.values(S.nodes).flatMap(n => [...(n.writes ?? []), ...(n.redSpecs ?? []).map(s => (isObj(s) ? s.file : s)).filter(nonEmpty)]);
     const outside = changed.filter(p => !writes.some(w => overlap(p, w)));
     if (outside.length) return no('succession_out_of_scope', [`changed path(s) outside every node's approved writes: ${outside.join(', ')}: out-of-scope drift is the owner's (unchanged route)`]);
   }
@@ -446,7 +465,7 @@ export async function succeed(E, input, { mode = 'commit', beforeCommit } = {}) 
     return no('rca_required', [`${rounds} unsuccessful review rounds on this run: the same loop stops; a generation that opens a new review needs an RCA record { differs, evidence } naming the different path (§7.1)`]);
 
   // Prepared (or resumed) before anything is installed: the predecessor stays authoritative through every point below
-  const prepared = await prepare(E, S.succession.transition?.old_head ?? S.succession.head ?? headOid(E.ctx.repoRoot));
+  const prepared = await prepare(E, predecessorHead(E.ctx.repoRoot, S.succession.head ?? null));
   if (prepared.ok === false) return prepared;
   const { T, kept } = prepared;
   if (T.g !== t.g) return no('transition_corrupt', [`the prepared transition names generation ${T.g}; the next generation is ${t.g}`]);
@@ -469,7 +488,7 @@ export async function succeed(E, input, { mode = 'commit', beforeCommit } = {}) 
     renewal_required: { red: invalidRed, red_addendum: addenda, local_proof: true, review: review_required, units: [] },
     renewed: { red: {}, red_addendum: {}, local_proof: null, review: null },
     review_required, rounds_before: rounds, ...(input.rca ? { rca: input.rca } : {}),
-    git: { old_head: T.old_head, new_head, retained_ref: kept.preserved ? T.retained_ref : null, preserved: kept.preserved, ...(kept.reason ? { reason: kept.reason } : {}) } };
+    git: { old_head: T.old_head, old_head_source: T.old_head_source, new_head, retained_ref: kept.preserved ? T.retained_ref : null, preserved: kept.preserved, ...(kept.reason ? { reason: kept.reason } : {}) } };
   N.local_proof = null;
   delete N.ship_ready;
   if (t.kind === 'base') N.base = { ...N.base, sha: t.pin.sha, merge_base: t.new_base, pinned_at_seq: (N.seq ?? 0) + 1 };
