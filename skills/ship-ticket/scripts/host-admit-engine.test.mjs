@@ -56,7 +56,7 @@ test('P policy: every durable row (core and early-checks twin) has a DERIVED hos
   const P = await import('./engine-policy.mjs');
   assert.equal(typeof P.hostClaimVersion, 'function', 'the twin accessor exists');
   for (const [v, f] of Object.entries(P.POLICY_SEMANTICS)) {
-    if (f.hostClaimRequired) continue;
+    if (f.hostClaimRequired || f.succession) continue; // PR-4b: succession twins (>= 400) are derived outermost, after the host twins
     const twin = P.hostClaimVersion(Number(v));
     if (f.durableRun === true) {
       assert.equal(twin, Number(v) + P.HOST_CLAIM_OFFSET, `durable ${v} has its twin`);
