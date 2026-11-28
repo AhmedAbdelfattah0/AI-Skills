@@ -32,7 +32,8 @@ and `sprint.md` are opened only when named.
 | `brief.mjs` | Builds and lints the worker brief; computes the plan digest; checks the planning-debate attestation. |
 | `base-drift.mjs`, `ci-classify.mjs`, `check-pr-scope.mjs` | Detect base drift, classify CI results, check pull request scope. |
 | `run-log.mjs`, `run-summary.mjs` | Timing telemetry stored under the repository's Git metadata, never in the worktree. |
-| `host-admit.mjs` | Admission check before heavy work (macOS). Run by the orchestrator; the engine does not call it. |
+| `host-admit.mjs` | Admission before heavy work (macOS): an advisory check, or `run -- <command>`, which claims host capacity in the shared claim store before the command starts and releases it on proof. Run by the orchestrator; the engine does not call it. |
+| `host-claims.mjs`, `engine-host-claim.mjs` | The host-wide claim store (`~/.ai-skills-state/host-resources/`), and the engine-command boundary: the weight an engine command needs, and the run-engine CLI-entry check that refuses an unclaimed heavy command of a `config.hostClaimRequired` run. |
 | `wave.mjs` | Wave manifest verification and status. |
 
 Engine state, telemetry and the sprint queue live under the target repository's Git common
