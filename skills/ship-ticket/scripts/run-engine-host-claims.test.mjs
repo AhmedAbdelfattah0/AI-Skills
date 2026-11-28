@@ -11,10 +11,14 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture, POSIX, codes } from './engine-test-fixture.mjs';
+import { fixture, POSIX, codes, passReview, failReview } from './engine-test-fixture.mjs';
+import { EventEmitter } from 'node:events';
+import { Writable } from 'node:stream';
+import { spawn as spawnChild } from 'node:child_process';
 import { fakeHost } from './host-claims.test-helper.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
 import { acquireLock } from './lib/durable-io.mjs';
+import { writeSync as writeSyncReal } from 'node:fs';
 
 const SKIP = POSIX ? false : 'POSIX process groups (Windows quiescence is unknown, known limit D4)';
 const engine = () => import('./run-engine.mjs');
@@ -226,4 +230,183 @@ test('F8 a dispatch that throws after its claim and before the attempt is record
   rmSync(att, { recursive: true, force: true }); mkdirSync(join(att, '..'), { recursive: true }); writeFileSync(att, 'not a directory');
   await assert.rejects(drive(fx.ctx({ hostClaims: { dir, snapshot: h.snapshot, now: h.now } })));
   assert.deepEqual(claimIds(dir), [], 'the claim did not leak for the engine\'s lifetime');
+});
+
+// ---- S2 round 2 (RCA-S2-ROUND2): one claim lifecycle; holds spend nothing; settleSpawnFailure restored ------------------
+/** A spawn that yields a child with no pid (the launcher could not start). */
+const noPidSpawn = () => () => {
+  const c = new EventEmitter();
+  c.stdin = new Writable({ write(_c, _e, cb) { cb(); } });
+  setImmediate(() => { c.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })); c.emit('exit', null, null); });
+  return c;
+};
+for (const [name, config, nodeExtra] of [['legacy (no hostClaims)', { width: 1 }, {}], ['hostClaims', HC, { hostClass: 'heavy' }]]) {
+  test(`N1 a launcher spawn failure without a pid is retired, retried once, then fails (${name})`, { skip: SKIP }, async (t) => {
+    const fx = fixture(t, { config, nodes: [{ id: 'a', writes: ['src/a.txt'], ...nodeExtra }] });
+    const dir = tmp(t), h = fakeHost();
+    const { init, drive } = await engine();
+    await init(fx.ctx());
+    const hc = config.hostClaims ? { hostClaims: { dir, snapshot: h.snapshot, now: h.now } } : {};
+    await drive(fx.ctx({ spawn: noPidSpawn(), ...hc })); // continuous dispatch: the bounded infra retry runs in the same drive
+    const s = fx.readState();
+    assert.equal(s.events.filter(e => e.type === 'INFRA_RETRY' && e.cause === 'launcher_spawn_failed').length, 1, 'retried exactly once');
+    assert.equal(s.attempts.length, 2);
+    assert.ok(s.attempts.every(a => a.status === 'spawn_failed' && a.quiesced === true), 'each attempt retired as spawn_failed');
+    assert.equal(s.nodes.a.state, 'failed');
+    assert.equal(s.nodes.a.reason, 'launcher spawn failed');
+    if (config.hostClaims) assert.deepEqual(claimIds(dir), [], 'no claim stays charged');
+  });
+}
+
+test('N2 an exception between admission and launcher creation (ENOSPC on the state write) leaves no charged claim', { skip: SKIP }, async (t) => {
+  const { fx, go } = redFixture(t, {}); writeFileSync(go, '');
+  const dir = tmp(t), h = fakeHost();
+  const { init, gate } = await engine();
+  await init(fx.ctx());
+  let armed = false;
+  const snapshot = async (p) => { armed = true; return h.snapshot(p); };
+  const fs = { writeSync: (...a) => { if (armed) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); return writeSyncReal(...a); } };
+  await assert.rejects(gate(fx.ctx({ gate: 'red', input: { node: 'r', command: 'unit' }, fs, hostClaims: { dir, snapshot, now: h.now } })), /ENOSPC/);
+  assert.deepEqual(claimIds(dir), [], 'the admitted claim was released in finally');
+});
+
+test('M1 a held unit re-check spends no ceiling slot: 5 held drives never reach parent_ceiling, then the re-check runs once', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { ...HC, unitRecheckCeiling: 2, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } } },
+    nodes: [{ id: 'a', writes: ['src/a.txt'], reads: ['docs/in.txt'], hostClass: 'light', unit: 'u', checks: ['ok'] }] });
+  const dir = tmp(t), h = fakeHost();
+  const hc = { hostClaims: { dir, snapshot: h.snapshot, now: h.now } };
+  const { init, drive } = await engine();
+  await init(fx.ctx());
+  await drive(fx.ctx(hc));
+  assert.equal(fx.readState().unit_checks.u.rounds, 1, 'the first (free) check ran');
+  writeFileSync(join(fx.repo, 'docs', 'in.txt'), 'input v2'); // the unit's evidence is now stale: a re-check is owed
+  const { claim, releaseClaim } = await import('./host-claims.mjs');
+  assert.equal((await claim({ dir, opId: 'other-suite', cls: 'heavy', snapshot: h.snapshot, now: h.now })).admit, true);
+  for (let i = 0; i < 5; i++) {
+    const out = await drive(fx.ctx(hc));
+    assert.ok(!codes(out).includes('parent_ceiling'), `drive ${i}: no parent_ceiling (${codes(out)})`);
+    assert.equal(out.outcome, 'waiting');
+  }
+  const s = fx.readState();
+  assert.equal(s.unit_ceiling?.used ?? 0, 0, 'no re-check slot was spent by a hold');
+  assert.equal(s.attempts.filter(a => a.kind === 'unit-check').length, 1, 'no held check ran');
+  assert.equal((await releaseClaim({ dir, opId: 'other-suite' })).released, true);
+  await drive(fx.ctx(hc));
+  const after = fx.readState();
+  assert.equal(after.unit_ceiling.used, 1, 'the re-check spends exactly one slot when it runs');
+  assert.equal(after.attempts.filter(a => a.kind === 'unit-check').length, 2);
+  assert.ok(after.attempts.filter(a => a.kind === 'unit-check').every(a => a.host_claim?.released === true), 'each check attempt persisted its claim and released it');
+});
+
+test('M2 proof: one claim for the whole batch; a host turning bad after the first command never discards a result or re-runs it', { skip: SKIP }, async (t) => {
+  const marks = (name) => ({ cmd: process.execPath, args: ['-e', `require('node:fs').appendFileSync('../${name}.ran', 'x')`] });
+  const fx = fixture(t, { commit: true, config: { ...HC, testCommands: { p1: marks('p1'), p2: marks('p2') } },
+    nodes: [{ id: 'a', writes: ['src/a.txt'], hostClass: 'light' }] });
+  const dir = tmp(t), good = fakeHost(), bad = fakeHost({ pressure: 4 });
+  let calls = 0;
+  const snapshot = async (p) => (++calls <= 2 ? good.snapshot(p) : bad.snapshot(p)); // two clean windows, then pressure 4
+  const now = () => (calls <= 2 ? good.now() : bad.now());
+  const { init, drive, gate } = await engine();
+  await init(fx.ctx());
+  await drive(fx.ctx());
+  await gate(fx.ctx({ gate: 'review', input: passReview('rx-1', fx.candidate()) }));
+  const v = await gate(fx.ctx({ gate: 'ship-ready', input: {}, hostClaims: { dir, snapshot, now } }));
+  const ran = (n) => (existsSync(join(fx.root, `${n}.ran`)) ? readFileSync(join(fx.root, `${n}.ran`), 'utf8').length : 0);
+  assert.notEqual(v.code, 'host_held', `the batch was admitted once: ${JSON.stringify(v)}`);
+  assert.deepEqual([ran('p1'), ran('p2')], [1, 1], 'each proof command ran exactly once');
+  const s = fx.readState();
+  assert.equal(s.local_proof?.commands?.length, 2, 'the proof was recorded');
+  const proofs = s.attempts.filter(a => a.kind === 'proof');
+  assert.equal(new Set(proofs.map(a => a.host_claim?.op_id)).size, 1, 'one claim covers the whole batch');
+  assert.ok(proofs.every(a => a.host_claim?.released === true));
+  assert.deepEqual(claimIds(dir), []);
+});
+
+test('M2b proof: a hold leaves no proof attempt and no evidence; it is retried and spends nothing', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { ...HC, testCommands: { p1: { cmd: process.execPath, args: ['-e', ''] } } },
+    nodes: [{ id: 'a', writes: ['src/a.txt'], hostClass: 'light' }] });
+  const dir = tmp(t), h = fakeHost();
+  const { claim, releaseClaim } = await import('./host-claims.mjs');
+  assert.equal((await claim({ dir, opId: 'other-suite', cls: 'heavy', snapshot: h.snapshot, now: h.now })).admit, true);
+  const { init, drive, gate } = await engine();
+  await init(fx.ctx());
+  await drive(fx.ctx());
+  await gate(fx.ctx({ gate: 'review', input: passReview('rx-1', fx.candidate()) }));
+  const held = await gate(fx.ctx({ gate: 'ship-ready', input: {}, hostClaims: { dir, snapshot: h.snapshot, now: h.now } }));
+  assert.equal(held.code, 'host_held'); assert.equal(held.judgment_point, false);
+  assert.equal(fx.readState().attempts.filter(a => a.kind === 'proof').length, 0);
+  assert.equal(fx.readState().local_proof, undefined);
+  await releaseClaim({ dir, opId: 'other-suite' });
+  const ok = await gate(fx.ctx({ gate: 'ship-ready', input: {}, hostClaims: { dir, snapshot: h.snapshot, now: h.now } }));
+  assert.notEqual(ok.code, 'host_held', JSON.stringify(ok));
+  assert.equal(fx.readState().local_proof?.commands?.length, 1);
+});
+
+test('m1 gate path: an unknown holder at capacity escalates as host_blocked (a judgment point), not an endless host_held', { skip: SKIP }, async (t) => {
+  const { fx, go } = redFixture(t, {}); writeFileSync(go, '');
+  const dir = tmp(t), h = fakeHost();
+  const p = spawnChild(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-p.pid, 'SIGKILL'); } catch { /* gone */ } });
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  const { hostname } = await import('node:os');
+  writeFileSync(join(dir, 'claims', 'mystery.json'), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: 'mystery', class: 'heavy', weight: 1, resources: [],
+    container_label: null, pgid: p.pid, leader_start: 'Thu Jan  1 00:00:00 1970', claimer: { pid: 999999, process_start_time: null, host: hostname() }, claimed_at: 'x', bound_at: 'x' }));
+  const { init, gate } = await engine();
+  await init(fx.ctx());
+  const v = await gate(fx.ctx({ gate: 'red', input: { node: 'r', command: 'unit' }, hostClaims: { dir, snapshot: h.snapshot, now: h.now } }));
+  assert.equal(v.code, 'host_blocked', JSON.stringify(v));
+  assert.equal(v.judgment_point, true);
+});
+
+test('m3 a repair over nodes with different container labels is a refusal (judgment), never an endless capacity wait', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { ...HC, width: 2 }, nodes: [
+    { id: 'a', writes: ['src/a.txt'], hostClass: 'light', hostContainerLabel: { owner: 'o', run: 'r1' } },
+    { id: 'b', writes: ['src/b.txt'], hostClass: 'light', hostContainerLabel: { owner: 'o', run: 'r2' } }],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, b: { write: { 'src/b.txt': 'b1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+  const dir = tmp(t);
+  const { init, drive, gate } = await engine();
+  await init(fx.ctx());
+  await drive(fx.ctx({ hostClaims: { dir } }));
+  const rv = await gate(fx.ctx({ gate: 'review', input: failReview('rx-1', fx.candidate(), 'src', fx.prompt('fix')) }));
+  assert.ok(fx.readState().repairs.some(r => r.state === 'pending'), `a repair is enqueued (${rv.code})`);
+  const out = await drive(fx.ctx({ hostClaims: { dir } }));
+  assert.ok(codes(out).includes('host_labels_conflict'), `a refusal: ${codes(out)}`);
+  assert.ok(!(out.waiting ?? []).some(w => w.reasons?.includes('container_labels_differ')), 'not reported as waiting');
+});
+
+test('m4 the store lock busy at bind time is not a runner/worker failure: the bind never waits on the store lock', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: HC, nodes: [{ id: 'a', writes: ['src/a.txt'], hostClass: 'heavy' }] });
+  const dir = tmp(t), h = fakeHost();
+  let lock = null;
+  const hooks = { boundary: async (name) => { if (name === 'after-spawn') lock = await acquireLock({ lockFile: join(dir, 'claims.lock'), runId: 'other' }); } };
+  t.after(() => lock?.release());
+  const { init, drive, resume } = await engine();
+  await init(fx.ctx());
+  await drive(fx.ctx({ hooks, hostClaims: { dir, snapshot: h.snapshot, now: h.now, waitMs: 50 } }));
+  assert.equal(fx.runs('a').length, 1, 'the worker ran');
+  const a = fx.readState().attempts[0];
+  assert.equal(fx.readState().nodes.a.state, 'done');
+  assert.equal(a.host_claim.released, false, 'the release found the store busy: retained for reconciliation');
+  await lock.release(); lock = null;
+  await resume(fx.ctx({ hostClaims: { dir } }));
+  assert.equal(fx.readState().attempts[0].host_claim.released, true, 'reconciliation released it');
+  assert.deepEqual(claimIds(dir), []);
+});
+
+test('N3 the unknown-holder latch is refreshed on every reconciliation: a holder resolved within one command is not reported', { skip: SKIP }, async (t) => {
+  const dir = tmp(t), h = fakeHost({ pressure: 1 }); // two slots: the unknown holder does not hold the request
+  const p = spawnChild(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-p.pid, 'SIGKILL'); } catch { /* gone */ } });
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  const { hostname } = await import('node:os');
+  writeFileSync(join(dir, 'claims', 'mystery.json'), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: 'mystery', class: 'heavy', weight: 1, resources: [],
+    container_label: null, pgid: p.pid, leader_start: 'Thu Jan  1 00:00:00 1970', claimer: { pid: 999999, process_start_time: null, host: hostname() }, claimed_at: 'x', bound_at: 'x' }));
+  const { admitOp } = await import('./engine-claims.mjs');
+  const E = { S: { ticket: 'T', run_id: 'r', config: { hostClaims: { version: 1 } }, events: [], seq: 0 }, ctx: { hostClaims: { dir, snapshot: h.snapshot, now: h.now } } };
+  assert.ok((await admitOp(E, 'one', { cls: 'light', resources: [{ resource: join(dir, 'x'), mode: 'W' }] }))?.claim);
+  assert.ok(E.hostBlocked, 'the unknown holder is reported');
+  process.kill(-p.pid, 'SIGKILL');
+  for (const end = Date.now() + 5000; Date.now() < end;) { try { process.kill(-p.pid, 0); } catch { break; } await new Promise(r => setTimeout(r, 20)); }
+  assert.ok((await admitOp(E, 'two', { cls: 'light', resources: [{ resource: join(dir, 'y'), mode: 'W' }] }))?.claim);
+  assert.equal(E.hostBlocked ?? null, null, 'resolved: the latch is cleared');
 });

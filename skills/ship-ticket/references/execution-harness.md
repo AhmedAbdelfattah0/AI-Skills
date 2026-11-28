@@ -166,10 +166,16 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   - The engine claims before it spawns any heavy operation (a lone first node too) and every operation with shared
     resources: workers, repairs, and its RED, proof, unit-check and evidence runners. It binds the claim before the
     release byte and releases it after the group is gone (and, for a labelled claim, no labelled container remains).
-  - A hold is a WAITING diagnostic (`status.waiting`: `host_held` with its reasons), never a judgment and never failed
+  - A hold is a WAITING diagnostic (`waiting` in the output of the command that held: `host_held` with its reasons; a
+    later `status` starts empty), never a judgment and never failed
     evidence: the node or runner stays pending, `drive` ends `waiting`, and a held gate returns `host_held` with
     `judgment_point: false` and records no evidence. The one escalation is `host_blocked` (an unknown holder), a
-    transient judgment. Host sampling is macOS only: on another POSIX host a heavy operation of a hostClaims run stays
+    transient judgment (on `drive`, and on a gate whose hold sits beside the unknown holder). A hold spends nothing: a
+    unit's check runners are admitted as one batch before its re-check ceiling is spent, and the ship-ready proof is one
+    batch claim for all its commands. Different container labels in one operation are the refusal `host_labels_conflict`.
+    Every claim is released in the `finally` of its call site; each attempt carries `host_claim` from its first commit,
+    so `reconcile` retries a refused release. The bind takes no store lock (only the claimer writes its record, and a
+    record whose claimer lives is never reclaimed); a batch rebinds it per command. Host sampling is macOS only: on another POSIX host a heavy operation of a hostClaims run stays
     held (`snapshot_unavailable`); on Windows every claim holds (POSIX process groups, known limit D4).
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 

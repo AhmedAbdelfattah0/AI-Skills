@@ -929,9 +929,11 @@ export async function gate(ctx) {
       if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
       const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];
-      const v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })
+      let v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })
         : c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });
+      // S2 (m1): on the gate path too, a hold beside an unknown holder escalates as the host-scoped Blocked.
+      if (v.code === 'host_held' && E.hostBlocked) v = gateNo('host_blocked', [`unknown host claim holder(s) ${E.hostBlocked.op_ids.join(', ')} stay charged; resolve them (prove the group gone or remove the record)`, ...(v.reasons ?? [])], { judgment_point: true });
       const S = E.S;
       // W3-record: appended after the existing keys only with config.auditRecord (the binding-drift return above records nothing).
       const audit = auditOn(S) ? () => gateAuditFields(ctx.gate, input, v) : () => ({});

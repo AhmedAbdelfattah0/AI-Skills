@@ -299,3 +299,24 @@ test('F7 only STOPPED labelled containers remain: the holder is unknown (charged
   assert.deepEqual(r.unknown, ['stopped']);
   assert.equal(r.blocked?.raised, true);
 });
+
+test('m2 a labelled claim whose group dies between the outside probe and the lock stays charged but raises NO Blocked', { skip: SKIP }, async (t) => {
+  const dir = tmp(t);
+  const label = { owner: 'ownr', run: 'run-m2' };
+  // The record's group looks ALIVE to the outside probe (so no Docker verdict is taken) and GONE under the lock.
+  const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { detached: true, stdio: 'ignore' });
+  t.after(() => killGroup(p.pid));
+  const { leaderStart } = await import('./engine-quiesce.mjs');
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  writeFileSync(join(dir, 'claims', 'racy.json'), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: 'racy', class: 'heavy', weight: 1, resources: [],
+    container_label: label, pgid: p.pid, leader_start: leaderStart(p.pid), claimer: { pid: 999999, process_start_time: null, host: hostname() }, claimed_at: 'x', bound_at: 'x' }));
+  let probes = 0;
+  const isAlive = (pgid) => (pgid === p.pid ? ++probes === 1 : groupAlive(pgid)); // alive at the outside probe, gone under the lock
+  const h = fakeHost();
+  const { claim } = await store();
+  const r = await claim({ dir, opId: 'h', cls: 'heavy', snapshot: h.snapshot, now: h.now, isAlive });
+  assert.ok(probes >= 2, 'probed outside and again under the lock');
+  assert.equal(r.admit, false, 'still charged');
+  assert.equal(r.blocked, null, 'no false host-scoped Blocked');
+  assert.equal(existsSync(join(dir, 'blocked.json')), false);
+});

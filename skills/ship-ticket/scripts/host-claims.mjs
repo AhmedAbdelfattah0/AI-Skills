@@ -134,17 +134,21 @@ const DOCKER_STATE = { gone: { state: 'reclaimable', why: 'group_and_containers_
  * (exact labels) only once the group is proven gone: `docker` is the verdict taken outside the lock (dockerVerdict), or
  * absent, then the claim is `needsDocker` (still charged as unknown until probed). A failure or stopped containers prove nothing.
  */
-export function holderState(c, deps = {}, docker) {
+export function holderState(c, deps = {}, docker, { ownRelease = false } = {}) {
   const { info = processInfo, isAlive = groupAlive, host = hostname() } = deps;
   if (!c) return { state: 'unknown', why: 'malformed' };
   if (c.claimer.host !== host) return { state: 'unknown', why: 'foreign_host' };
+  const claimer = () => { const o = info(c.claimer.pid) ?? { alive: false, startTime: null }; return !o.alive || recordDiffers(o, c.claimer) ? 'dead' : recordMatches(o, c.claimer) ? 'alive' : 'unknown'; };
   if (c.pgid === null) {
-    const o = info(c.claimer.pid) ?? { alive: false, startTime: null };
-    if (!o.alive || recordDiffers(o, c.claimer)) return { state: 'reclaimable', why: 'claimer_dead_never_bound' };
-    return recordMatches(o, c.claimer) ? { state: 'live', why: 'claimer_alive' } : { state: 'unknown', why: 'claimer_identity_unknown' };
+    const who = claimer();
+    if (who === 'dead') return { state: 'reclaimable', why: 'claimer_dead_never_bound' };
+    return who === 'alive' ? { state: 'live', why: 'claimer_alive' } : { state: 'unknown', why: 'claimer_identity_unknown' };
   }
   const id = groupIdentity({ pgid: c.pgid, leader_start: c.leader_start }, isAlive, info);
   if (id === 'verified') return { state: 'live', why: 'group_alive' };
+  // S2 round 2: a live claimer keeps its bound claim (a batch rebinds it command by command, and the owner releases it in
+  // its own finally). Its own release (`ownRelease`) is judged on the group and the containers alone.
+  if (!ownRelease && claimer() === 'alive') return { state: 'live', why: 'claimer_alive' };
   if (id === 'unknown') return { state: 'unknown', why: 'group_unknown' };
   if (!c.container_label) return { state: 'reclaimable', why: 'group_gone' };
   return docker ? DOCKER_STATE[docker] : { state: 'unknown', why: 'docker_unprobed', needsDocker: true };
@@ -154,7 +158,8 @@ export function holderState(c, deps = {}, docker) {
 function probeOutside(dir, deps) {
   const out = new Map();
   for (const { id, claim: c, version } of listClaims(dir)) {
-    if (holderState(c, deps).needsDocker) out.set(id, { version, verdict: dockerVerdict(c.container_label, deps.docker ?? spawnSync) });
+    // judged on group alone (ownRelease), so an owner's own release of a labelled claim also has its verdict ready
+    if (holderState(c, deps, undefined, { ownRelease: true }).needsDocker) out.set(id, { version, verdict: dockerVerdict(c.container_label, deps.docker ?? spawnSync) });
   }
   return out;
 }
@@ -175,7 +180,8 @@ async function reconcileLocked(dir, deps, probes = new Map()) {
       try { unlinkSync(claimFile(dir, id)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
       appendRow(dir, { kind: 'reclaimed', op_id: id, at: new Date().toISOString(), why: h.why });
       reclaimed.push(id);
-    } else (h.state === 'live' ? live : unknown).push({ id, claim: c, why: h.why });
+    // m2: an unprobed labelled claim (its group died after the outside probe) is charged but is not an unknown holder.
+    } else (h.state === 'live' || h.why === 'docker_unprobed' ? live : unknown).push({ id, claim: c, why: h.why });
   }
   const ids = unknown.map(u => u.id).sort();
   const file = paths(dir).blocked;
@@ -272,15 +278,21 @@ export async function claim({ dir, opId, cls, weight, resources = [], containerL
 }
 
 /** Rewrite claim `opId` with its group's pgid and leader start; the caller does this BEFORE writing the release byte. */
-export async function bindClaim({ dir, opId, pgid, leaderStart = null, ...deps }) {
+/**
+ * Rewrite claim `opId` with its group's pgid and leader start; the caller does this BEFORE writing the release byte.
+ * LOCK-FREE (S2 round 2, m4): only the claimer writes its record, and no reconciler removes a record whose claimer is alive,
+ * so the atomic rewrite needs no store lock and a busy store can never fail a bind. A batch (one claim for several
+ * sequential commands) rebinds it to the next command once the previous group is gone.
+ */
+export async function bindClaim({ dir, opId, pgid, leaderStart = null, isAlive = groupAlive }) {
   if (!Number.isInteger(pgid) || pgid <= 0) throw coded('host_claim_invalid', `pgid ${pgid}`);
-  return locked(dir, deps, async () => {
-    const found = listClaims(dir).find(x => x.id === opId);
-    if (!found?.claim) throw coded('host_claim_absent', `no readable claim ${opId}`);
-    if (found.claim.claimer.pid !== process.pid || found.claim.pgid !== null) throw coded('host_claim_not_ours', `claim ${opId} is not an unbound claim of this process`);
-    await writeStateAtomic(claimFile(dir, opId), { ...found.claim, pgid, leader_start: typeof leaderStart === 'string' ? leaderStart : null, bound_at: new Date().toISOString() });
-    return { bound: true };
-  });
+  const found = listClaims(dir).find(x => x.id === opId);
+  if (!found?.claim) throw coded('host_claim_absent', `no readable claim ${opId}`);
+  const c = found.claim;
+  if (c.claimer.pid !== process.pid || (c.pgid !== null && c.pgid !== pgid && isAlive(c.pgid) !== false))
+    throw coded('host_claim_not_ours', `claim ${opId} is not this process's claim, or its bound group still runs`);
+  await writeStateAtomic(claimFile(dir, opId), { ...c, pgid, leader_start: typeof leaderStart === 'string' ? leaderStart : null, bound_at: new Date().toISOString() });
+  return { bound: true };
 }
 
 /**
@@ -300,7 +312,8 @@ export async function releaseClaim({ dir, opId, peak = {}, loadavg = osLoadavg, 
     if (!found) { peakRow(null, { reclaimed_before_release: true }); return { released: false, reason: 'absent' }; }
     const c = found.claim;
     const own = c && c.pgid === null && c.claimer.pid === process.pid && c.claimer.host === (deps.host ?? hostname());
-    const h = own ? { state: 'reclaimable', why: 'never_bound' } : holderState(c, deps, probed(probes, opId, found.version));
+    const mine = c && c.claimer.pid === process.pid && c.claimer.host === (deps.host ?? hostname());
+    const h = own ? { state: 'reclaimable', why: 'never_bound' } : holderState(c, deps, probed(probes, opId, found.version), { ownRelease: mine });
     if (h.state !== 'reclaimable') return { released: false, reason: h.why };
     unlinkSync(claimFile(dir, opId));
     peakRow(c);

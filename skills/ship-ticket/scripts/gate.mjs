@@ -268,12 +268,9 @@ export async function gateRed(input, deps) {
   const held = resources.filter((r) => state.locks[r] !== undefined);
   if (held.length) return refuse(state, 'resource_locked', held.map((r) => `${r} is held by ${state.locks[r]}`));
 
-  // S2 (P2): a hostClaims engine admits the runner through a host claim BEFORE its attempt exists; a hold is pending work
-  // (no attempt, no evidence, not a judgment point). Without deps.admitRunner (every legacy caller) nothing changes.
-  const admitted = deps.admitRunner ? await deps.admitRunner() : null;
-  if (admitted?.held) return refuse(state, 'host_held', [admitted.reason], { waiting: true });
   // Durable attempt protocol: intent -> spawn -> pid/pgid -> release -> envelope.
-  const attempt = { attempt_id: deps.newAttemptId(), kind: 'gate-red', node, status: 'intent', resources: [...resources] };
+  const attempt = { attempt_id: deps.newAttemptId(), kind: 'gate-red', node, status: 'intent', resources: [...resources],
+    ...(input.hostClaim ? { host_claim: { ...input.hostClaim } } : {}) }; // S2: the engine's admitted claim, persisted with the intent
   state.attempts.push(attempt);
   for (const r of resources) state.locks[r] = attempt.attempt_id;
   await deps.commit(snapshot());
@@ -293,7 +290,7 @@ export async function gateRed(input, deps) {
   for (const s of specs) spec_digests[s.file] ??= await deps.digestFile(s.file);
   let run;
   try {
-    const launch = await deps.spawnRunner({ attempt_id: attempt.attempt_id, command, timeoutMs, resources: [...resources], ...(admitted?.claim ? { hostClaim: admitted.claim } : {}) });
+    const launch = await deps.spawnRunner({ attempt_id: attempt.attempt_id, command, timeoutMs, resources: [...resources] });
     attempt.pid = launch.pid; attempt.pgid = launch.pgid; attempt.leader_start = leaderStart(launch.pgid); attempt.status = 'running';
     armAttempt(state, attempt, timeoutMs, deps.deadlineClock); // S1: durable run (S.durable) only
     await deps.commit(snapshot());

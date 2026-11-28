@@ -20,7 +20,7 @@ import { armAttempt } from './lib/deadline.mjs';
 import { note, judgment, closure, clampTimeout, coded } from './engine-dag.mjs';
 import { baseCandidate, baseCommit } from './engine-base-read.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
-import { claimsOn, claimedRunner, admitRunner } from './engine-claims.mjs';
+import { claimsOn, claimedRunner, admitOp, releaseOp, runnerSpec, hostRecord } from './engine-claims.mjs';
 
 /** Verified evidence invalidated more often than this in one run is an invalidation storm. */
 export const MAX_UNIT_INVALIDATIONS = 2;
@@ -36,14 +36,15 @@ const J = JSON.stringify;
 export const hasUnits = (S) => S.unit_checks !== undefined;
 
 /** `gate red`/proof/unit-check runner deps: durable commits, the launcher, binding re-check. */
-export function runnerDeps(E, admit) {
+export function runnerDeps(E, cx) {
   const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
   const deps = io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn,
     commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
     verifyBinding: () => E.verifyBinding(), deadlineClock: ctx.deadlineClock });
   if (!claimsOn(E.S)) return deps; // legacy: the frozen deps, unchanged
-  // S2 (F1): every runner of a hostClaims run is admitted through a claim (engine-claims.mjs); `admit` names the gate RED runner.
-  return { ...deps, spawnRunner: claimedRunner(E, deps.spawnRunner), ...(admit ? { admitRunner: () => admitRunner(E, admit) } : {}) };
+  // S2: the call site admitted `cx` (engine-claims.mjs admitOp) and releases it in its runClaimed/releaseOp finally;
+  // here every launch only binds the claim to the runner's group before the release byte.
+  return { ...deps, spawnRunner: claimedRunner(E, cx, deps.spawnRunner) };
 }
 
 /** A prototype-free record (unit and check names are keys; `constructor` must stay an ordinary name). */
@@ -275,17 +276,16 @@ export function releaseSlot(S, rx, slot) {
 export const ceilingHolds = (S) => holdsOf(S);
 
 /** One check through the runner protocol; `{ refusal }` when its group's quiescence is not proven (nothing recorded). */
-async function runCheck(E, u, name, resources) {
+async function runCheck(E, u, name, resources, cx) {
   const c = E.S.config.testCommands[name];
-  const adm = await admitRunner(E, { kind: 'unit-check', node: `${u}.${name}`, name }); // S2: a held check is pending, not run
-  if (adm?.held) return { refusal: true, held: true };
   const a = { attempt_id: 'att-' + randomUUID(), kind: 'unit-check', node: u, check: name, status: 'intent', resources: [...resources] };
+  if (cx?.claim) a.host_claim = hostRecord(cx); // S2: persisted with the intent, before launch
   E.S.attempts.push(a);
   for (const r of resources) E.S.locks[r] = a.attempt_id;
   await E.commit();
   let result;
   try {
-    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(adm?.claim ? { hostClaim: adm.claim } : {}) });
+    const launch = await runnerDeps(E, cx).spawnRunner({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs) });
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
     armAttempt(E.S, a, clampTimeout(E.S.config.timeoutMs), E.ctx.deadlineClock); // S1: durable run only
     await E.commit();
@@ -336,44 +336,51 @@ export async function runUnitChecks(E, transient = []) {
     const u = readyUnits(E, states)[0];
     if (!u) return progressed;
     const all = units(S), U = all[u];
-    if (ceilingReached(E, u)) { await E.commit(); return progressed; }
-    E.unitChecked.add(u);
-    // Every node's declared paths (unit-less upstream generators included) and the base commit.
-    const watched = [...new Set(Object.values(S.nodes).flatMap(n => [...n.reads, ...n.writes]))].sort();
-    const preBase = baseCommit(E.ctx.repoRoot, S);
-    const pre = io.fingerprints(E.ctx.repoRoot, watched), results = [];
-    for (const name of U.checks) {
-      let r = await runCheck(E, u, name, U.resources);
-      if (!r.refusal && r.error && !r.error_code) { note(E.S, 'UNIT_CHECK_RETRY', { unit: u, check: name, cause: r.error }); r = await runCheck(E, u, name, U.resources); }
-      if (r.refusal) return progressed;
-      results.push(r);
-    }
-    const unbound = E.verifyBinding();
-    if (unbound.length) {
-      note(E.S, 'UNIT_CHECK_DROPPED', { unit: u, binding: unbound.map(j => j.code) });
-      for (const j of unbound) if (!transient.some(x => x.code === j.code)) transient.push(j);
+    // S2 (M1): the unit's check runners are admitted as ONE batch claim BEFORE the re-check ceiling is spent, so a hold
+    // spends no slot, runs nothing and is no judgment; the claim is released in `finally` (engine-claims.mjs lifecycle).
+    const cx = claimsOn(S) ? await admitOp(E, `unit-check.${u}`, runnerSpec(S, U.checks)) : null;
+    if (cx?.refused) { if (!transient.some(j => j.code === cx.code && j.node === u)) transient.push(judgment(cx.code, u, cx.reason)); return progressed; }
+    if (cx?.held) return progressed;
+    try {
+      if (ceilingReached(E, u)) { await E.commit(); return progressed; }
+      E.unitChecked.add(u);
+      // Every node's declared paths (unit-less upstream generators included) and the base commit.
+      const watched = [...new Set(Object.values(S.nodes).flatMap(n => [...n.reads, ...n.writes]))].sort();
+      const preBase = baseCommit(E.ctx.repoRoot, S);
+      const pre = io.fingerprints(E.ctx.repoRoot, watched), results = [];
+      for (const name of U.checks) {
+        let r = await runCheck(E, u, name, U.resources, cx);
+        if (!r.refusal && r.error && !r.error_code) { note(E.S, 'UNIT_CHECK_RETRY', { unit: u, check: name, cause: r.error }); r = await runCheck(E, u, name, U.resources, cx); }
+        if (r.refusal) return progressed;
+        results.push(r);
+      }
+      const unbound = E.verifyBinding();
+      if (unbound.length) {
+        note(E.S, 'UNIT_CHECK_DROPPED', { unit: u, binding: unbound.map(j => j.code) });
+        for (const j of unbound) if (!transient.some(x => x.code === j.code)) transient.push(j);
+        await E.commit();
+        return false; // never progress: the caller must not dispatch a node or repair under the differing binding
+      }
+      const post = io.fingerprints(E.ctx.repoRoot, watched);
+      const touched = watched.filter(p => post[p] !== pre[p]);
+      const moved = baseCommit(E.ctx.repoRoot, E.S) !== preBase;
+      const passed = !touched.length && !moved && results.every(r => r.result === 'pass');
+      const c = baseCandidate(E.ctx.repoRoot, E.S, E.S.pinned_exclusions);
+      note(E.S, 'UNIT_CHECKED', { unit: u, state: passed ? 'verified' : 'failed', checks: results.map(r => ({ name: r.name, result: r.result })) });
+      const reason = passed ? null : touched.length ? `checks changed declared files: ${touched.join(', ')}`
+        : moved ? 'checks moved the config.base commit'
+        : `check(s) failed: ${results.filter(r => r.result !== 'pass').map(r => `${r.name} (exit ${r.exit_code}${r.error ? `, ${r.error}` : ''})`).join(', ')}`;
+      const rec = E.S.unit_checks[u];
+      rec.rounds = (rec.rounds ?? 0) + 1;
+      E.unitCache = {};
+      rec.evidence = { id: `${u}@${E.S.seq}`, state: passed ? 'verified' : 'failed', results, binding: binding(E.S, E.ctx.repoRoot, u, U, E.unitCache), candidate_id: c.candidate_id ?? null,
+        seq: E.S.seq, ...(reason ? { reason } : {}) };
+      rec.stale = false;
+      if (!passed && !E.S.freeze) for (const id of U.nodes) Object.assign(E.S.nodes[id], { state: 'failed', reason: `unit ${u} ${reason}`, unit_check_failed: true });
       await E.commit();
-      return false; // never progress: the caller must not dispatch a node or repair under the differing binding
-    }
-    const post = io.fingerprints(E.ctx.repoRoot, watched);
-    const touched = watched.filter(p => post[p] !== pre[p]);
-    const moved = baseCommit(E.ctx.repoRoot, E.S) !== preBase;
-    const passed = !touched.length && !moved && results.every(r => r.result === 'pass');
-    const c = baseCandidate(E.ctx.repoRoot, E.S, E.S.pinned_exclusions);
-    note(E.S, 'UNIT_CHECKED', { unit: u, state: passed ? 'verified' : 'failed', checks: results.map(r => ({ name: r.name, result: r.result })) });
-    const reason = passed ? null : touched.length ? `checks changed declared files: ${touched.join(', ')}`
-      : moved ? 'checks moved the config.base commit'
-      : `check(s) failed: ${results.filter(r => r.result !== 'pass').map(r => `${r.name} (exit ${r.exit_code}${r.error ? `, ${r.error}` : ''})`).join(', ')}`;
-    const rec = E.S.unit_checks[u];
-    rec.rounds = (rec.rounds ?? 0) + 1;
-    E.unitCache = {};
-    rec.evidence = { id: `${u}@${E.S.seq}`, state: passed ? 'verified' : 'failed', results, binding: binding(E.S, E.ctx.repoRoot, u, U, E.unitCache), candidate_id: c.candidate_id ?? null,
-      seq: E.S.seq, ...(reason ? { reason } : {}) };
-    rec.stale = false;
-    if (!passed && !E.S.freeze) for (const id of U.nodes) Object.assign(E.S.nodes[id], { state: 'failed', reason: `unit ${u} ${reason}`, unit_check_failed: true });
-    await E.commit();
-    await io.boundary(E.ctx.hooks, 'unit-checked', { unit: u, evidence: rec.evidence.id }); // evidence durable, nothing derived from it yet
-    if (passed) progressed = true;
+      await io.boundary(E.ctx.hooks, 'unit-checked', { unit: u, evidence: rec.evidence.id }); // evidence durable, nothing derived from it yet
+      if (passed) progressed = true;
+    } finally { if (cx?.claim) await releaseOp(E, cx); }
   }
 }
 
