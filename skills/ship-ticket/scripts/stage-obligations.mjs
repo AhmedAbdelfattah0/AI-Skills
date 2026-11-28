@@ -7,8 +7,8 @@
  * Replaces, for a flagged run only (§6.1 P6; every other run keeps the frozen semantics):
  * - the `SECURITY_WAIVER boundary:"plan-3b"` route of `references/ship.md:102-114` for a verification row whose stage does not
  *   exist in the run: the plan declares it deferred and it becomes an OPEN OBLIGATION, bound to the candidate at SHIP_READY.
- *   SHIP_READY covers the merge stage only and lists the open obligations. The policy TEXT of ship.md:102-114, plan.md and
- *   security-risk.md §5 is unchanged (owner approval pending).
+ *   SHIP_READY covers the merge stage only and lists the open obligations. The policy TEXT of ship.md, plan.md, SKILL.md and
+ *   security-risk.md §5 for this route is the owner-approved H6 Group O text (stagePolicy runs only).
  * - the narrow `preflight` scope (schema, ordering, security binding): plus required artifacts, declared stages, named and
  *   executable RED/proof runners, and the existing path signal pre-scan of planned writes. Init runs the same checks.
  *

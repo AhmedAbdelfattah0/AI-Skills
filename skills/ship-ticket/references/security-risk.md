@@ -177,6 +177,8 @@ names a dropped pair is ignored. `NOT_APPLICABLE` in a review row is **not** a w
 For an effective pair it is accepted only with a trusted waiver. For a dropped pair it
 is the reviewer agreeing with the cited fact (section 9).
 
+A stage deferral in an approved `stage-policy-v1` line is not a risk acceptance and not a waiver: it leaves the row's obligation open and visible, it is refused for a section 3a pair or a current-stage control (`stage_deferral_invalid`), and nothing in the Factory marks it verified. Waivers remain owner-authority events that the owner appends to RUN-STATE through the host session; the engine trusts them by its quiescence rule under the same-user trust bound, and they are not authenticated. The unattended supervisor never writes one.
+
 ## 6. Binding into the DAG
 
 The plan's DAG carries three config keys, none defaulted:

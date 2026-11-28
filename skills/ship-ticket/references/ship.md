@@ -105,7 +105,14 @@ concurrently, then join once:
   its tooling and permission allow. A `not applicable` set after approval needs
   its recorded reason. Any other status (`planned`, `partially verified`,
   `unverified`, `failed`, or no status) needs the owner's explicit acceptance
-  for this candidate, otherwise `WAIT_FOR_USER`. The acceptance is the owner
+  for this candidate, otherwise `WAIT_FOR_USER`. One exception, on a run with
+  `config.stagePolicy` only: a row that the approved `stage-policy-v1` line
+  defers to a later stage is an OPEN obligation, not an exception and not a
+  waiver. SHIP_READY carries it in `obligations_open` and covers the merge stage
+  only. Nothing marks it verified, and it is closed only through the follow-up
+  ticket its tracker or trigger names, by that ticket's own acceptance. Every
+  other row keeps the rule above, including any current-stage row, which can
+  never be deferred. The acceptance is the owner
   authority of [security-risk.md](security-risk.md) section 5, recorded as a
   `SECURITY_WAIVER` event with `boundary: "plan-3b"`, `control: "<the 3b row's
   check>"`, `candidate`, `policy_version: 2`, `authorized_by` and `reason`, and

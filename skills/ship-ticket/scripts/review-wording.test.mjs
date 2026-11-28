@@ -176,6 +176,21 @@ test('RC-1 headline rules are pinned: native Plan Mode approval, section 3b, the
   assert.ok(plan.includes('anything other than `verified` or `not applicable` (`planned`, `partially verified`, `unverified`, `failed`) is a security exception: it blocks SHIP'));
   assert.ok(flat(ref('ship.md')).includes('`SECURITY_WAIVER` event with `boundary: "plan-3b"`'));
   assert.ok(skill.includes('This list is the single owner of the stop points, by category'));
+  // H6 Group O: the stagePolicy open-obligation exception, narrowed, with the risk-acceptance limits kept.
+  assert.ok(flat(ref('ship.md')).includes('One exception, on a run with `config.stagePolicy` only: a row that the approved `stage-policy-v1` line defers to a later stage is an OPEN obligation, not an exception and not a waiver.'));
+  assert.ok(flat(ref('ship.md')).includes('including any current-stage row, which can never be deferred.'));
+  assert.ok(flat(ref('plan.md')).includes('A row deferred to a later stage in an approved `stage-policy-v1` line on a `config.stagePolicy` run is an open obligation instead ([ship.md](ship.md)); a current-stage row is never deferred.'));
+  assert.ok(skill.includes('at release (a future-stage row deferred as an open obligation excepted, [references/ship.md](references/ship.md))'));
+  assert.ok(flat(ref('execution-harness.md')).includes('Section 3b status rules are unchanged; [ship.md](ship.md) names the open obligation as the route for a deferred future-stage row and keeps the waiver route for every other row.'));
+  const risk = flat(ref('security-risk.md'));
+  assert.ok(risk.includes('A plan cannot accept risk.'));
+  assert.ok(risk.includes('A stage deferral in an approved `stage-policy-v1` line is not a risk acceptance and not a waiver'));
+  assert.ok(risk.includes('The unattended supervisor never writes one.'));
+  // H6 Group J: host codes in the judgment table.
+  const harness = flat(ref('execution-harness.md'));
+  assert.ok(harness.includes('| `host_claims_state_missing` | Owner |'));
+  assert.ok(harness.includes('Not judgment points: `host_claim_required` is a gate-shaped refusal (`judgment_point: false`)'));
+  assert.ok(!/\|\s*`host_(blocked|held|labels_conflict)`/.test(harness), 'no judgment row for host codes that are emitted nowhere');
   assert.ok(skill.includes('Never force-push without explicit owner authority'));
   assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure and forgery detection, never relabelled as harness degradation and never a bounded-repair case)'));
 });
