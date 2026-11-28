@@ -47,7 +47,8 @@
  * UNQUALIFIED: lib/deadline MEASUREMENT_QUALIFIED is false (G0 not passed), so in production resolveSweepClock gives no
  * clock and the sweep measures and signals nothing (reported `unmeasured`); tests inject a testClock().
  *
- * PR-2 SEAM: real host admission is `host-admit.mjs run -- <cmd>` (lane B, not on this branch). Every heavy command goes
+ * PR-2 SEAM: real host admission is `host-admit.mjs run -- <cmd>` (merged with PR-2: claim, derived weight, stdout passed
+ * through, a hold exits ADMISSION_HELD_EXIT 75; a permanent refusal exits 2 and reads as nothing_ran). Every heavy command goes
  * through `admittedCommand` only, so it is re-pointed in one place; exit ADMISSION_HELD_EXIT is read as "held, nothing ran".
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync, unlinkSync } from 'node:fs';
@@ -68,6 +69,7 @@ import { enginePaths } from './lib/run-placement.mjs';
 import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { journalPaths, withJournal, readJournal, opId, repoId, coded, MAX_PROBES } from './supervisor-journal.mjs';
 import { GATE_FIELDS } from './engine-dag.mjs';
+import { ADMISSION_HELD_EXIT } from './host-admit.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SUPERVISOR_SCHEMA = 'ship-ticket-supervisor-v1';
@@ -80,8 +82,8 @@ export const DRIVE_BOUND_MS = 4 * 60 * 60 * 1000;
 export const GATE_BOUND_MS = 2 * 60 * 60 * 1000;
 export const AGENT_BOUND_MS = 45 * 60 * 1000;
 export const RECONCILE_BOUND_MS = 120 * 1000;
-/** PR-2 seam: the exit status by which `host-admit run` reports "held, the command did not run" (assumed; re-point with PR-2). */
-export const ADMISSION_HELD_EXIT = 75;
+/** PR-2 seam: the exit status by which `host-admit run` reports "held, the command did not run" (host-admit.mjs owns it). */
+export { ADMISSION_HELD_EXIT };
 /**
  * Outcomes that mean NOTHING RAN (the command never took effect in the engine): re-tried under a derived generation
  * `<gen>.r<k>`, at most this many times each, then the ticket alone is Blocked naming the op. `held`: admission held it;

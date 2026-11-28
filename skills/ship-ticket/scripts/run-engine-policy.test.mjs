@@ -120,12 +120,16 @@ test('[seam] policySemantics maps supported versions to frozen capability flags;
   const { policySemantics, ENGINE_POLICY_VERSION, POLICY_SEMANTICS } = await policy();
   assert.equal(ENGINE_POLICY_VERSION, 1);
   // PR-3: 25-48 are the stage-obligation twins of 1-24 (config.stagePolicy); S5: 101-148 are the early-checks twins of 1-48
-  assert.deepEqual(Object.keys(POLICY_SEMANTICS), [...Array.from({ length: 48 }, (_, i) => String(i + 1)), ...Array.from({ length: 48 }, (_, i) => String(i + 101))]);
+  // PR-2: 2xx/3xx are the host-claim twins (+200) of every DURABLE row (13-24, 37-48, 113-124, 137-148), derived last
+  const DURABLE = [13, 37, 113, 137].flatMap((b) => Array.from({ length: 12 }, (_, i) => b + i));
+  assert.deepEqual(Object.keys(POLICY_SEMANTICS), [...Array.from({ length: 48 }, (_, i) => String(i + 1)), ...Array.from({ length: 48 }, (_, i) => String(i + 101)),
+    ...DURABLE.map((v) => String(v + 200))]);
   for (let v = 1; v <= 24; v++) {
     assert.deepEqual(policySemantics(v + 24), { ...policySemantics(v), stageObligations: true }, `v${v + 24} is v${v} with stage obligations`);
     assert.equal(policySemantics(v).stageObligations, undefined, `v${v} has no stage flag`);
   }
   for (let v = 1; v <= 48; v++) assert.deepEqual(policySemantics(v + 100), { ...policySemantics(v), earlyChecks: true }, `v${v + 100} is v${v} with early checks`);
+  for (const v of DURABLE) assert.deepEqual(policySemantics(v + 200), { ...policySemantics(v), hostClaimRequired: true }, `v${v + 200} is v${v} with a required host claim`);
   assert.deepEqual(policySemantics(1), {});
   assert.deepEqual(policySemantics(2), { testKinds: true }, 'v2 (S-01b2 P5r) adds the test-kind freeze gate');
   assert.deepEqual(policySemantics(3), { securityObligations: true }, 'v3 (F12a) binds a format-3 security block (dropped pairs)');
@@ -140,7 +144,7 @@ test('[seam] policySemantics maps supported versions to frozen capability flags;
     assert.equal(policySemantics(v).durableRun, undefined, `v${v} has no durable flag`);
   }
   assert.ok(Array.from({ length: 48 }, (_, i) => i + 1).every((v) => Object.isFrozen(policySemantics(v))) && Object.isFrozen(POLICY_SEMANTICS));
-  for (const v of [49, 100, 149, 0, -1, 1.5, '1', null, undefined]) {
+  for (const v of [49, 100, 149, 201, 212, 225, 236, 249, 301, 325, 349, 0, -1, 1.5, '1', null, undefined]) {
     assert.throws(() => policySemantics(v), (e) => e.code === 'policy_version_unsupported', `version ${JSON.stringify(v)}`);
   }
 });

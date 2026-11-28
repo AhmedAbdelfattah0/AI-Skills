@@ -44,9 +44,10 @@ import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, rec
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
-import { repoIdentityOn, earlyChecksOn } from './engine-dag.mjs';
-import { repoIdentityVersion, earlyChecksVersion, stageVersion } from './engine-policy.mjs';
+import { repoIdentityOn, earlyChecksOn, hostClaimRequiredOn } from './engine-dag.mjs';
+import { repoIdentityVersion, earlyChecksVersion, stageVersion, hostClaimVersion } from './engine-policy.mjs';
 import { stageOn, parseStagePolicy, feasibility, initialStage, stageStateRefusal, stageBindingRefusal } from './stage-obligations.mjs';
+import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2: the CLI entry check only (main), never the library
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
@@ -71,6 +72,7 @@ const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
   'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'policy', 'catalogFile', 'now']);
 CTX_KEYS.add('deadlineClock'); // S1: the in-process test clock of the deadline sweep (never set by the CLI)
+CTX_KEYS.add('authorize'); // PR-2: the CLI's synchronous host-claim authorization of the locked snapshot (hostClaimAuthorizer)
 const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check', 'evidence'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -194,6 +196,9 @@ function open(ctx, prefer) {
         const why = stageStateRefusal(E.S);
         if (why) throw coded('stage_state_invalid', `the stage obligation record does not match its retained approved stage policy: ${why}; it is never resumed`);
       }
+      // PR-2: the hostClaimRequired flag of the run's version and config.hostClaimRequired come together or not at all
+      if ((E.policy.semantics.hostClaimRequired === true) !== hostClaimRequiredOn(E.S))
+        throw coded('host_claims_state_missing', `policy_version ${E.S.policy_version} and config.hostClaimRequired disagree: a partial host-claim run is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -239,6 +244,11 @@ async function locked(ctx, fn, { load = true, waitMs, prefer, foreign = false } 
   try {
     if (load) {
       E.load();
+      // PR-2 (review round 1, Codex MAJOR-1): the CLI's host-claim authorization (main: hostClaimAuthorizer) is checked against
+      // THIS locked snapshot, synchronously, before ownership, observation or any write: a refused command leaves the state
+      // byte-identical. Unflagged runs and in-process callers without it are unchanged (null).
+      const denied = ctx.authorize?.(E.S, E.P.state);
+      if (denied) throw coded(denied.code, denied.reason);
       // S1 (Codex 2): ownership is checked right after the load, before any observation or write: a refused command leaves
       // the shared state byte-identical. A command allowed from elsewhere (`foreign`: the deadline sweep) never observes
       // authority from the caller's plan, which is not the run's.
@@ -457,7 +467,11 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false, stage = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false, twins = {}) {
+  // Merge of PR-2 and PR-3: the two later twin flags are NAMED options, never positional booleans, so they cannot be swapped.
+  if (twins === null || typeof twins !== 'object' || Object.keys(twins).some(k => k !== 'stage' && k !== 'hostClaims'))
+    throw coded('bad_context', 'newRunPolicy: the stage and host-claim twins are named options { stage, hostClaims }');
+  const { stage = false, hostClaims = false } = twins;
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
@@ -474,7 +488,10 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false, 
   // S5: config.earlyChecks records the early-checks twin (engine-policy.mjs EARLY_CHECKS_OFFSET); an engine without one cannot start it
   const final = early ? earlyChecksVersion(staged, engine.semantics) : staged;
   if (final === null) throw coded('policy_version_unsupported', `no early-checks policy version for policy_version ${staged}`);
-  return { policy_version: runPolicy({ policy_version: final }, engine).version,
+  // PR-2: config.hostClaimRequired records the host-claim twin (engine-policy.mjs HOST_CLAIM_OFFSET), AFTER stage and early checks
+  const claimed = hostClaims ? hostClaimVersion(final, engine.semantics) : final;
+  if (claimed === null) throw coded('policy_version_unsupported', `no host-claim policy version for policy_version ${final}`);
+  return { policy_version: runPolicy({ policy_version: claimed }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -563,7 +580,8 @@ async function initLocked(ctx, placement) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag), stage !== null), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag),
+        { stage: stage !== null, hostClaims: hostClaimRequiredOn(dag) }), ...(testKinds ? { test_kinds: testKinds } : {}),
       ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
@@ -920,7 +938,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'stage_state_missing', 'stage_state_invalid']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'stage_state_missing', 'stage_state_invalid', 'host_claims_state_missing', 'host_claim_required']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -984,8 +1002,24 @@ export async function gate(ctx) {
     });
   } catch (e) {
     if (!GATE_REFUSALS.has(e.code)) throw e;
-    return { gate: ctx.gate, ...gateNo(e.code, [e.message], { judgment_point: e.code !== 'lock_held' }) };
+    return { gate: ctx.gate, ...gateNo(e.code, [e.message], { judgment_point: e.code !== 'lock_held' && e.code !== 'host_claim_required' }) };
   }
+}
+
+/**
+ * PR-2 (S2-min): the CLI-entry host-claim authorization, a synchronous check of the LOCKED snapshot (locked() calls it right
+ * after the load; review round 1: a pre-lock read could miss a state an `init` published in between). Only a heavy command
+ * (drive, gate red|prove|ship-ready, gate review of a test-kinds run) of a run whose recorded policy carries
+ * hostClaimRequired is checked (engine-host-claim.mjs checkHostClaim: a read, never an await); any other run returns null
+ * before the claim store is touched. The exported library entry points are checked only when a caller passes it.
+ */
+export function hostClaimAuthorizer(cmd, gateKind) {
+  return (S, statePath) => {
+    if (!heavyCommand(cmd, gateKind, S)) return null;
+    let flagged = false;
+    try { flagged = runPolicy(S).semantics.hostClaimRequired === true; } catch { return null; } // the load already refused it
+    return flagged ? checkHostClaim({ S, statePath, cmd, gateKind }) : null;
+  };
 }
 
 async function main(argv) {
@@ -1006,6 +1040,8 @@ async function main(argv) {
   if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess|prove --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
+  // PR-2: a heavy command of a run whose policy requires a host claim is refused, on the locked snapshot, without one.
+  if (cmd === 'drive' || cmd === 'gate') ctx.authorize = hostClaimAuthorizer(cmd, gateKind);
   const commands = { init, status, drive, resume,
     reconcile: () => { if (flags.deadlines !== 'true') throw new Error('Usage: run-engine.mjs reconcile --deadlines true --repo <dir> --ticket <key> --run-id <id>');
       return reconcileDeadlines(ctx); },

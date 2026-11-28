@@ -83,7 +83,28 @@ export function withEarlyChecksTwins(core) {
   if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: core policy version(s) ${bad.join(', ')} reach EARLY_CHECKS_OFFSET ${EARLY_CHECKS_OFFSET} or already carry earlyChecks`), { code: 'policy_table_ceiling' });
   return Object.freeze({ ...core, ...Object.fromEntries(Object.entries(core).map(([v, f]) => [Number(v) + EARLY_CHECKS_OFFSET, Object.freeze({ ...f, earlyChecks: true })])) });
 }
-export const POLICY_SEMANTICS = withEarlyChecksTwins(CORE_SEMANTICS);
+/**
+ * PR-2 (S2-min host admission): a second additive offset. Every DURABLE row v (< HOST_CLAIM_OFFSET, durableRun true, after the
+ * early-checks twins) has a host-claim twin v + HOST_CLAIM_OFFSET with the same flags plus hostClaimRequired
+ * (config.hostClaimRequired: the run-engine CLI entry refuses a heavy command without an active host claim, host_claim_required).
+ * DERIVED from the merged table, never hand-assigned, so a later core or twin row gets its host-claim twin automatically. Only
+ * durable rows: the check binds a claim to the run's durable state file. An engine without PR-2 has no version >= 200 and
+ * refuses such a run (policy_version_unsupported) instead of driving it unclaimed. Every run without the flag keeps its version.
+ */
+export const HOST_CLAIM_OFFSET = 200;
+/** `table` plus the host-claim twin of each durable row; refuses (policy_table_ceiling) a row at or above the offset or already flagged. */
+export function withHostClaimTwins(table) {
+  const bad = Object.entries(table).filter(([v, f]) => !(Number(v) < HOST_CLAIM_OFFSET) || f.hostClaimRequired === true).map(([v]) => v);
+  if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: policy version(s) ${bad.join(', ')} reach HOST_CLAIM_OFFSET ${HOST_CLAIM_OFFSET} or already carry hostClaimRequired`), { code: 'policy_table_ceiling' });
+  return Object.freeze({ ...table, ...Object.fromEntries(Object.entries(table).filter(([, f]) => f.durableRun === true)
+    .map(([v, f]) => [Number(v) + HOST_CLAIM_OFFSET, Object.freeze({ ...f, hostClaimRequired: true })])) });
+}
+export const POLICY_SEMANTICS = withHostClaimTwins(withEarlyChecksTwins(CORE_SEMANTICS));
+/** The host-claim twin of durable `version` in `table`, or null when that engine has none (non-durable, or an engine without PR-2). */
+export const hostClaimVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Number.isInteger(version) && version < HOST_CLAIM_OFFSET ? version + HOST_CLAIM_OFFSET : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].hostClaimRequired === true ? w : null;
+};
 /** The early-checks twin of core `version` in `table`, or null when that engine has none (an engine without S5). */
 export const earlyChecksVersion = (version, table = POLICY_SEMANTICS) => {
   const w = Number.isInteger(version) && version < EARLY_CHECKS_OFFSET ? version + EARLY_CHECKS_OFFSET : null;
