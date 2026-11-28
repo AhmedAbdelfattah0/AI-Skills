@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
-  ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
+  ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV, prepareAgentTask } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
 import { WORKER_FAILURE_BOUND_MS, waitFor, waitForFile, processGone } from './test-wait.test-helper.mjs';
 
@@ -46,6 +46,31 @@ const config = (fx, extra = {}) => ({ phase: 'BUILD', provider: 'claude', nodeId
 test('carrier refuses PLAN and REVIEW', (t) => {
   const fx = fixture(t);
   assert.throws(() => prepareDispatch(config(fx, { phase: 'PLAN' })), /cannot be dispatched/);
+  assert.throws(() => prepareDispatch(config(fx, { phase: 'REVIEW' })), /cannot be dispatched/);
+});
+
+test('PR-5 prepareAgentTask: a read-only REVIEW-phase task (review legs, RCA) routed by the SAME tier -> modelMap resolution as prepareDispatch', (t) => {
+  const fx = fixture(t);
+  const task = (extra = {}) => ({ provider: 'claude', nodeId: 'review-primary', workdir: fx.repo, timeoutMs: WORKER_FAILURE_BOUND_MS,
+    promptFile: join(fx.root, 'prompt.txt'), modelMap: { strong: 'claude-opus-x', inherit: 'claude-sonnet-x' }, ...extra });
+  const c = prepareAgentTask(task());
+  assert.equal(c.phase, 'REVIEW');
+  assert.equal(c.model_tier, 'strong', 'routeModel: REVIEW is always strong');
+  assert.equal(c.model, 'claude-opus-x', 'model = modelMap[tier]');
+  assert.deepEqual(c.args, ['-p', '--output-format', 'json', '--no-session-persistence', '--permission-mode', 'dontAsk', '--model', 'claude-opus-x']);
+  // the same unresolved-strong refusal as the writer carrier: no modelMap.strong, or an unverified adapter
+  assert.throws(() => prepareAgentTask(task({ modelMap: {} })), /strong tier requires modelMap.strong/);
+  assert.throws(() => prepareAgentTask(task({ provider: 'gemini', executable: 'gemini', args: ['x'] })), /strong tier requires modelMap.strong/);
+  // codex: always the read-only sandbox, whatever the config says
+  const x = prepareAgentTask(task({ provider: 'codex', modelMap: { strong: 'gpt-x' } }));
+  assert.deepEqual(x.args, ['exec', '--json', '--ephemeral', '-s', 'read-only', '-m', 'gpt-x', '-']);
+  assert.throws(() => prepareAgentTask(task({ provider: 'codex', modelMap: { strong: 'gpt-x' }, sandbox: 'workspace-write' })), /read-only/);
+  assert.throws(() => prepareAgentTask(task({ permissionMode: 'acceptEdits' })), /read-only/);
+  assert.throws(() => prepareAgentTask(task({ phase: 'BUILD' })), /REVIEW/);
+  assert.throws(() => prepareAgentTask(task({ ownership: { writes: ['src'] } })), /writes nothing/);
+  assert.throws(() => prepareAgentTask(task({ billing: 'api' })), /allowApiBilling/);
+  assert.throws(() => prepareAgentTask(task({ modelMap: { strong: 'bad model' } })), /invalid model ID/);
+  // the writer carrier still refuses REVIEW (unchanged)
   assert.throws(() => prepareDispatch(config(fx, { phase: 'REVIEW' })), /cannot be dispatched/);
 });
 

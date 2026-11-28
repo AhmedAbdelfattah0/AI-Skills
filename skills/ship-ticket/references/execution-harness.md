@@ -182,6 +182,10 @@ What it enforces:
   review round being repaired). It may declare `redSpecs` (repo-relative spec
   paths); then `redEvidence` must be an absolute path to a non-empty file with
   the failing-run output, written by the orchestrator, or dispatch is refused.
+  The supervisor's read-only review legs and RCA (`scripts/supervisor.mjs`, not
+  installed or activated) are not writers: `prepareAgentTask` routes them through
+  the same tier-to-`modelMap` code (REVIEW is always `strong`), forces the codex
+  `read-only` sandbox and the claude `dontAsk` mode, and accepts no ownership.
 - **Plan roots are orchestrator-owned.** A change under `.specs`/`.spec` during a
   run is RUN-STATE bookkeeping: it is reported in `orchestrator_paths_changed`
   and is not a `writes_outside_ownership` violation.
