@@ -278,7 +278,41 @@ test('e: a failed supervisor kill/restart half fails e at arm and arms nothing',
   assert.equal(code, G0.EXIT.FAIL);
 });
 
-test('cleanup is bounded on the monotonic clock and never signals an unverified group', async (t) => {
+test('a failed arm leaves no unrecorded worker: the worker is told to stop and nothing is armed', async (t) => {
+  for (const fault of ['no_leader_start', 'save_throws']) {
+    const { env, s } = world(t);
+    const start = env.host.startWorker;
+    env.host.startWorker = async (dir) => {
+      const w = await start(dir);
+      if (fault === 'no_leader_start') return { ...w, leader_start: null };
+      mkdirSync(join(dir, 'state.json'), { recursive: true }); // the atomic rename onto a directory throws
+      return w;
+    };
+    const r = await G0.armFixture('c', env);
+    assert.equal(r.result, 'REFUSED', JSON.stringify(r));
+    assert.match(r.reason, /arm_failed/);
+    const w = [...s.workers.values()][0];
+    assert.equal(existsSync(w.stop), true, `${fault}: the stop sentinel was written`);
+    const ctl = { run: (ms) => env.host.wait(ms) };
+    await ctl.run(200);
+    assert.equal(w.alive, false, `${fault}: the worker stopped`);
+  }
+});
+
+test('c/d: an unreadable boot id is not a reboot: the record stays armed and the worker keeps running', async (t) => {
+  const { env, ctl, s } = world(t);
+  await G0.armFixture('c', env);
+  ctl.run(1000);
+  s.boot = null;
+  const r = await G0.observeFixture('c', env);
+  assert.equal(r.result, 'NOT_RUN');
+  assert.equal(stateOf(env, 'c').phase, 'armed');
+  s.boot = 'BOOT-1';
+  ctl.run(500);
+  assert.equal((await G0.observeFixture('c', env)).result, 'NOT_RUN', 'resumable once the boot id reads again');
+});
+
+test('cleanup is bounded on the monotonic clock and never signals an unverified group', { timeout: 20000 }, async (t) => {
   const a = world(t, { immortal: true });
   await G0.armFixture('c', a.env);
   a.ctl.run(1000);

@@ -40,6 +40,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -315,10 +316,20 @@ export async function cleanupWorker(st, env) {
   return (await waitGone(LIMITS.kill_wait_ms)) ? { worker: 'killed', signalled: true } : { worker: 'survived_sigkill', signalled: true, warning: `group ${w.pgid} survived SIGKILL` };
 }
 
+/**
+ * What a verdict was measured against (evidence, not a gate): the digests of the mechanism files and of this helper.
+ * A later change to them does not invalidate a persisted verdict automatically: compare these fields before reusing one.
+ */
+export function provenance() {
+  const sha = (u) => { try { return createHash('sha256').update(readFileSync(u)).digest('hex'); } catch { return null; } };
+  return { deadline_mjs_sha256: sha(DEADLINE_SRC), engine_quiesce_mjs_sha256: sha(new URL('../engine-quiesce.mjs', import.meta.url)),
+    helper_sha256: sha(SELF) };
+}
+
 async function finalize(env, st, result) {
   st.phase = 'final';
   delete st.pending;
-  st.result = { ...result, finished_wall_ms: env.host.wallMs() };
+  st.result = { ...result, finished_wall_ms: env.host.wallMs(), provenance: provenance() };
   if (st.worker && result.cleanup === undefined) st.result.cleanup = await cleanupWorker(st, env);
   await save(env, st);
   return verdictOf(st);
@@ -351,17 +362,26 @@ export async function armFixture(fx, env) {
     killRestart = await host.killRestartHalf();
     if (killRestart?.result !== 'PASS') {
       const st = { schema: G0_SCHEMA, fixture: fx, phase: 'final', worker: null, deadline: { start_ns: '0', boot_id: boot }, kill_restart: killRestart, observations: [],
-        result: { result: 'FAIL', reason: 'the supervisor kill -9/restart half failed; the reboot half was not armed', kill_restart: killRestart, finished_wall_ms: host.wallMs() } };
+        result: { result: 'FAIL', reason: 'the supervisor kill -9/restart half failed; the reboot half was not armed', kill_restart: killRestart, finished_wall_ms: host.wallMs(), provenance: provenance() } };
       await save(env, st);
       return verdictOf(st);
     }
   }
   for (const f of ['progress.jsonl', 'stop']) rmSync(join(dir, f), { force: true });
   const worker = await host.startWorker(dir);
-  const deadline = armRecord(LIMITS.deadline_limit_ms, clockOf(host));
-  const st = { schema: G0_SCHEMA, fixture: fx, phase: 'armed', platform: host.platform, armed_wall_ms: host.wallMs(),
-    ref: { wall_ms: host.wallMs(), hr_ns: String(host.nowNs()) }, worker, deadline, sleep_evidence_at_arm: evidence, kill_restart: killRestart, observations: [] };
-  await save(env, st);
+  let st;
+  try { // until the record is saved, nothing else can reach this worker: any failure stops it here (the stop sentinel)
+    if (!worker?.pgid || !worker.leader_start || !readTicks(worker.log, 0n).ticks.length)
+      throw new Error(`worker_not_started: pid ${worker?.pgid ?? '?'} has no recorded start time or wrote no tick within 10 s`);
+    const deadline = armRecord(LIMITS.deadline_limit_ms, clockOf(host));
+    st = { schema: G0_SCHEMA, fixture: fx, phase: 'armed', platform: host.platform, armed_wall_ms: host.wallMs(),
+      ref: { wall_ms: host.wallMs(), hr_ns: String(host.nowNs()) }, worker, deadline, sleep_evidence_at_arm: evidence, kill_restart: killRestart, observations: [] };
+    await save(env, st);
+  } catch (e) {
+    try { if (worker?.stop) writeFileSync(worker.stop, ''); } catch { /* the directory is gone */ }
+    try { rmSync(stateFile(env, fx), { force: true }); } catch { /* not a file: leave it for the owner */ }
+    return { fixture: fx, result: 'REFUSED', reason: `arm_failed: ${e.message}; the worker was told to stop and nothing is armed` };
+  }
   if (fx === 'e') { // one measured observation before the reboot, so the charge the reboot must keep is non-zero
     await host.wait(LIMITS.e_settle_ms);
     const m = observe(st.deadline, clockOf(host));
@@ -395,13 +415,17 @@ function measure(env, st) {
     worker_ticking: Boolean(last) && ms(hr - last.hr) <= LIMITS.ticking_ms,
     worker_offset_ms: last ? (last.wall - st.ref.wall_ms) - ms(last.hr - BigInt(st.ref.hr_ns)) : null };
 }
-const bootMoved = (env, st) => env.host.bootId() !== st.deadline.boot_id;
+/** 'moved' (another boot), 'unknown' (unreadable now: a transient sysctl failure is not a reboot) or 'same'. */
+const bootState = (env, st) => { const b = env.host.bootId(); return b === null ? 'unknown' : b !== st.deadline.boot_id ? 'moved' : 'same'; };
+const bootUnknown = (env, st, fx) => pending(env, st, { result: 'NOT_RUN', reason: 'the boot identity cannot be read now; nothing observed', next: `check \`sysctl -n kern.bootsessionuuid\`, then run \`${fx} observe\` again` });
 
 const classifyOffset = (o) => (Math.abs(o + LIMITS.hour_ms) <= LIMITS.displacement_band_ms ? 'minus_1h'
   : Math.abs(o - LIMITS.hour_ms) <= LIMITS.displacement_band_ms ? 'plus_1h' : Math.abs(o) <= LIMITS.restored_ms ? 'restored' : 'other');
 
 async function observeC(env, st) {
-  if (bootMoved(env, st)) return finalize(env, st, { result: 'NOT_RUN', reason: 'the host rebooted during fixture c: the attempt cannot be observed on its start boot; re-arm c' });
+  const bs = bootState(env, st);
+  if (bs === 'unknown') return bootUnknown(env, st, 'c');
+  if (bs === 'moved') return finalize(env, st, { result: 'NOT_RUN', reason: 'the host rebooted during fixture c: the attempt cannot be observed on its start boot; re-arm c' });
   const x = measure(env, st);
   const { pairs, negative_hr } = deltas(x.ticks);
   const maxDhr = pairs.reduce((a, p) => Math.max(a, p.dhr), 0);
@@ -428,7 +452,9 @@ async function observeC(env, st) {
 }
 
 async function observeD(env, st) {
-  if (bootMoved(env, st)) return finalize(env, st, { result: 'NOT_RUN', reason: 'the host rebooted during fixture d (a shutdown, not a sleep); re-arm d' });
+  const bs = bootState(env, st);
+  if (bs === 'unknown') return bootUnknown(env, st, 'd');
+  if (bs === 'moved') return finalize(env, st, { result: 'NOT_RUN', reason: 'the host rebooted during fixture d (a shutdown, not a sleep); re-arm d' });
   const { host } = env;
   const ev = host.sleepEvidence(), at = st.sleep_evidence_at_arm;
   const slept = Boolean(ev && ev.sleeptime_s > at.sleeptime_s && ev.waketime_s > at.waketime_s && ev.waketime_s * 1000 > st.armed_wall_ms
