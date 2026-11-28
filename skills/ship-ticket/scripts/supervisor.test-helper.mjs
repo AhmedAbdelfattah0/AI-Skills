@@ -9,7 +9,9 @@
  *
  * Fake engine state machine (phase): build -> (drive) review_owed -> (gate review original) PASS: ship_owed | FAIL: repair_owed
  * -> (drive) confirmation_owed -> (gate review confirmation) PASS: ship_owed | FAIL: confirmation_fail; ship_owed ->
- * (gate ship-ready) published -> owner_publish. Other phases: owner_stop (budget_spent), terminal (review_terminal).
+ * (gate ship-ready) published -> owner_publish. The fake `gate review` keeps the real gate's one-record-per-execution and
+ * repair-brief (`repair_prompt_missing`) rules and its unknown-field `bad_input` refusal; behaviour `lock` makes a command
+ * fail as the engine does under a held run lock (exit 1, nothing recorded). Other phases: owner_stop (budget_spent), terminal (review_terminal).
  *
  * CLI (the crash tests): node supervisor.test-helper.mjs tick|sweep <worldDir> [<boundary>:<n> kill|hang]
  *   kill: SIGKILL itself at the n-th hit of that boundary; hang: never resolve there (the journal lock stays held).
@@ -35,17 +37,43 @@ const sub = a[1] === 'gate' ? 'gate ' + a[2] : a[1];
 const key = flag('ticket');
 const world = JSON.parse(fs.readFileSync(path.join(W, 'world.json'), 'utf8'));
 const beh = (world.behaviour[key] || {})[sub];
-fs.appendFileSync(path.join(W, 'effects.jsonl'), JSON.stringify({ kind: sub, ticket: key, pid: process.pid, argv: a }) + '\n');
+fs.appendFileSync(path.join(W, 'effects.jsonl'), JSON.stringify({ kind: sub, ticket: key, pid: process.pid, argv: a,
+  ...(sub === 'gate review' ? (() => { const i = JSON.parse(fs.readFileSync(flag('input'), 'utf8')); return { review_kind: i.kind, rx: i.review_execution }; })() : {}) }) + '\n');
 if (beh === 'hang') { setInterval(() => {}, 1e6); return; }
 if (beh === 'held') process.exit(75);
+if (beh === 'lock') { process.stderr.write('run-engine: lock_held'); process.exit(1); } // the engine refused before doing anything
+if (beh === 'lock_once') { const f = path.join(W, 'lock_once-' + key); if (!fs.existsSync(f)) { fs.writeFileSync(f, '1'); process.stderr.write('run-engine: lock_held'); process.exit(1); } }
+if (beh === 'linger') require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' }).unref();
 const sf = path.join(W, 'state', key + '.json');
 const S = JSON.parse(fs.readFileSync(sf, 'utf8'));
+const save = () => { fs.writeFileSync(sf + '.tmp', JSON.stringify(S)); fs.renameSync(sf + '.tmp', sf); };
+const note = (e) => { S.seq += 1; S.events.push({ seq: S.seq, ...e }); };
+if (sub === 'gate review') {
+  // the real gate's rules that matter here: one record per execution; an accepted FAIL that opens a repair needs its brief
+  const input = JSON.parse(fs.readFileSync(flag('input'), 'utf8'));
+  const refuse = (code) => { note({ type: 'GATE', gate: 'review', ok: false, code }); save(); process.stdout.write(JSON.stringify({ gate: 'review', ok: false, code })); process.exit(2); };
+  const extra = Object.keys(input).filter((k) => !['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'repair_prompt_file'].includes(k));
+  if (extra.length) { process.stderr.write('run-engine: bad_input: unknown input field(s) ' + extra.join(',')); process.exit(1); }
+  if (S.review_chain.some((r) => r.review_execution === input.review_execution && r.kind === input.kind)) refuse('chain_broken');
+  const outcome = input.primary.outcome;
+  const fixes = (input.reconciliation?.dispositions || []).filter((d) => d.disposition === 'fix').map((d) => d.finding_id);
+  if (input.kind === 'original' && outcome === 'FAIL' && fixes.length) {
+    const b = input.repair_prompt_file;
+    if (!(typeof b === 'string' && path.isAbsolute(b) && fs.existsSync(b) && fs.statSync(b).isFile())) refuse('repair_prompt_missing');
+  }
+  S.review_chain.push({ review_execution: input.review_execution, kind: input.kind, outcome, ...(outcome === 'FAIL' ? { fix_findings: fixes } : {}) });
+  S.phase = outcome === 'PASS' ? 'ship_owed' : input.kind === 'original' ? 'repair_owed' : 'confirmation_fail';
+  note({ type: 'GATE', gate: 'review', ok: true, code: 'review_accepted' });
+  save();
+  process.stdout.write(JSON.stringify({ gate: 'review', ok: true, code: 'review_accepted' }));
+  return;
+}
 const next = { build: 'review_owed', repair_owed: 'confirmation_owed', ship_owed: 'published' };
 if (sub === 'drive' && S.phase === 'repair_owed') S.review_chain.push({ review_execution: 'rx-1', kind: 'repair' });
 if (next[S.phase]) S.phase = next[S.phase];
-S.seq += 1;
-fs.writeFileSync(sf + '.tmp', JSON.stringify(S)); fs.renameSync(sf + '.tmp', sf);
-process.stdout.write(JSON.stringify({ schema: 'ship-ticket-engine-status-v1', ticket: key, outcome: 'done', seq: S.seq }));
+note({ type: sub === 'drive' ? 'DISPATCH' : 'GATE', ...(sub === 'drive' ? {} : { gate: a[2], ok: true, code: 'ok' }) });
+save();
+process.stdout.write(JSON.stringify(sub === 'drive' ? { schema: 'ship-ticket-engine-status-v1', ticket: key, outcome: 'done', seq: S.seq } : { gate: a[2], ok: true, code: 'ok' }));
 `;
 
 // Fake agent CLI: argv after the script is the routed provider argv (logged); the prompt on stdin names the leg.
@@ -70,8 +98,9 @@ process.stdin.on('end', () => {
     else if (leg === 'reconcile') {
       const arts = JSON.parse(prompt.slice(prompt.indexOf('{"primary"'), prompt.lastIndexOf('}') + 1));
       const rx = /review_execution (\S+?)[,)]/.exec(prompt)[1];
-      out = beh.tamper ? { kind, review_execution: rx, primary: { ...arts.primary, outcome: 'PASS' }, second_opinion: arts.second_opinion, reconciliation: { dispositions: [] } }
-        : { kind, review_execution: rx, primary: arts.primary, second_opinion: arts.second_opinion, reconciliation: { dispositions: [] } };
+      const dispositions = (arts.primary.findings || []).map((f) => ({ finding_id: f.id, source: 'primary', disposition: 'fix' }));
+      out = beh.tamper ? { kind, review_execution: rx, primary: { ...arts.primary, outcome: 'PASS' }, second_opinion: arts.second_opinion, reconciliation: { dispositions } }
+        : { kind, review_execution: rx, primary: arts.primary, second_opinion: arts.second_opinion, reconciliation: { dispositions }, ...(beh.extra_key ? { notes: 'x' } : {}) };
     } else if (leg === 'rca') out = beh.rca || { hypothesis: 'h', evidence: [], differs: '', path: 'blocked' };
     if (beh['fail_' + leg]) process.exit(3);
     // each provider's real final-message shape (worker-report.mjs finalMessage parses them)
@@ -96,7 +125,7 @@ export function makeWorld(dir, tickets, { merge_strategy } = {}) {
   for (const t of manifest.tickets) mkdirSync(t.worktree, { recursive: true });
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
   writeFileSync(join(dir, 'world.json'), JSON.stringify({ behaviour: Object.fromEntries(tickets.map((t) => [t.key, t.behaviour ?? {}])) }));
-  for (const t of tickets) writeState(dir, t.key, { seq: 1, phase: t.phase ?? 'build', review_chain: t.chain ?? [], durable: true,
+  for (const t of tickets) writeState(dir, t.key, { seq: 1, events: [], phase: t.phase ?? 'build', review_chain: t.chain ?? [], durable: true,
     config: { provider: 'claude', modelMap: { strong: 'claude-strong-x', inherit: 'claude-inherit-x' } } });
   return { dir, manifest };
 }
@@ -127,20 +156,6 @@ function fakeNext(dir, t) {
   }
 }
 
-/** The fake `gate review`: records the input into the fake chain (the engine's own refusal of a duplicate execution kept). */
-function fakeGate(dir, t, gate, inputFile) {
-  const input = JSON.parse(readFileSync(inputFile, 'utf8'));
-  appendFileSync(join(dir, 'effects.jsonl'), JSON.stringify({ kind: `gate ${gate}`, ticket: t.key, review_kind: input.kind, rx: input.review_execution }) + '\n');
-  const S = readState(dir, t.key);
-  if (S.review_chain.some((r) => r.review_execution === input.review_execution && r.kind === input.kind)) return { status: 2, json: { ok: false, code: 'chain_broken' } };
-  const outcome = input.primary.outcome;
-  S.review_chain.push({ review_execution: input.review_execution, kind: input.kind, outcome, ...(outcome === 'FAIL' ? { fix_findings: [{ id: 'f1' }] } : {}) });
-  S.phase = outcome === 'PASS' ? 'ship_owed' : input.kind === 'original' ? 'repair_owed' : 'confirmation_fail';
-  S.seq += 1;
-  writeState(dir, t.key, S);
-  return { status: 0, json: { ok: true, code: 'review_accepted' } };
-}
-
 /** Deps of a supervisor over world `dir`; `over` replaces any of them. */
 export function worldDeps(dir, over = {}) {
   const manifestPath = join(dir, 'manifest.json');
@@ -161,7 +176,6 @@ export function worldDeps(dir, over = {}) {
     isAlive: (pgid) => groupAlive(pgid),
     armClock: worldClock(dir),
     sweepClock: worldClock(dir),
-    runGate: (t, gate, inputFile) => fakeGate(dir, t, gate, inputFile),
     reconcile: (t) => { appendFileSync(join(dir, 'effects.jsonl'), JSON.stringify({ kind: 'reconcile', ticket: t.key }) + '\n'); return { status: 0 }; },
     secondOpinionRoute: () => ({ provider: 'codex', modelMap: { strong: 'codex-strong-x' } }),
     env: { ...process.env, SUP_WORLD: dir },

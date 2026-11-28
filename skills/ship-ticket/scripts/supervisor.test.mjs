@@ -16,7 +16,8 @@ import { withJournal, journalPaths, opId, assertNoAuthority, readJournal, MAX_PR
 import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { makeWorld, worldDeps, opts, effects, journal, readState, writeState, setClock, WAVE_ID } from './supervisor.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
-import { fixture } from './engine-test-fixture.mjs';
+import { fixture, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
+import { acquireLock } from './lib/durable-io.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HELPER = join(HERE, 'supervisor.test-helper.mjs');
@@ -161,12 +162,22 @@ test('routing: every review leg and the RCA run on modelMap[tier] of their route
   const J = await settleAll(dir2);
   assert.equal(count(dir2, (e) => e.kind === 'agent'), 0, 'every route is resolved before any leg is launched');
   assert.equal(J.blocked.T1.code, 'review_route_refused');
+  // the default second-opinion route is the approved modelMap's `review_second` tier key; unresolved -> a clear refusal
+  const dir3 = world(t, [{ key: 'T1', phase: 'review_owed' }]);
+  const J3 = await settleAll(dir3, { secondOpinionRoute: undefined });
+  assert.equal(J3.blocked.T1.code, 'second_opinion_route_unresolved');
+  assert.match(J3.blocked.T1.reason, /modelMap\.review_second/);
+  const dir4 = world(t, [{ key: 'T1', phase: 'review_owed' }]);
+  const S4 = readState(dir4, 'T1'); S4.config.modelMap.review_second = 'claude-second-x'; writeState(dir4, 'T1', S4);
+  assert.ok((await settleAll(dir4, { secondOpinionRoute: undefined })).ship_ready.T1);
+  const second = effects(dir4).find((e) => e.kind === 'agent' && e.leg === 'second');
+  assert.deepEqual(second.args.slice(-2), ['--model', 'claude-second-x'], 'second opinion = modelMap.review_second');
   assert.match(J.blocked.T1.reason, /strong tier requires modelMap.strong/);
 });
 
 // ------------------------------------------------------------------------------------------------- crash recovery
 
-const BOUNDARIES = ['after-tick-start', 'after-intent', 'after-receipt', 'after-pid', 'after-release', 'after-acted', 'after-gate'];
+const BOUNDARIES = ['after-tick-start', 'after-intent', 'after-receipt', 'after-pid', 'after-release', 'after-acted'];
 /** A wave whose run reaches every op kind: T1 drive -> review (FAIL) -> repair drive -> confirmation (FAIL) -> RCA -> succeed; T2 the PASS path to gate ship-ready. */
 const FULL = () => [{ key: 'T1', behaviour: { outcomes: { original: 'FAIL', confirmation: 'FAIL' }, rca: { hypothesis: 'h', evidence: ['e'], differs: 'd', path: 'succession' } } }, { key: 'T2' }];
 const tally = (dir) => { const m = {}; for (const e of effects(dir)) { const k = `${e.ticket}:${kindOf(e)}`; m[k] = (m[k] ?? 0) + 1; } return m; };
@@ -220,13 +231,17 @@ test('a review in flight at session loss is collected exactly once from its rece
   assert.ok(legs.every((o) => alive(o.pgid)), 'the legs outlive the tick that launched them');
   const mid = await tick(opts(dir), worldDeps(dir));
   assert.equal(mid.out.tickets.T1?.skipped, 'op_live', 'no new effect while the review is live');
-  // later sessions: the one that reaches the collect is killed right after `gate review` ran, before its record
+  // later sessions: the one that releases the collect (`gate review`, a detached launch) dies before recording it.
+  // only these hooked sessions count release hits: the reconcile leg's release is hit 1, the collect's hit 2.
   let killed = false;
-  for (let i = 0; i < 10 && !killed; i++) { await waitLive(dir); killed = child(dir, 'tick', 'after-gate:1 kill').signal === 'SIGKILL'; }
-  assert.ok(killed, 'a session died between gate review and its record');
-  assert.equal(journal(dir).ops['rtest:T1:review:rx-1'].state, 'intent');
+  for (let i = 0; i < 10 && !killed; i++) { await waitLive(dir); killed = child(dir, 'tick', 'after-release:2 kill').signal === 'SIGKILL'; }
+  assert.ok(killed, 'a session died between releasing gate review and its record');
+  const c = journal(dir).ops['rtest:T1:review:rx-1'];
+  assert.equal(c.state, 'intent', 'released, pid persisted, never recorded');
+  assert.ok(c.pid && c.pgid && c.leader_start && c.deadline && c.collect);
   const J = await settleAll(dir);
   assert.equal(count(dir, (e) => e.kind === 'gate review'), 1, 'gate review ran once');
+  assert.equal(J.ops['rtest:T1:review:rx-1'].result.outcome, 'collected', 'settled from the engine chain, never re-run');
   assert.equal(count(dir, (e) => e.kind === 'agent' && e.leg === 'primary'), 1);
   assert.equal(J.ops[`rtest:T1:review:rx-1`].state, 'recorded');
   assert.ok(J.ship_ready.T1);
@@ -315,13 +330,12 @@ test('a hung drive is killed at its persisted bound by the sweep; the next tick 
   assert.equal(s.out.ops[op.op_id], 'killed');
   assert.equal(s.out.settlement, 'recorded');
   assert.equal(alive(op.pgid), false);
-  await tick(opts(dir), worldDeps(dir));
+  const t2 = await tick(opts(dir), worldDeps(dir));
   const J = journal(dir);
-  assert.equal(J.ops[op.op_id].result.outcome, 'timed_out');
-  await ticks(dir, 2);
-  assert.equal(count(dir, (e) => e.kind === 'drive'), 1, 'no blind re-run: the same engine state is no progress');
-  const last = await tick(opts(dir), worldDeps(dir));
-  assert.equal(last.out.tickets.T1.parked, 'no_progress', 'parked until the engine state moves');
+  // the killed drive recorded nothing in the engine: nothing ran, so it is re-tried under a derived generation (bounded)
+  assert.equal(J.ops[op.op_id].result.outcome, 'nothing_ran');
+  assert.ok(J.ops[op.op_id].result.timed_out, 'the bound that killed it is kept');
+  assert.equal(t2.out.tickets.T1.launched.op_id, `${op.op_id}.r1`);
 });
 
 test('the sweep runs and enforces while a tick hangs holding the journal lock; it kills the tick at its bound; ticks never overlap', { skip: SKIP }, async (t) => {
@@ -358,7 +372,7 @@ test('admission held: nothing ran, re-tried under a derived generation (not a du
   await settleAll(dir, {}, 4).catch(() => {});
   const ops = Object.values(journal(dir).ops).filter((o) => o.op === 'drive');
   assert.ok(ops.length >= 2 && ops.every((o) => o.result?.outcome === 'held' || o.state !== 'recorded'), JSON.stringify(ops.map((o) => [o.gen, o.result])));
-  assert.deepEqual(ops.map((o) => o.gen).slice(0, 2), ['s1', 's1.h1']);
+  assert.deepEqual(ops.map((o) => o.gen).slice(0, 2), ['s1', 's1.r1']);
 });
 
 // ------------------------------------------------------------------------------------------------- launchd templates
@@ -422,4 +436,141 @@ test('real engine smoke: real next/readRun, state, readTicket, run dir and repo 
   for (const leg of Object.values(J().ops).filter((x) => x.op.startsWith('review.'))) await waitFor(() => existsSync(leg.files.envelope), leg.op_id);
   await tick(o, deps);
   assert.equal(J().blocked['T-1'].code, 'review_leg_unreadable', 'the stand-in reviewers wrote nothing: Blocked, never a gate call');
+});
+
+// ------------------------------------------------------------------------------------------------- PR-5 review round 1 repairs
+
+test('nothing ran is never final: a lock_held drive is re-tried (derived generation) and completes; a persistent one Blocks naming the op', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1', behaviour: { drive: 'lock_once' } }, { key: 'T2', behaviour: { drive: 'lock' } }, { key: 'T3' }]);
+  const J = await settleAll(dir);
+  assert.ok(J.ship_ready.T1, 'the collision is retried, not parked no_progress');
+  assert.equal(J.ops['rtest:T1:drive:s1'].result.outcome, 'nothing_ran');
+  assert.equal(J.ops['rtest:T1:drive:s1.r1'].result.outcome, 'ran');
+  assert.equal(J.blocked.T2.code, 'retries_exhausted');
+  assert.match(J.blocked.T2.op_id, /drive:s1\.r3$/);
+  assert.ok(J.ship_ready.T3);
+});
+
+test('the reconciled input is restricted to the review gate fields; an actionable FAIL carries the supervisor-owned repair brief', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1', phase: 'review_owed', behaviour: { extra_key: true, outcomes: { original: 'FAIL' } } }]);
+  const J = await settleAll(dir);
+  const S = readState(dir, 'T1');
+  assert.deepEqual(S.review_chain.map((r) => [r.kind, r.outcome]).slice(0, 1), [['original', 'FAIL']], 'no bad_input, no repair_prompt_missing');
+  const input = JSON.parse(readFileSync(J.ops['rtest:T1:review:rx-1'].files.input, 'utf8'));
+  assert.equal(input.notes, undefined, 'an unknown key never reaches the gate');
+  assert.match(readFileSync(input.repair_prompt_file, 'utf8'), /^NODE=repair-rx-1\n[\s\S]*primary f1/);
+});
+
+test('a ticket whose plan binding fails later is parked alone; a wave never STARTS partially bound', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1' }, { key: 'T2' }]);
+  const base = worldDeps(dir);
+  const partial = { verifyWave: () => ({ ok: false, code: 'wave_unapproved', digest: base.verifyWave().digest, unlisted: [], tickets: { T1: { ok: false, reason: 'plan_unreadable' }, T2: { ok: true } } }) };
+  const first = await tick(opts(dir), worldDeps(dir, partial));
+  assert.equal(first.out.code, 'wave_unapproved', 'the first tick needs the whole wave bound');
+  await tick(opts(dir), worldDeps(dir)); // a fully bound first tick
+  const J = await settleAll(dir, partial);
+  assert.ok(J.ship_ready.T2, 'the bound ticket continued');
+  assert.equal(J.ship_ready.T1, undefined);
+  assert.equal(count(dir, (e) => e.ticket === 'T1' && e.kind !== 'drive'), 0, 'the unbound ticket took no new step');
+});
+
+test('an envelope alone is not terminal: a launch whose group still has a live member stays unsettled, then Blocks (bounded)', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1', behaviour: { drive: 'linger' } }, { key: 'T2' }]);
+  const J = await settleAll(dir);
+  const d = J.ops['rtest:T1:drive:s1'];
+  assert.ok(existsSync(d.files.envelope));
+  assert.notEqual(d.state, 'recorded');
+  assert.equal(J.blocked.T1.code, 'group_not_quiescent');
+  assert.ok(J.ship_ready.T2);
+});
+
+test('install --write says the written plists activate at the next login', { skip: SKIP }, (t) => {
+  const dir = world(t, [{ key: 'T1' }]);
+  const home = join(dir, 'h');
+  const o = { manifestPath: join(dir, 'manifest.json'), stateDir: join(dir, 'journal'), home };
+  assert.match(installPlan(o, worldDeps(dir)).out.note, /activates the jobs at the next login/);
+  assert.match(installPlan({ ...o, write: true }, worldDeps(dir)).out.note, /NEXT LOGIN/);
+});
+
+// real engine: the run lock and the real review gate (the fake engine models neither)
+function realWave(t, config = {}, behaviour = undefined) {
+  const fx = fixture(t, { commit: true, config: { modelMap: { strong: 'claude-strong-x', review_second: 'claude-second-x' }, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, ...config },
+    ...(behaviour ? { behaviour } : {}) });
+  const init = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const manifest = { schema: 'ship-ticket-wave-v1', wave_id: 'W-R', endpoint: 'SHIP_READY', heavy_slots: 1,
+    tickets: [{ key: 'T-1', plan: '.specs/plans/T-1.md', run_id: 'run-1', worktree: fx.repo, branch: 'main', deps: [], dep_mode: 'ship_ready', resources: [] }] };
+  const D = 'sha256:' + '1'.repeat(64);
+  const arts = join(fx.root, 'arts');
+  spawnSync('mkdir', ['-p', arts]);
+  const agent = join(fx.root, 'agent.cjs');
+  writeFileSync(agent, `const fs = require('node:fs'); let p = ''; process.stdin.on('data', (c) => { p += c; }); process.stdin.on('end', () => {
+    const leg = /leg (\\w+)/.exec(p)?.[1] || 'rca', kind = /# ship-ticket (\\w+) review/.exec(p)?.[1] || 'rca';
+    const f = ${JSON.stringify(arts)} + '/' + leg + '-' + kind + '.json';
+    const out = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : JSON.stringify({ hypothesis: 'h', evidence: [], differs: '', path: 'blocked' });
+    process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: out })); });`);
+  const deps = { verifyWave: () => ({ ok: true, digest: D }), readManifest: () => ({ ok: true, manifest, digest: D, problems: [] }),
+    admitted: (argv) => ({ file: argv[0], args: argv.slice(1), shell: false }), env: fx.env, verifySubscription: () => true,
+    agentSpec: () => ({ file: process.execPath, args: [agent], shell: false }) };
+  const o = { manifestPath: join(fx.root, 'W-R.wave.json'), stateDir: join(fx.root, 'journal') };
+  const J = () => JSON.parse(readFileSync(join(o.stateDir, 'W-R', 'journal.json'), 'utf8'));
+  const S = () => JSON.parse(readFileSync(fx.stateFile(), 'utf8'));
+  const art = (name, v) => writeFileSync(join(arts, `${name}.json`), JSON.stringify(v));
+  /** Tick, then wait until no launched op is running; `until(J)` ends it. */
+  const run = async (until, max = 30) => {
+    let lastOut = null;
+    for (let i = 0; i < max; i++) {
+      const r = await tick(o, deps);
+      lastOut = r.out.tickets;
+      for (const x of Object.values(J().ops)) if (x.kind === 'launch' && x.state !== 'recorded' && x.pgid) await waitFor(() => existsSync(x.files.envelope) || !alive(x.pgid), x.op_id);
+      if (until(J(), r)) return r;
+    }
+    throw new Error(`not reached: ${JSON.stringify({ gates: S().events.filter((e) => e.type === 'GATE'), chain: S().review_chain, blocked: J().blocked, last: lastOut, ops: Object.values(J().ops).map((x) => [x.op_id, x.state, x.result, x.last_probe]) })}`);
+  };
+  return { fx, deps, o, J, S, art, run };
+}
+const lockOf = (fx) => acquireLock({ lockFile: fx.lockFile(), runId: 'run-1', repoRoot: fx.repo, ticket: 'T-1' });
+
+test('real run lock held (as the sweep reconcile holds it): the drive records nothing_ran, is re-tried after release, and the loop reaches the review', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const w = realWave(t);
+  const held = await lockOf(w.fx);
+  await w.run((J) => Object.values(J.ops).some((x) => x.op === 'drive' && x.state === 'recorded'));
+  const first = Object.values(w.J().ops).find((x) => x.op === 'drive');
+  assert.equal(first.result.outcome, 'nothing_ran', JSON.stringify(first.result));
+  await held.release();
+  const r = await w.run((J) => Object.values(J.ops).some((x) => x.op === 'review.primary'));
+  assert.ok(Object.values(w.J().ops).some((x) => x.op === 'drive' && x.result?.outcome === 'ran'), 'the retried drive ran');
+  assert.equal(w.J().blocked['T-1'], undefined);
+  void r;
+});
+
+test('real gate: FAIL -> supervisor repair brief -> repair_owed -> repair -> confirmation FAIL -> RCA; a collect under a held run lock is re-collected once', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const w = realWave(t, {}, { a: { write: { 'src/a.txt': 'a1' } }, 'repair-rx-1': { write: { 'src/a.txt': 'fixed' } } });
+  await w.run((J) => Object.values(J.ops).some((x) => x.op === 'drive')); // returns once the drive has finished, before its settle
+  const c1 = w.fx.candidate();
+  const p1 = primaryReview(c1, { outcome: 'FAIL', findings: [{ id: 'F1', severity: 'major', path: 'src/a.txt' }], acceptance_criteria: [{ criterion: 'AC1', outcome: 'FAIL', evidence: 'src/a.txt' }] });
+  const s1 = secondOpinion(c1);
+  w.art('primary-original', p1);
+  w.art('second-original', s1);
+  w.art('reconcile-original', { kind: 'original', review_execution: 'rx-1', primary: p1, second_opinion: s1, reconciliation: { dispositions: [{ finding_id: 'F1', source: 'primary', disposition: 'fix' }] } });
+  await w.run((J) => Object.values(J.ops).some((x) => x.op === 'review.reconcile'));
+  const held = await lockOf(w.fx); // the collect launches while the run lock is held
+  await w.run((J) => Object.values(J.ops).some((x) => x.op === 'review' && x.state === 'recorded'));
+  const firstCollect = Object.values(w.J().ops).find((x) => x.op === 'review');
+  assert.equal(firstCollect.result.outcome, 'nothing_ran', `a lock_held gate review is not a refusal: ${JSON.stringify(firstCollect.result)}`);
+  assert.equal(w.S().review_chain.length, 0);
+  await held.release();
+  await w.run((J) => Object.values(J.ops).some((x) => x.op === 'review' && x.result?.outcome === 'collected'));
+  assert.deepEqual(w.S().review_chain.filter((r) => r.kind === 'original').map((r) => [r.review_execution, r.outcome]), [['rx-1', 'FAIL']], 'collected exactly once, accepted by the REAL gate (repair brief present)');
+  assert.equal(w.S().events.filter((e) => e.type === 'GATE' && e.gate === 'review' && e.ok === false).length, 0, 'never refused (no repair_prompt_missing)');
+  // the collect run returned after the next tick's repair drive finished (each tick waits for what it launched)
+  if (!w.S().review_chain.some((r) => r.kind === 'repair')) await w.run(() => w.S().review_chain.some((r) => r.kind === 'repair'));
+  assert.ok(Object.values(w.J().ops).every((x) => !x.op.startsWith('confirmation')), 'no confirmation leg yet');
+  assert.equal(readFileSync(join(w.fx.repo, 'src', 'a.txt'), 'utf8'), 'fixed', 'the repair writer ran from the supervisor brief');
+  const c2 = w.fx.candidate();
+  w.art('primary-confirmation', { reviewer_identity: 'opus:review', candidate_id: c2, checked_findings: ['F1'], outcome: 'FAIL', evidence: 'F1 still reproduces' });
+  w.art('second-confirmation', { route: 'codex', reviewer_identity: 'codex:gpt', candidate_id: c2, checked_findings: ['F1'], outcome: 'FAIL', evidence: 'x' });
+  await w.run((J) => Object.values(J.ops).some((x) => x.op === 'rca'));
+  assert.deepEqual(w.S().review_chain.map((r) => [r.kind, r.outcome ?? null]), [['original', 'FAIL'], ['repair', null], ['confirmation', 'FAIL']]);
+  assert.equal(Object.values(w.J().ops).filter((x) => x.op === 'review.primary' || x.op === 'confirmation.primary').length, 2, 'no third review');
 });

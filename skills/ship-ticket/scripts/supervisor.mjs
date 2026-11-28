@@ -55,6 +55,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { isEntrypoint } from './harness.mjs';
 import { parseManifest, verifyWave, readTicket, evaluateReadiness, admissionOrder, mergeStrategyOf } from './wave.mjs';
 import { readRun, nextStep } from './engine-accepted.mjs';
@@ -66,6 +67,7 @@ import { armRecord, observe, resolveSweepClock } from './lib/deadline.mjs';
 import { enginePaths } from './lib/run-placement.mjs';
 import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { journalPaths, withJournal, readJournal, opId, repoId, coded, MAX_PROBES } from './supervisor-journal.mjs';
+import { GATE_FIELDS } from './engine-dag.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SUPERVISOR_SCHEMA = 'ship-ticket-supervisor-v1';
@@ -78,10 +80,20 @@ export const DRIVE_BOUND_MS = 4 * 60 * 60 * 1000;
 export const GATE_BOUND_MS = 2 * 60 * 60 * 1000;
 export const AGENT_BOUND_MS = 45 * 60 * 1000;
 export const RECONCILE_BOUND_MS = 120 * 1000;
-/** `gate review` runs inside the tick under the journal lock, so it is bounded well below TICK_BOUND_MS. */
-export const COLLECT_BOUND_MS = 10 * 60 * 1000;
 /** PR-2 seam: the exit status by which `host-admit run` reports "held, the command did not run" (assumed; re-point with PR-2). */
 export const ADMISSION_HELD_EXIT = 75;
+/**
+ * Outcomes that mean NOTHING RAN (the command never took effect in the engine): re-tried under a derived generation
+ * `<gen>.r<k>`, at most this many times each, then the ticket alone is Blocked naming the op. `held`: admission held it;
+ * `nothing_ran`: the engine recorded nothing (its run lock was held, a usage/bad_input refusal, a wrapper failure, a kill).
+ */
+export const RETRY_LIMITS = Object.freeze({ held: 30, nothing_ran: 4 });
+const RETRYABLE = new Set(Object.keys(RETRY_LIMITS));
+/** How long a settle waits for a launcher's group to vanish after its envelope before counting a probe. */
+const QUIESCE_WAIT_MS = 3000;
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const LOCK_CODES = new Set(['lock_held', 'lock_timeout']);
+const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 /** Two unsuccessful review rounds on a candidate line end the review/repair loop (§7.1 rule 2). */
 export const MAX_FAILED_ROUNDS = 2;
 /** The ONLY engine commands the supervisor launches. None of them writes RUN-STATE. */
@@ -129,14 +141,19 @@ const defaultDeps = () => ({
   isAlive: (pgid) => groupAlive(pgid),
   armClock: undefined, // the real clock (arming only); tests pass a testClock()
   sweepClock: undefined, // resolveSweepClock: no clock while MEASUREMENT_QUALIFIED is false
-  runGate: (t, gate, inputFile) => runEngine(engineArgv(`gate ${gate}`, t, ['--input', inputFile]), COLLECT_BOUND_MS),
   reconcile: (t) => runEngine(engineArgv('reconcile', t, ['--deadlines', 'true']), RECONCILE_BOUND_MS),
   succeed: succeedUnavailable,
-  secondOpinionRoute: () => null, // OPEN: no approved configuration names the second-opinion route yet
+  // The second opinion routes through the approved DAG's modelMap like every task: its tier key `review_second`.
+  secondOpinionRoute: (t, S) => (typeof S?.config?.modelMap?.review_second === 'string'
+    ? { provider: S.config.provider, modelMap: { strong: S.config.modelMap.review_second }, billing: S.config.billing } : null),
   hooks: undefined,
   env: process.env,
 });
 
+/** Injected deps over the defaults; an injected `undefined` keeps the default. */
+const withDefaults = (d) => { const out = defaultDeps(); for (const [k, v] of Object.entries(d ?? {})) if (v !== undefined) out[k] = v; return out; };
+
+/** The sweep's bounded `reconcile --deadlines` only (never under the journal lock; every other engine command is a launch op). */
 function runEngine(argv, timeout) {
   const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 });
   let json = null;
@@ -146,13 +163,20 @@ function runEngine(argv, timeout) {
 
 // ---------------------------------------------------------------------------------------------------- wave + readiness
 
+/**
+ * Verify and read the wave. A wave whose manifest is intact but some TICKETS fail their binding (an unreadable or moved plan,
+ * e.g. a finished ticket's worktree removed) is `partial`: those tickets are listed in `unbound` and parked, the others
+ * continue. The caller accepts a partial wave only after a fully verified first tick bound the same digest.
+ */
 function loadWave(manifestPath, deps) {
   const v = deps.verifyWave(manifestPath);
-  if (!v.ok) return { ok: false, code: v.code ?? 'wave_unverified', problems: v.problems ?? [] };
+  const partial = !v.ok && v.code === 'wave_unapproved' && typeof v.digest === 'string' && !(v.unlisted ?? []).length && isObj(v.tickets);
+  if (!v.ok && !partial) return { ok: false, code: v.code ?? 'wave_unverified', problems: v.problems ?? [] };
   const p = deps.readManifest(manifestPath);
   if (!p.ok) return { ok: false, code: p.problems[0]?.code ?? 'wave_manifest_unreadable', problems: p.problems };
   if (p.digest !== v.digest) return { ok: false, code: 'wave_manifest_moved', problems: [] };
-  return { ok: true, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest) };
+  const unbound = partial ? Object.fromEntries(Object.entries(v.tickets).filter(([, x]) => !x?.ok).map(([k, x]) => [k, x?.reason ?? 'unbound'])) : {};
+  return { ok: true, partial, unbound, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest) };
 }
 
 const live = (o) => o.state !== 'recorded';
@@ -160,7 +184,7 @@ const opsOf = (J, key) => Object.values(J.doc.ops).filter((o) => o.ticket === ke
 const seqOf = (S) => (Number.isSafeInteger(S?.seq) ? S.seq : S?.events?.at(-1)?.seq ?? 0);
 /** Failed review rounds of the engine's review chain (original or confirmation FAIL records; counted, never reset). */
 export const failedRounds = (S) => (S?.review_chain ?? []).filter((r) => ['original', 'confirmation'].includes(r.kind) && r.outcome === 'FAIL').length;
-const REVIEW_OPS = /^(review|confirmation)(\.|$)/;
+const inChain = (S, c) => (S?.review_chain ?? []).some((r) => r.review_execution === c.rx && r.kind === c.kind);
 
 // ---------------------------------------------------------------------------------------------------- launch ops
 
@@ -170,14 +194,23 @@ function readText(file) { try { const b = readFileSync(file); return b.length > 
 /** The op's files in its ticket's run directory (deterministic from the op id). */
 function opFiles(dir, id) {
   const base = join(dir, id.replace(/:/g, '__'));
-  return { prompt: `${base}.prompt`, out: `${base}.out`, envelope: `${base}.envelope.json`, receipt: `${base}.receipt`, input: `${base}.input.json` };
+  return { prompt: `${base}.prompt`, out: `${base}.out`, envelope: `${base}.envelope.json`, receipt: `${base}.receipt`, input: `${base}.input.json`, brief: `${base}.repair-brief.md` };
 }
 
-/** The generation for a held-admission re-try: the base gen, or `<base>.h<k>` after k recorded `held` outcomes (persisted, deterministic). */
+/**
+ * The generation to use for op `op` at `base`: the base, or `<base>.r<k>` after k recorded nothing-ran outcomes (persisted,
+ * deterministic). `spent` names the exhausted cause (RETRY_LIMITS) and `last` the last retried op.
+ */
 function launchGen(J, repo, key, op, base) {
+  const counts = { held: 0, nothing_ran: 0 };
+  let last = null;
   for (let k = 0; ; k++) {
-    const gen = k ? `${base}.h${k}` : base;
-    if (J.op(opId(repo, key, op, gen))?.result?.outcome !== 'held') return gen;
+    const gen = k ? `${base}.r${k}` : base;
+    const o = J.op(opId(repo, key, op, gen));
+    const out = o?.result?.outcome;
+    if (!RETRYABLE.has(out)) return { gen, last, spent: Object.keys(counts).find((c) => counts[c] >= RETRY_LIMITS[c]) ?? null };
+    counts[out] += 1;
+    last = o;
   }
 }
 
@@ -221,7 +254,7 @@ function agentLaunch(ctx, o) {
 }
 
 /** Intent (or the existing record) for a launch op, then act on it when it is at intent with no pid. */
-async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, input }) {
+async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, input, collect }) {
   const id = opId(ctx.repo(t), t.key, op, gen);
   let o = J.op(id);
   if (o && o.state !== 'intent') return { op_id: id, state: o.state, existing: true };
@@ -231,6 +264,7 @@ async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, 
     if (prompt !== undefined) writeFileSync(files.prompt, prompt, { mode: 0o600 });
     if (input !== undefined) writeFileSync(files.input, JSON.stringify(input), { mode: 0o600 });
     o = await J.intent({ op_id: id, ticket: t.key, kind: 'launch', op, gen, cwd: t.worktree, bound_ms: bound, files,
+      seq_at: seqOf(ctx.deps.readState(t)), ...(collect ? { collect } : {}),
       ...(route ? { spec_kind: 'agent', route, node_id: nodeId } : { spec_kind: 'engine', argv: input !== undefined ? [...argv, '--input', files.input] : argv }) });
   }
   if (o.pid) return { op_id: id, state: o.state };
@@ -238,17 +272,38 @@ async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, 
   return { op_id: id, state: o.state };
 }
 
-/** Outcome of a finished launch op from its envelope. */
-function launchOutcome(o, env) {
-  if (o.spec_kind === 'engine' && env.exit_code === ADMISSION_HELD_EXIT) return { outcome: 'held' };
-  if (o.spec_kind === 'engine') return { outcome: env.exit_code === 0 || env.exit_code === 2 ? 'ran' : 'failed', exit_code: env.exit_code, out: o.files.out };
-  return { outcome: env.exit_code === 0 ? 'ran' : 'failed', exit_code: env.exit_code, out: o.files.out };
+/**
+ * THE classifier of a finished launch (the one place). An agent task: ran or failed by its exit. An engine command: decided
+ * from the ENGINE'S OWN RECORD, never from the exit code alone:
+ *   collect (gate review)  `collected` when the review chain holds this execution; `refused` only when the engine logged a
+ *                          review GATE refusal after the launch; otherwise `nothing_ran`.
+ *   drive / gate red|reassess|ship-ready  `held` on the admission exit; `ran` when the engine printed its own output (a drive
+ *                          status, or a gate decision that is not a lock refusal) or its event seq moved; otherwise
+ *                          `nothing_ran` (its run lock was held, a usage/bad_input refusal, a wrapper failure, a kill).
+ */
+function classify(ctx, o, env) {
+  if (o.spec_kind === 'agent') return { outcome: env.exit_code === 0 ? 'ran' : 'failed', exit_code: env.exit_code, out: o.files.out };
+  const t = ctx.ticket(o.ticket);
+  const S = t ? ctx.deps.readState(t) : null;
+  const out = readJsonFile(o.files.out);
+  const cause = isObj(out) && typeof out.code === 'string' ? out.code : `exit ${env.exit_code ?? env.signal ?? 'unknown'}`;
+  if (o.collect) {
+    if (inChain(S, o.collect)) return { outcome: 'collected' };
+    const refusal = (S?.events ?? []).find((e) => e.type === 'GATE' && e.gate === 'review' && e.ok === false && e.seq > (o.seq_at ?? 0)
+      && (e.review_execution === undefined || e.review_execution === o.collect.rx));
+    if (refusal) return { outcome: 'refused', code: refusal.code ?? null, seq: refusal.seq };
+    return { outcome: 'nothing_ran', cause };
+  }
+  if (env.exit_code === ADMISSION_HELD_EXIT) return { outcome: 'held' };
+  const own = isObj(out) && (o.op === 'drive' ? out.schema === STATUS_SCHEMA && typeof out.outcome === 'string'
+    : typeof out.gate === 'string' && typeof out.ok === 'boolean' && !LOCK_CODES.has(out.code));
+  if (own || seqOf(S) !== (o.seq_at ?? seqOf(S))) return { outcome: 'ran', exit_code: env.exit_code, out: o.files.out };
+  return { outcome: 'nothing_ran', cause };
 }
 
 /** Settle one unsettled op (every tick, before any new effect). */
 async function settle(J, ctx, o) {
   const { deps } = ctx;
-  if (o.kind === 'collect') return settleCollect(J, ctx, o);
   if (o.kind === 'call') { // an interrupted succession call: it may have taken effect, so it is never repeated
     if (o.state === 'intent') o = await J.move(o.op_id, 'ambiguous', { why: 'interrupted between the call and its record' });
     if ((o.probes ?? 0) >= MAX_PROBES) return o;
@@ -258,20 +313,36 @@ async function settle(J, ctx, o) {
   if (o.state === 'intent' && !o.pid) {
     const t = ctx.ticket(o.ticket);
     // never released: re-act under the same id, unless the engine state moved past the generation it was decided at
-    if (t && (o.op === 'drive' || o.op.startsWith('gate.')) && genSeq(o.gen) !== seqOf(deps.readState(t)))
+    if (t && !o.collect && (o.op === 'drive' || o.op.startsWith('gate.')) && genSeq(o.gen) !== seqOf(deps.readState(t)))
       return J.move(o.op_id, 'recorded', { result: { outcome: 'superseded', reason: 'never released; the engine state moved since' } });
     return t ? act(J, ctx, o) : o;
   }
   if (o.state === 'intent') o = await J.move(o.op_id, 'ambiguous', { why: 'crashed between the pid record and the release record' });
   const env = readJsonFile(o.files.envelope);
-  if (env) return J.move(o.op_id, 'recorded', { result: launchOutcome(o, env) });
+  const spent = (o.probes ?? 0) >= MAX_PROBES; // budget spent, ticket Blocked: only proven quiescence can still settle it
+  const bounded = async (code, note) => {
+    if (spent) return o;
+    if (await J.probe(o.op_id, note)) await J.block(o.ticket, code, `op ${o.op_id}: ${note} after ${MAX_PROBES} probes`, { op_id: o.op_id });
+    return J.op(o.op_id);
+  };
+  if (env) {
+    // terminal only with whole-group quiescence proven: a descendant still in the group keeps it unsettled (bounded)
+    // the launcher exits right after its envelope: give the group a short bounded moment before counting a probe
+    for (const until = performance.now() + QUIESCE_WAIT_MS; o.pgid && deps.isAlive(o.pgid) !== false && performance.now() < until;) await delay(50);
+    if (o.pgid && deps.isAlive(o.pgid) !== false) return bounded('group_not_quiescent', 'envelope written but its process group is still alive');
+    return J.move(o.op_id, 'recorded', { result: classify(ctx, o, env) });
+  }
   const id = groupIdentity({ pgid: o.pgid, leader_start: o.leader_start }, deps.isAlive);
   if (id === 'verified') return o; // still running; the sweep enforces its bound
-  if (o.state === 'acted' && id === 'gone') return J.move(o.op_id, 'recorded', { result: { outcome: o.timed_out ? 'timed_out' : 'lost', ...(o.timed_out ? { charged_ms: o.timed_out.charged_ms } : {}) } });
-  if (o.state === 'acted') return o; // identity unknown: decide nothing
-  if ((o.probes ?? 0) >= MAX_PROBES) return o; // budget spent, ticket Blocked: only an envelope can still settle it
-  if (await J.probe(o.op_id, `no envelope; group ${id}`)) await J.block(o.ticket, 'ambiguous_unresolved', `op ${o.op_id} stayed ambiguous after ${MAX_PROBES} probes`, { op_id: o.op_id });
-  return J.op(o.op_id);
+  if (o.state === 'acted' && id === 'gone') {
+    // the launcher died without its envelope: the engine's own record decides whether anything took effect
+    const result = classify(ctx, o, { exit_code: null, signal: 'no_envelope' });
+    if (result.outcome === 'nothing_ran' && !o.collect && o.spec_kind === 'engine') return J.move(o.op_id, 'recorded', { result: { ...result, ...(o.timed_out ? { timed_out: o.timed_out } : {}) } });
+    if (o.collect) return J.move(o.op_id, 'recorded', { result });
+    return J.move(o.op_id, 'recorded', { result: { outcome: o.timed_out ? 'timed_out' : 'lost', ...(o.timed_out ? { charged_ms: o.timed_out.charged_ms } : {}) } });
+  }
+  if (o.state === 'acted') return bounded('identity_unknown', `group identity ${id}: neither verified running nor proven gone`);
+  return bounded('ambiguous_unresolved', `no envelope; group ${id}`);
 }
 
 // ---------------------------------------------------------------------------------------------------- reviews
@@ -302,7 +373,7 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
   const repo = ctx.repo(t), prefix = kind === 'original' ? 'review' : 'confirmation';
   const primaryRoute = { provider: S?.config?.provider, modelMap: S?.config?.modelMap ?? {}, billing: S?.config?.billing };
   const secondRoute = ctx.deps.secondOpinionRoute(t, S);
-  if (!secondRoute) return { blocked: await J.block(t.key, 'second_opinion_route_unconfigured', 'no approved configuration names the second-opinion provider/modelMap (OPEN, PR-5 report)') };
+  if (!secondRoute) return { blocked: await J.block(t.key, 'second_opinion_route_unresolved', 'the approved DAG config has no modelMap.review_second: the second-opinion review has no resolved model') };
   const leg = (name) => J.op(opId(repo, t.key, `${prefix}.${name}`, rx));
   const routes = { primary: primaryRoute, second: secondRoute, reconcile: primaryRoute };
   // every leg's route is resolved (tier -> modelMap, the carrier's own refusals) before any leg is launched
@@ -322,10 +393,7 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
   if (failedLeg) return { blocked: await J.block(t.key, 'review_leg_failed', `${failedLeg.op_id} ended ${failedLeg.result?.outcome}`, { op_id: failedLeg.op_id }) };
   const artifacts = { primary: agentJson(p), second_opinion: agentJson(s) };
   if (!isObj(artifacts.primary) || !isObj(artifacts.second_opinion)) return { blocked: await J.block(t.key, 'review_leg_unreadable', 'a review leg left no JSON artifact', { op_id: (!isObj(artifacts.primary) ? p : s).op_id }) };
-  if (kind === 'confirmation') { // gate.mjs confirm(): primary + (policy) second opinion, no reconciliation
-    const c = await collect(J, ctx, t, { prefix, kind, rx, input: { kind, review_execution: rx, ...artifacts } });
-    return { collected: { op_id: c.op_id, state: c.state, result: c.result ?? null } };
-  }
+  if (kind === 'confirmation') return collect(J, ctx, t, { prefix, kind, rx, input: { kind, review_execution: rx, ...artifacts } }); // gate.mjs confirm(): no reconciliation
   const r = leg('reconcile');
   if (!r) return { dispatched: [await launch(J, ctx, t, { op: `${prefix}.reconcile`, gen: rx, bound: AGENT_BOUND_MS, route: routes.reconcile, nodeId: `${prefix}-reconcile`,
     prompt: reviewPrompt(t, 'reconcile', kind, rx, facts, artifacts) })] };
@@ -335,32 +403,54 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
   if (!isObj(input) || input.kind !== kind || input.review_execution !== rx
     || JSON.stringify(input.primary) !== JSON.stringify(artifacts.primary) || JSON.stringify(input.second_opinion) !== JSON.stringify(artifacts.second_opinion))
     return { blocked: await J.block(t.key, 'review_input_invalid', 'the reconciled gate input is missing, of another execution, or altered a reviewer artifact', { op_id: r.op_id }) };
-  const c = await collect(J, ctx, t, { prefix, kind, rx, input });
-  return { collected: { op_id: c.op_id, state: c.state, result: c.result ?? null } };
+  // only the review gate's own input fields reach it (an unknown key is the gate's bad_input usage error)
+  const fields = Object.fromEntries(Object.entries(input).filter(([k]) => GATE_FIELDS.review.includes(k) && k !== 'repair_prompt_file'));
+  return collect(J, ctx, t, { prefix, kind, rx, input: fields });
 }
 
-/** ONE collect op per review execution: intent -> gate review -> recorded. Re-collect after a crash probes the engine chain first. */
+/** The fixed findings of an original FAIL input (reconciliation disposition `fix`), from both reviewers. */
+function fixFindings(input) {
+  const disp = Array.isArray(input.reconciliation?.dispositions) ? input.reconciliation.dispositions : [];
+  const fixed = (f, primary) => disp.some((d) => isObj(d) && d.finding_id === f.id && d.disposition === 'fix' && (primary ? d.source === 'primary' : d.source !== 'primary'));
+  return [...(input.primary?.findings ?? []).filter((f) => isObj(f) && fixed(f, true)).map((f) => ({ source: 'primary', ...f })),
+    ...(input.second_opinion?.findings ?? []).filter((f) => isObj(f) && fixed(f, false)).map((f) => ({ source: 'second_opinion', ...f }))];
+}
+
+/**
+ * The supervisor-owned, finding-bound repair brief of an actionable original FAIL (engine-gates: an accepted FAIL that opens a
+ * repair needs `repair_prompt_file`). Written once in the run directory from the collected findings; deterministic bytes.
+ * The NODE line names the repair (the repair writer's prompt id). UNQUALIFIED: the brief text for a real repair writer.
+ */
+function repairBrief(t, rx, findings) {
+  return [`NODE=repair-${rx}`, `# ship-ticket repair brief: ${t.key} ${t.run_id}, review_execution ${rx}`,
+    'Fix exactly these review findings, inside the paths they name; change nothing else.',
+    ...findings.map((f) => `- ${f.source} ${f.id}: ${JSON.stringify(f)}`), ''].join('\n');
+}
+
+/**
+ * Collect one review execution exactly once: the engine's review chain is probed first; otherwise `gate review` runs as an
+ * ADMITTED, DETACHED engine launch op (pid/pgid/leader_start/deadline persisted before the release byte, never a spawnSync
+ * under the journal lock) and the classifier reads the chain or a logged refusal. A nothing-ran outcome (run lock held,
+ * usage refusal, wrapper failure, kill) is re-tried under `<rx>.r<k>`, bounded, then the ticket alone is Blocked.
+ */
 async function collect(J, ctx, t, { prefix, kind, rx, input }) {
-  const id = opId(ctx.repo(t), t.key, prefix, rx);
-  let o = J.op(id);
-  if (!o) {
-    const files = opFiles(ctx.deps.runDir(t), id);
-    writeFileSync(files.input, JSON.stringify(input), { mode: 0o600 });
-    o = await J.intent({ op_id: id, ticket: t.key, kind: 'collect', op: prefix, gen: rx, review_kind: kind, files });
+  const repo = ctx.repo(t);
+  if (inChain(ctx.deps.readState(t), { rx, kind })) return { collected: 'in_chain' };
+  const g = launchGen(J, repo, t.key, prefix, rx);
+  const prior = J.op(opId(repo, t.key, prefix, g.gen));
+  if (prior?.state === 'recorded') return prior.result?.outcome === 'collected' ? { collected: prior.op_id } : { parked: 'gate_refused', op_id: prior.op_id, code: prior.result?.code ?? null };
+  if (!prior && g.spent) return { blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: gate review recorded nothing ${RETRY_LIMITS[g.spent]} times (${g.last.result?.cause ?? g.spent})`, { op_id: g.last.op_id }) };
+  let full = input;
+  if (kind === 'original' && input.primary?.outcome === 'FAIL') {
+    const findings = fixFindings(input);
+    if (findings.length) {
+      const brief = opFiles(ctx.deps.runDir(t), opId(repo, t.key, prefix, rx)).brief;
+      mkdirSync(dirname(brief), { recursive: true });
+      if (!existsSync(brief)) writeFileSync(brief, repairBrief(t, rx, findings), { mode: 0o600 });
+      full = { ...input, repair_prompt_file: brief };
+    }
   }
-  return settleCollect(J, ctx, o);
-}
-
-async function settleCollect(J, ctx, o) {
-  if (o.state === 'recorded') return o;
-  const t = ctx.ticket(o.ticket);
-  if (!t) return o;
-  const inChain = (S) => (S?.review_chain ?? []).some((r) => r.review_execution === o.gen && r.kind === o.review_kind);
-  if (inChain(ctx.deps.readState(t))) return J.move(o.op_id, 'recorded', { result: { outcome: 'recorded', by: 'probe' } }); // collected once already
-  const r = ctx.deps.runGate(t, 'review', o.files.input);
-  await boundary(ctx.deps.hooks, 'after-gate', { op_id: o.op_id });
-  const ok = inChain(ctx.deps.readState(t));
-  return J.move(o.op_id, 'recorded', { result: { outcome: ok ? 'recorded' : 'refused', code: r.json?.code ?? null, status: r.status } });
+  return { collecting: await launch(J, ctx, t, { op: prefix, gen: g.gen, argv: engineArgv('gate review', t), bound: GATE_BOUND_MS, input: full, collect: { rx, kind } }) };
 }
 
 // ---------------------------------------------------------------------------------------------------- recovery (§7.1)
@@ -415,8 +505,10 @@ async function stepTicket(J, ctx, t) {
     const op = cmd === 'drive' ? 'drive' : `gate.${cmd.split(' ')[1]}`;
     if (!LAUNCHED.includes(cmd)) return { parked: `${cmd}_not_supervised` };
     const base = `s${seqOf(S)}`;
-    const gen = launchGen(J, ctx.repo(t), t.key, op, base);
+    const g = launchGen(J, ctx.repo(t), t.key, op, base);
+    const gen = g.gen;
     const prior = J.op(opId(ctx.repo(t), t.key, op, gen));
+    if (!prior && g.spent) return { blocked: await J.block(t.key, 'retries_exhausted', `${g.last.op_id}: ${cmd} did not run (${g.spent}, last ${g.last.result?.cause ?? g.spent}) ${RETRY_LIMITS[g.spent]} times`, { op_id: g.last.op_id }) };
     // already ran at this engine state: no blind re-run. Parked (recomputed every tick) until the engine state moves.
     if (prior?.state === 'recorded') return { parked: 'no_progress', op_id: prior.op_id, outcome: prior.result?.outcome ?? null };
     return { launched: await launch(J, ctx, t, { op, gen, argv: engineArgv(cmd, t), bound: cmd === 'drive' ? DRIVE_BOUND_MS : GATE_BOUND_MS, input }) };
@@ -449,7 +541,7 @@ const genSeq = (g) => Number(/^s(\d+)/.exec(String(g))?.[1] ?? -1);
 
 /** One tick. Returns { code, out }. */
 export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, depsIn = {}) {
-  const deps = { ...defaultDeps(), ...depsIn };
+  const deps = withDefaults(depsIn);
   const w = loadWave(manifestPath, deps);
   if (!w.ok) return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: w.code, problems: w.problems } };
   const paths = journalPaths(stateDir, w.manifest.wave_id);
@@ -462,6 +554,10 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
     return await withJournal(paths, w.manifest.wave_id, async (J) => {
       const info = processInfo(process.pid);
       J.doc.tick = { pid: process.pid, start_identity: info.startTime ?? null, deadline: armRecord(TICK_BOUND_MS, deps.armClock ?? undefined) };
+      if (w.partial && J.doc.binding?.manifest_digest !== w.digest) {
+        J.doc.tick = null; await J.commit();
+        return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_unapproved', unbound: w.unbound, reason: 'a wave starts only fully bound' } };
+      }
       if (!J.doc.binding) J.doc.binding = { manifest_digest: w.digest, merge_strategy: w.merge_strategy };
       else if (J.doc.binding.manifest_digest !== w.digest || J.doc.binding.merge_strategy !== w.merge_strategy) {
         J.doc.tick = null; await J.commit();
@@ -477,6 +573,7 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
         let state;
         if (J.doc.blocked[t.key]) state = 'failed';
         else if (J.doc.ship_ready[t.key]) state = 'ship_ready';
+        else if (w.unbound[t.key]) state = 'waiting_owner'; // its plan binding fails now (ticket-local): parked, others continue
         else { try { state = deps.readTicket(t).state; } catch { state = 'corrupt'; } }
         return { id: t.key, deps: t.deps, dep_mode: t.dep_mode, state, owner_required: t.owner_required === true, class: 'heavy', priority: t.priority ?? 0, owns: t.owns ?? [] };
       });
@@ -487,6 +584,7 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
         catch (e) { out.tickets[key] = { blocked: await J.block(key, e.code ?? 'supervisor_error', e.message) }; }
       }
       out.blocked = J.doc.blocked;
+      if (w.partial) out.unbound = w.unbound;
       J.doc.tick = null;
       await J.commit();
       return { code: 0, out };
@@ -501,7 +599,7 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
 
 /** One sweep: engine reconcile per run, then the journal's own deadlines (lock-free read; signals only verified groups). */
 export async function sweep({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, depsIn = {}) {
-  const deps = { ...defaultDeps(), ...depsIn };
+  const deps = withDefaults(depsIn);
   const w = loadWave(manifestPath, deps);
   if (!w.ok) return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: w.code } };
   const paths = journalPaths(stateDir, w.manifest.wave_id);
@@ -596,7 +694,7 @@ export function plistXml({ waveId, job, manifestPath, stateDir, home, workdir })
 
 /** install/uninstall: print by default; `write` writes or removes ONLY the two label files under <home>/Library/LaunchAgents. Never runs launchctl. */
 export function installPlan({ manifestPath, stateDir, home = homedir(), remove = false, write = false }, deps = {}) {
-  const w = loadWave(manifestPath, { ...defaultDeps(), ...deps });
+  const w = loadWave(manifestPath, withDefaults(deps));
   if (!w.ok) return { code: 2, out: { outcome: 'refused', code: w.code } };
   const dir = join(home, 'Library', 'LaunchAgents');
   const jobs = ['tick', 'sweep'].map((job) => ({ job, label: label(w.manifest.wave_id, job), path: join(dir, `${label(w.manifest.wave_id, job)}.plist`),
@@ -608,7 +706,9 @@ export function installPlan({ manifestPath, stateDir, home = homedir(), remove =
   const domain = 'gui/$(id -u)';
   return { code: 0, out: { outcome: write ? (remove ? 'removed' : 'written') : 'dry_run', jobs,
     owner_commands: jobs.map((j) => remove ? `launchctl bootout ${domain}/${j.label}` : `launchctl bootstrap ${domain} ${j.path}`),
-    note: 'nothing was bootstrapped: loading the jobs is an owner action (H3); LaunchAgents run only while the owner is logged in (Option A)' } };
+    note: write && !remove
+      ? 'written, not bootstrapped now: but launchd loads every plist in ~/Library/LaunchAgents at the NEXT LOGIN (RunAtLoad), so a written plan ACTIVATES then; remove it with uninstall --write true if that is not intended. LaunchAgents run only while the owner is logged in (Option A)'
+      : 'nothing was written or bootstrapped: writing (--write true) activates the jobs at the next login (RunAtLoad); bootstrapping now is an owner action (H3). LaunchAgents run only while the owner is logged in (Option A)' } };
 }
 
 // ---------------------------------------------------------------------------------------------------- CLI

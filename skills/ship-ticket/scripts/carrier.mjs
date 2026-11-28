@@ -215,7 +215,7 @@ function resolveRoute(phase, config) {
 }
 
 /** The verified adapters' exact argument lists (or an unverified provider's trusted template), extracted unchanged from prepareDispatch. */
-function adapterArgs(config, model, billing, { permissionMode, sandbox }) {
+function adapterArgs(config, model, billing, { permissionMode, sandbox, readOnlyTools = false }) {
   let executable, args;
   if (config.provider === 'claude') {
     if (config.args !== undefined || config.executable !== undefined) fail('claude adapter builds its own verified arguments');
@@ -223,6 +223,9 @@ function adapterArgs(config, model, billing, { permissionMode, sandbox }) {
     if (!CLAUDE_MODES.has(mode)) fail('unsupported claude permissionMode');
     executable = 'claude';
     args = ['-p', '--output-format', 'json', '--no-session-persistence', '--permission-mode', mode,
+      // PR-5 read-only agent tasks: only the built-in read tools and no MCP server (verified on Claude Code 2.1.331 --help:
+      // `--tools <tools...>` "Built-in tools to make available", `--strict-mcp-config` with no --mcp-config: none)
+      ...(readOnlyTools ? ['--tools', 'Read,Grep,Glob', '--strict-mcp-config'] : []),
       ...(model ? ['--model', model] : [])];
   } else if (config.provider === 'codex') {
     if (config.args !== undefined || config.executable !== undefined) fail('codex adapter builds its own verified arguments');
@@ -268,7 +271,7 @@ export function prepareAgentTask(config) {
   if (config.sandbox !== undefined && config.sandbox !== 'read-only') fail('an agent task runs only in the read-only codex sandbox');
   if (config.permissionMode !== undefined && config.permissionMode !== 'dontAsk') fail('an agent task runs read-only: claude permissionMode is dontAsk');
   const { tier, model, modelResolution, verified } = resolveRoute(phase, config);
-  const { executable, args } = adapterArgs(config, model, billing, { permissionMode: 'dontAsk', sandbox: 'read-only' });
+  const { executable, args } = adapterArgs(config, model, billing, { permissionMode: 'dontAsk', sandbox: 'read-only', readOnlyTools: true });
   return { provider: config.provider, phase, node_id: config.nodeId, executable, args, workdir: realpathSync(resolve(config.workdir)),
     timeoutMs: config.timeoutMs, billing, model_tier: tier, model: model ?? 'provider-default', model_resolution: modelResolution,
     model_applied: model !== null, adapter: verified ? 'verified' : 'trusted-template', promptFile: resolve(config.promptFile) };

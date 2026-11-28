@@ -462,7 +462,8 @@ const surfaceShape = (s) => isObj(s) && Object.keys(s).length === 4 && ['boundar
   && typeof s.boundary_id === 'string' && BOUNDARY_ID.test(s.boundary_id) && pairRoundTrips(s.boundary_id, 'VAPT-API-01')
   && nonEmptyString(s.kind) && nonEmptyString(s.path) && Array.isArray(s.principals) && s.principals.length > 0 && s.principals.every(nonEmptyString);
 
-const GATE_FIELDS = {
+/** The accepted input fields of each gate (exported for the supervisor, which passes only these to gate review). */
+export const GATE_FIELDS = {
   red: ['node', 'command', 'specs', 'addendum'],
   reassess: ['classifications', 'surfaces'],
   review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file',

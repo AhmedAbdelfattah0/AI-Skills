@@ -57,7 +57,9 @@ test('PR-5 prepareAgentTask: a read-only REVIEW-phase task (review legs, RCA) ro
   assert.equal(c.phase, 'REVIEW');
   assert.equal(c.model_tier, 'strong', 'routeModel: REVIEW is always strong');
   assert.equal(c.model, 'claude-opus-x', 'model = modelMap[tier]');
-  assert.deepEqual(c.args, ['-p', '--output-format', 'json', '--no-session-persistence', '--permission-mode', 'dontAsk', '--model', 'claude-opus-x']);
+  assert.deepEqual(c.args, ['-p', '--output-format', 'json', '--no-session-persistence', '--permission-mode', 'dontAsk',
+    '--tools', 'Read,Grep,Glob', '--strict-mcp-config', '--model', 'claude-opus-x'], 'an explicit read-only tool surface: no inherited mutating tool or MCP connector');
+  assert.ok(!prepareDispatch(config(fx, { modelMap: { strong: 'x' } })).args.includes('--tools'), 'writers keep their tool surface');
   // the same unresolved-strong refusal as the writer carrier: no modelMap.strong, or an unverified adapter
   assert.throws(() => prepareAgentTask(task({ modelMap: {} })), /strong tier requires modelMap.strong/);
   assert.throws(() => prepareAgentTask(task({ provider: 'gemini', executable: 'gemini', args: ['x'] })), /strong tier requires modelMap.strong/);
