@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks', 'stagePolicy'];
 
 /**
  * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
@@ -271,6 +271,9 @@ export function validateEngineDag(doc, { ticket } = {}) {
   if (c.durableRun !== undefined && c.durableRun !== false && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1))
     bad('config.durableRun must be false (the legacy per-worktree placement) or exactly { version: 1 }');
   validateEarlyChecks(c, bad);
+  // PR-3 (STAB S4-min, P6, opt-in, UNQUALIFIED): stage obligations + plan feasibility; the policy itself is the approved
+  // narrative's stage-policy-v1 line (stage-obligations.mjs). An engine without PR-3 refuses the field (unknown config).
+  if (c.stagePolicy !== undefined && !(isObj(c.stagePolicy) && Object.keys(c.stagePolicy).join() === 'version' && c.stagePolicy.version === 1)) bad('config.stagePolicy must be exactly { version: 1 }');
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
