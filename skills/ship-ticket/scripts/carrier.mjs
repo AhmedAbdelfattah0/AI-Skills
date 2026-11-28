@@ -44,6 +44,11 @@ export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawn
 
 const PROVIDERS = new Set(['claude', 'codex', 'gemini', 'antigravity']);
 const VERIFIED = new Set(['claude', 'codex']);
+/**
+ * PR-5b: the adapter lookup by provider id for a routed agent task with an explicit model (a supervisor review route): only a
+ * VERIFIED adapter takes a model (resolveRoute), so only those ids are supported. Callers name no provider themselves.
+ */
+export const supportsAgentProvider = (provider) => VERIFIED.has(provider);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/;
 const SAFE_ARG = /^[A-Za-z0-9_.,:=@%+\/\[\]-]{1,256}$/;

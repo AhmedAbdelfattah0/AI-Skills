@@ -14,6 +14,10 @@
  *                priority?:uint (higher first, default 0), owns?:[repo-relative path], owner_required?:boolean }] }
  * `release_mode` is RESERVED (addendum 2026-11-23e): absent means `manual`; only `manual` is accepted in v1.
  * PR-5 adds two optional keys: `merge_strategy` ('owner' | 'automatic', absent = owner) and `width_reason` (one line).
+ * PR-5b (S7 Option A) adds the optional `review_routes`: an ORDERED, owner-configured list of generic review routes
+ * `{ role, provider, model, budget_ms? }` (role/provider safe ids, model a model id, budget_ms 1000..3600000). It is shape-only
+ * here: which provider ids exist is the carrier's adapter lookup, and which roles a supervised wave needs is the supervisor's
+ * check (supervisor.mjs loadWave: a `second_opinion` route is required). Bound to approval by the manifest digest like every key.
  * DIGEST = sha256 of the manifest FILE BYTES (LF only; CRLF refused). It holds no plan digest (that would be circular).
  * BINDING: each ticket plan's narrative (outside the RUN-STATE block) carries exactly one line `wave: <WAVE-ID> sha256:<digest>`;
  * the ticket's START already binds the narrative (brief.mjs planDigest/startCheck), so no new authority event or START field.
@@ -70,9 +74,11 @@ const TICKET_SCHEMA = { object: {
   key: 'string', plan: 'string', run_id: 'string', worktree: 'string', branch: 'string', deps: { arrayOf: 'string' },
   dep_mode: { enum: DEP_MODES }, resources: { arrayOf: 'string' },
   priority: '?uint', owns: { arrayOf: 'string', optional: true }, owner_required: '?boolean' } };
+const ROUTE_SCHEMA = { object: { role: 'string', provider: 'string', model: 'string', budget_ms: '?posint' } };
 export const MANIFEST_SCHEMA = { object: {
   schema: { enum: [WAVE_SCHEMA] }, wave_id: 'string', endpoint: { enum: [ENDPOINT] }, release_mode: '?string',
-  heavy_slots: 'posint', merge_strategy: '?string', width_reason: '?string', tickets: { arrayOf: TICKET_SCHEMA } } };
+  heavy_slots: 'posint', merge_strategy: '?string', width_reason: '?string', review_routes: { arrayOf: ROUTE_SCHEMA, optional: true },
+  tickets: { arrayOf: TICKET_SCHEMA } } };
 
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const hasDots = (p) => p.split('/').some((s) => s === '' || s === '.' || s === '..');
@@ -88,6 +94,24 @@ const safeWorktree = (p) => {
 };
 const safeBranch = (b) => typeof b === 'string' && BRANCH.test(b) && !b.includes('..') && !b.includes('//') && !b.endsWith('/') && !b.endsWith('.') && !b.endsWith('.lock');
 const safeReason = (r) => typeof r === 'string' && r.length > 0 && r.length <= WIDTH_REASON_MAX && !/[\r\n\0]/.test(r);
+/** PR-5b: a review route's per-attempt budget bounds (the carrier's agent-task timeout range). */
+export const ROUTE_BUDGET_MS = Object.freeze({ min: 1000, max: 3600000 });
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/;
+/** Problems of an optional review route list: unsafe role/provider/model, a budget out of range, a duplicate route. */
+function routeProblems(routes) {
+  if (routes === undefined) return [];
+  const out = [], seen = new Set();
+  routes.forEach((r, i) => {
+    if (!SAFE_ID.test(r.role) || !SAFE_ID.test(r.provider) || !MODEL.test(r.model)) out.push(`review_routes[${i}]: role and provider must be safe ids and model a model id`);
+    if (r.budget_ms !== undefined && (r.budget_ms < ROUTE_BUDGET_MS.min || r.budget_ms > ROUTE_BUDGET_MS.max)) out.push(`review_routes[${i}]: budget_ms must be ${ROUTE_BUDGET_MS.min}..${ROUTE_BUDGET_MS.max}`);
+    const k = JSON.stringify([r.role, r.provider, r.model]);
+    if (seen.has(k)) out.push(`review_routes[${i}]: route ${r.role} ${r.provider}:${r.model} is listed twice`);
+    seen.add(k);
+  });
+  return out;
+}
+/** The manifest's review routes of `role`, in their approved order (other roles ignored; absent = none). */
+export const reviewRoutesOf = (m, role) => (Array.isArray(m?.review_routes) ? m.review_routes : []).filter((r) => r?.role === role);
 /** The manifest's merge strategy (absent = owner). */
 export const mergeStrategyOf = (m) => m?.merge_strategy ?? DEFAULT_MERGE_STRATEGY;
 const safeResource = (r) => typeof r === 'string' && RESOURCE_PREFIXES.some((p) => r.startsWith(p) && /^[A-Za-z0-9._/-]{1,100}$/.test(r.slice(p.length)));
@@ -123,6 +147,7 @@ export function validateManifest(m) {
   if (m.release_mode !== undefined && !RELEASE_MODES.includes(m.release_mode)) add('release_mode_unsupported', `release_mode ${JSON.stringify(m.release_mode)} is reserved; only ${RELEASE_MODES.join(', ')} is accepted in v1`);
   if (m.merge_strategy !== undefined && !MERGE_STRATEGIES.includes(m.merge_strategy)) add('wave_merge_strategy_invalid', `merge_strategy must be one of ${MERGE_STRATEGIES.join(', ')}`);
   if (m.width_reason !== undefined && !safeReason(m.width_reason)) add('wave_width_reason_invalid', `width_reason must be one line of 1..${WIDTH_REASON_MAX} characters`);
+  for (const p of routeProblems(m.review_routes)) add('wave_review_routes_invalid', p);
   if (m.heavy_slots > HEAVY_SLOTS_MAX) add('wave_heavy_slots_invalid', `heavy_slots must be 1..${HEAVY_SLOTS_MAX}`);
   if (m.tickets.length === 0) add('wave_empty', 'a wave needs at least one ticket');
   const keys = new Set(), dupKeys = new Set();
@@ -155,7 +180,7 @@ export function validateManifest(m) {
 }
 export const MANIFEST_CODES = Object.freeze(['wave_manifest_crlf', 'wave_manifest_unreadable', 'wave_schema_invalid', 'wave_id_invalid', 'release_mode_unsupported', 'wave_heavy_slots_invalid',
   'wave_empty', 'wave_ticket_duplicate', 'wave_key_invalid', 'wave_run_id_invalid', 'wave_path_unsafe', 'wave_branch_invalid', 'wave_resource_invalid', 'wave_dep_duplicate',
-  'wave_cycle', 'wave_dep_unknown', 'wave_stack_unsupported', 'wave_merge_strategy_invalid', 'wave_width_reason_invalid']);
+  'wave_cycle', 'wave_dep_unknown', 'wave_stack_unsupported', 'wave_merge_strategy_invalid', 'wave_width_reason_invalid', 'wave_review_routes_invalid']);
 
 /** The first dependency cycle of `{id, deps}` nodes as an id path ending where it started, or null. Iterative; unknown deps are ignored. */
 export function findCycle(nodes) {

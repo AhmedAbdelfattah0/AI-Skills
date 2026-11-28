@@ -78,6 +78,21 @@ const S = {
     assert.equal(m.mergeStrategyOf(manifest()), 'owner');
     assert.equal(m.mergeStrategyOf(manifest(undefined, { merge_strategy: 'automatic' })), 'automatic');
   },
+  review_routes_shape(m) {
+    // PR-5b (S7 Option A): optional ordered review routes, generic { role, provider, model, budget_ms? }; absent keeps every
+    // existing manifest (and its digest) valid. Which providers exist is the carrier's lookup (supervisor), not this module's.
+    const r = (over = {}) => ({ role: 'second_opinion', provider: 'codex', model: 'gpt-x', ...over });
+    assert.deepEqual(codesOf(manifest(undefined, { review_routes: [r(), r({ provider: 'claude', model: 'claude-x', budget_ms: 600000 }), r({ role: 'primary' })] }), m), []);
+    assert.deepEqual(codesOf(manifest(undefined, { review_routes: [] }), m), []);
+    for (const bad of [{ role: '' }, { role: 'a b' }, { provider: 'Codex!' }, { provider: '' }, { model: '' }, { model: '-m' }, { model: 'x y' }, { budget_ms: 999 }, { budget_ms: 3600001 }])
+      assert.deepEqual(codesOf(manifest(undefined, { review_routes: [r(bad)] }), m), ['wave_review_routes_invalid'], JSON.stringify(bad));
+    assert.deepEqual(codesOf(manifest(undefined, { review_routes: [r(), r()] }), m), ['wave_review_routes_invalid'], 'a duplicate route is a configuration error');
+    assert.deepEqual(codesOf(manifest(undefined, { review_routes: [{ ...r(), label: 'fable' }] }), m), ['wave_schema_invalid'], 'closed keys');
+    assert.deepEqual(codesOf(manifest(undefined, { review_routes: [{ role: 'second_opinion', provider: 'codex' }] }), m), ['wave_schema_invalid']);
+    assert.deepEqual(codesOf(manifest(undefined, { review_routes: {} }), m), ['wave_schema_invalid']);
+    assert.deepEqual(m.reviewRoutesOf(manifest(undefined, { review_routes: [r(), r({ role: 'primary' }), r({ provider: 'claude', model: 'f' })] }), 'second_opinion').map((x) => x.provider), ['codex', 'claude'], 'order kept, other roles ignored');
+    assert.deepEqual(m.reviewRoutesOf(manifest(), 'second_opinion'), []);
+  },
   unsafe_paths_and_closed_schema(m) {
     const bad = (over, code = 'wave_path_unsafe') => assert.deepEqual(codesOf(manifest([tk('T1', over)]), m), [code], JSON.stringify(over));
     for (const plan of ['../x.md', '/etc/x.md', '.specs/../x.md', '.specs\\x.md', 'a\0.md', '.specs/plans/x.txt', '-x.md', 'a//b.md', '']) bad({ plan });
@@ -376,7 +391,8 @@ const MUTANTS = [
   ['release-mode-never-checked', 'if (m.release_mode !== undefined && !RELEASE_MODES.includes(m.release_mode))', 'if (false)', ['release_mode_enum']],
   ['merge-strategy-unchecked', "if (m.merge_strategy !== undefined && !MERGE_STRATEGIES.includes(m.merge_strategy))", 'if (false)', ['merge_strategy_and_width_reason']],
   ['width-reason-unchecked', "if (m.width_reason !== undefined && !safeReason(m.width_reason))", 'if (false)', ['merge_strategy_and_width_reason']],
-  ['dag-cycle-unchecked', 'if (cycle) add(', 'if (false) add(', ['dag_cycle_refused']],
+  ['review-routes-unchecked', 'for (const p of routeProblems(m.review_routes)) add(', 'for (const p of [] ?? routeProblems(m.review_routes)) add(', ['review_routes_shape']],
+  ['dag-cycle-unchecked','if (cycle) add(', 'if (false) add(', ['dag_cycle_refused']],
   ['dep-subset-unchecked', "else if (!keys.has(d)) add('wave_dep_unknown'", "else if (false) add('wave_dep_unknown'", ['dep_outside_wave_and_duplicates']],
   ['stack-unchecked', "if (prior !== undefined) add('wave_stack_unsupported'", "if (false) add('wave_stack_unsupported'", ['shared_branch_or_worktree_is_a_stack']],
   ['unsafe-paths-accepted', "const hasDots = (p) => p.split('/').some((s) => s === '' || s === '.' || s === '..');", 'const hasDots = () => false;', ['unsafe_paths_and_closed_schema']],
