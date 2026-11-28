@@ -141,7 +141,7 @@ test('[P6-236] replay: the production row ships as an open obligation; SHIP_READ
   assert.equal(ob.candidate, cand);
 });
 
-test('[P6-N3] a changed (rebased or repaired) candidate re-binds the obligation, keyed by row: lineage kept, still open', { skip: WIN_SKIP }, async (t) => {
+test('[P6-N3] a changed candidate (a repair; an in-run base move is PR-4b succession, through the same shipStage seam) re-binds the obligation, keyed by row: lineage kept, still open', { skip: WIN_SKIP }, async (t) => {
   const { fx, cand: c1 } = shipped(t);
   // the candidate changes through the engine's own path: an owner RETRY review (FAIL), its repair, the confirmation
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'review-2', predecessor: 'review-1', authorized_by: 'owner', reason: 'test: second candidate', timestamp: new Date().toISOString() });
@@ -337,6 +337,24 @@ test('[P6-H1..H3,H5] frozen hazards stay frozen without the flag: parity artifac
   okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive');
   mkdirSync(join(fx.repo, '.specs', 'design-parity'), { recursive: true }); writeFileSync(join(fx.repo, '.specs', 'design-parity', 'T-1.md'), '# parity\n');
   assert.equal(fx.gate('reassess', {}).out?.code, 'security_reapproval', 'H5');
+});
+
+test('[P6-DOWN] downstream readers accept a shipped stage run: ship-ready-check, the accepted view, archive', { skip: WIN_SKIP }, async (t) => {
+  const { checkShipReady } = await import('./ship-ready-check.mjs');
+  const { readRun } = await import('./engine-accepted.mjs');
+  const { fx, cand } = shipped(t);
+  const chk = checkShipReady(readFileSync(fx.planFile, 'utf8'), readFileSync(fx.engineLog(), 'utf8'), { requireEvent: true, runId: 'run-1' });
+  assert.equal(chk.ok, true, J(chk));
+  const v = await readRun({ repoRoot: fx.repo, ticket: 'T-1', runId: 'run-1' });
+  assert.equal(v.exists, true, J(v).slice(0, 2000));
+  assert.equal(v.error, undefined, J(v.error));
+  assert.equal(v.candidate.id, cand);
+  assert.deepEqual(v.blockers, [], J(v.blockers));
+  const sr = v.phases.find((p) => p.phase === 'SHIP_READY');
+  assert.equal(sr.state, 'accepted', J(sr));
+  const a = fx.cli('archive');
+  okc(a, 'archive');
+  assert.deepEqual(JSON.parse(readFileSync(join(a.out.archive, 'state.json'), 'utf8')).stage.obligations.map((o) => [o.row, o.status]), [['R2', 'open']]);
 });
 
 // =============================================================================================== state binding
