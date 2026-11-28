@@ -51,7 +51,7 @@ import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2:
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
-import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock, readDecision, claimDecision } from './lib/deadline.mjs';
+import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock, readDecision, claimDecision, resultStarted } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
 
@@ -894,13 +894,15 @@ export async function reconcileDeadlines(ctx) {
     // m4: the kill of this expiry is complete when the group was seen gone or SIGKILL itself was delivered (a zombie leader of a
     // stopped driver stays "alive" after SIGKILL: waiting on it again would change nothing)
     const signalled = records.some(r => r.type === 'signalled' && (r.result === 'gone' || r.signals?.includes('SIGKILL')));
-    const finished = () => existsSync(envelopeFileOf(a, P.attempts));
+    const finished = () => resultStarted(a, P.attempts); // round 3: the envelope, its temp file or the runner's pre-stamp marker
     const prior = readDecision(P.attempts, a.attempt_id);
     if (now === 'gone') {
       // L1: a group already gone proves no timeout unless an earlier sweep claimed its expiry (its decision or receipt)
       swept.push({ ...row, identity: 'gone', action: prior === 'expired' || receipted ? 'settle' : 'none', status: a.status, observation: rec });
     } else if (now !== 'verified') {
       swept.push({ ...row, identity: 'unknown', action: 'no_signal', status: a.status, observation: rec });
+    } else if (prior === 'indeterminate') {
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'decision_indeterminate', status: a.status, observation: rec });
     } else if (prior === 'accepted') {
       swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
     } else if (prior !== 'expired' && finished()) {
@@ -916,11 +918,12 @@ export async function reconcileDeadlines(ctx) {
       // completing its kill is honoured (no second claim).
       await io.boundary(ctx.hooks, 'sweep-before-claim', { attempt_id: a.attempt_id });
       const claim = prior === 'expired' ? { won: false, decision: 'expired' } : claimDecision(P.attempts, a.attempt_id, 'expired');
-      if (claim.decision !== 'expired') { swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec }); continue; }
+      if (claim.decision !== 'expired') { swept.push({ ...row, identity: 'verified', action: 'none', reason: claim.decision === 'accepted' ? 'accepted' : 'decision_indeterminate', status: a.status, observation: rec }); continue; }
       if (!receipted) appendSweep(P.attempts, { type: 'signal', ...base, envelope_present: false });
       await io.boundary(ctx.hooks, 'sweep-after-claim', { attempt_id: a.attempt_id });
       const sent = [];
-      const after = await io.killGroup(a.pgid, alive, { verify: () => groupIdentity(a, alive) === 'verified', onSignal: (sig) => sent.push(sig) });
+      // round 3: before EACH signal: identity still verified AND no result being published (an on-time stamped result is never signalled)
+      const after = await io.killGroup(a.pgid, alive, { verify: () => !finished() && groupIdentity(a, alive) === 'verified', onSignal: (sig) => sent.push(sig) });
       // a kill is recorded only for signals really delivered (a refused verification records nothing; later sweeps may retry)
       if (sent.length) appendSweep(P.attempts, { type: 'signalled', ...base, signals: sent, result: after === false ? 'gone' : after === null ? 'unverified' : 'alive' });
       swept.push({ ...row, identity: 'verified', action: sent.length ? 'killed' : 'claimed', status: a.status, observation: rec });

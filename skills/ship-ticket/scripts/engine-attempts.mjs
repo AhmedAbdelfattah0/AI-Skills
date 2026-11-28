@@ -14,7 +14,7 @@ import { prepareDispatch, childEnv, spawnSpec, workerRunStateAppend } from './ca
 import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
-import { armAttempt, signalReceipt, deadlineVerdict, envelopePosition, enforcementOptIn, readDecision, claimDecision, acceptClaimNeeded } from './lib/deadline.mjs';
+import { armAttempt, signalReceipt, deadlineVerdict, envelopePosition, enforcementOptIn, readDecision, claimDecision, acceptClaimNeeded, resultStarted } from './lib/deadline.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
@@ -239,6 +239,9 @@ export async function settle(E, a, { timedOut = false, wait = 0, owned = false, 
     for (const until = performance.now() + wait; alive === true && performance.now() < until && !env; alive = E.alive(a.pgid)) { await io.delay(50); env = io.readJson(a.envelope_file); }
     env ??= io.readJson(a.envelope_file);
     if (!env && alive === true && !timedOut) return 'live';
+    // round 3: a live group that has begun publishing its result (temp file / pre-stamp marker) is never killed by a recovery
+    // settle: its result decides it once visible (a stamp before the limit is on time)
+    if (!env && alive === true && S.durable && a.deadline && resultStarted(a, E.P.attempts)) return 'live';
   }
   if (!(await retire(S, a, E.alive, 'exited', how))) return unquiet(S, a, item);
   // the decision: the evidence is read again NOW (after the wait and the retirement), never taken from the snapshot above
@@ -248,8 +251,16 @@ export async function settle(E, a, { timedOut = false, wait = 0, owned = false, 
   // (`accepted`, exclusive create); an `expired` claim made first by the sweep makes it late. Decided by the claim, not a re-read.
   if (env && verdict !== 'late' && S.durable && acceptClaimNeeded(a, E.P.attempts, env)) {
     await io.boundary(E.ctx.hooks, 'settle-before-accept', { attempt_id: a.attempt_id });
-    verdict = claimDecision(E.P.attempts, a.attempt_id, 'accepted').decision === 'expired' ? 'late' : 'ontime';
+    const claimed = claimDecision(E.P.attempts, a.attempt_id, 'accepted').decision;
+    verdict = claimed === 'expired' ? 'late' : claimed === 'accepted' ? 'ontime' : 'indeterminate';
     await io.boundary(E.ctx.hooks, 'settle-after-accept', { attempt_id: a.attempt_id, verdict });
+  }
+  if (verdict === 'indeterminate') {
+    // round 3: an unreadable/empty decision file is neither acceptance nor a timeout: fail closed with a named judgment
+    a.undecided_envelope = env ? { file: a.envelope_file, exit_code: env.exit_code ?? null } : null;
+    item.state = 'failed'; item.reason = 'deadline decision indeterminate: the attempt\'s decision file holds no valid decision (never accepted, never timed out blindly)';
+    pushJudgment(S, 'deadline_decision_indeterminate', a.node, item.reason);
+    return;
   }
   const receipt = verdict === 'late' || verdict === 'timed_out' ? signalReceipt(E.P.attempts, a) : null;
   if (verdict === 'late') { a.late_envelope = { file: a.envelope_file, exit_code: env.exit_code ?? null, position_ms: envelopePosition(env, a.deadline) }; env = null; }

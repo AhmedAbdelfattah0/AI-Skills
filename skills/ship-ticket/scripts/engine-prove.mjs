@@ -67,7 +67,7 @@ async function runEarlyAttempt(E, node, command, timeoutMs) {
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
     armAttempt(E.S, a, timeoutMs, E.ctx.deadlineClock); // S1: durable run only
     await E.commit();
-    launch.release();
+    launch.release(a); // PR-1b: the runner's owner decides against this attempt's persisted deadline
     result = await launch.done;
   } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
   if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited', { owned: true }))) {

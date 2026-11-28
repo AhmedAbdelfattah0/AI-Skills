@@ -33,7 +33,7 @@
  * - Unknown boot id (neither source readable): nothing is measured; the observation is recorded as unmeasured.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -187,6 +187,15 @@ export function envelopePosition(env, rec) {
 /** The envelope file of attempt `a` in the attempts directory `dir` (a worker records it; a sealed runner's is by id). */
 export const envelopeFileOf = (a, dir) => a.envelope_file ?? join(dir, `${a.attempt_id}.envelope.json`);
 const readEnvelope = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
+/**
+ * Round 3: whether attempt `a` has STARTED publishing its result: the envelope, its temp file (a worker launcher opens it
+ * before it takes its stamp, then fsyncs and renames), or the sealed runner's pre-stamp `.result` marker. The sweep never
+ * claims or signals such an attempt.
+ */
+export function resultStarted(a, dir) {
+  const f = envelopeFileOf(a, dir);
+  return [f, f + '.tmp', f + '.result'].some(p => { try { readFileSync(p); return true; } catch (e) { return e.code !== 'ENOENT'; } });
+}
 
 // ---- PR-1b round 2: ONE atomic arbitration per attempt ---------------------------------------------------------------
 
@@ -203,16 +212,19 @@ const DECISIONS = new Set(['expired', 'accepted']);
 const LINKLESS = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS', 'EMLINK']);
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** The decision of attempt `id` in `dir`: 'expired', 'accepted' or null (none). A `wx`-fallback file seen mid-write is re-read. */
+/**
+ * The decision of attempt `id` in `dir`: 'expired', 'accepted', null (no file) or 'indeterminate': the file exists but holds
+ * no valid decision after a bounded re-read (~100 ms; a `wx`-fallback writer that crashed mid-create, or a delayed writer).
+ * INDETERMINATE is never acceptance and never a timeout: each side refuses to act on it (fail closed, a named judgment).
+ */
 export function readDecision(dir, id) {
   for (let i = 0; i < 50; i++) {
     let v;
-    try { v = readFileSync(decisionFile(dir, id), 'utf8').trim(); } catch { return null; }
+    try { v = readFileSync(decisionFile(dir, id), 'utf8').trim(); } catch (e) { if (e.code === 'ENOENT') return null; v = ''; }
     if (DECISIONS.has(v)) return v;
-    if (v !== '') return null;
     pause(2);
   }
-  return null;
+  return 'indeterminate';
 }
 
 /** Claim the decision `value` for attempt `id`: { won, decision } (decision: the one that holds, ours or the earlier one). */
@@ -225,7 +237,9 @@ export function claimDecision(dir, id, value) {
     try { writeSync(fd, value); fsyncSync(fd); } finally { closeSync(fd); }
     try { linkSync(tmp, file); won = true; } catch (e) {
       if (e.code === 'EEXIST') { /* someone decided first */ } else if (LINKLESS.has(e.code)) {
-        try { writeFileSync(file, value, { flag: 'wx', mode: 0o600 }); won = true; } catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+        let fd2;
+        try { fd2 = openSync(file, 'wx', 0o600); } catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+        if (fd2 !== undefined) { try { writeSync(fd2, value); fsyncSync(fd2); } finally { closeSync(fd2); } won = true; }
       } else throw e;
     }
   } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
@@ -234,25 +248,28 @@ export function claimDecision(dir, id, value) {
 
 /**
  * THE deadline decision, for every decider (worker settle(), the sealed runner owner gateRunner, the sweep), from persisted
- * facts: FIRST the decision file (who claimed first decides), else the result's monotonic stamp (an enforced attempt), else a
- * legacy receipt's envelope_present:false. `env` overrides the envelope read (a sealed runner's frame header, or null for
- * "no result"). Returns 'ontime' | 'late' | 'timed_out' | 'unknown' ('unknown' = the FROZEN rule: the launcher's own timer;
+ * facts: FIRST a valid monotonic stamp of the result (authoritative: before the limit 'ontime', else 'late'), else the decision
+ * file for an UNSTAMPED result (who claimed first decides; 'indeterminate' when unreadable), else a legacy receipt's
+ * envelope_present:false. `env` overrides the envelope read (a sealed runner's frame header, or null for
+ * "no result"). Returns 'ontime' | 'late' | 'timed_out' | 'indeterminate' | 'unknown' ('unknown' = the FROZEN rule: the launcher's own timer;
  * a result is recorded). A settler about to record a result that is not provably on time claims `accepted` first
  * (acceptClaimNeeded / claimDecision) and decides from what the claim returns, never from a snapshot.
  */
 export function deadlineVerdict(a, dir, { env } = {}) {
   const result = env !== undefined ? env : readEnvelope(envelopeFileOf(a, dir));
   const decision = readDecision(dir, a.attempt_id);
-  if (decision === 'expired') return result ? 'late' : 'timed_out';
   const receipt = signalReceipt(dir, a);
-  if (decision === 'accepted') return result ? 'ontime' : receipt ? 'timed_out' : 'unknown';
   const rec = a.deadline ?? (receipt ? { start_ns: receipt.start_ns, limit_ms: receipt.limit_ms } : null);
+  // round 3: a VALID monotonic stamp is authoritative for its own result, whatever any decision file or receipt says: a
+  // result can be stamped before the deadline and become visible (rename, frame + copies) just after it
+  const pos = result && rec ? envelopePosition(result, rec) : null;
+  if (pos !== null && (decision !== null || receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified')) return pos >= rec.limit_ms ? 'late' : 'ontime';
+  if (decision === 'indeterminate') return 'indeterminate';
+  // the decision file arbitrates UNSTAMPED results only
+  if (decision === 'expired') return result ? 'late' : 'timed_out';
+  if (decision === 'accepted') return result ? 'ontime' : receipt ? 'timed_out' : 'unknown';
   if (!rec) return 'unknown';
-  if (result) {
-    const pos = envelopePosition(result, rec);
-    if (pos !== null) return !(receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified') ? 'unknown' : pos >= rec.limit_ms ? 'late' : 'ontime';
-    return receipt?.envelope_present === false ? 'late' : 'unknown';
-  }
+  if (result) return pos === null && receipt?.envelope_present === false ? 'late' : 'unknown';
   return receipt ? 'timed_out' : 'unknown';
 }
 

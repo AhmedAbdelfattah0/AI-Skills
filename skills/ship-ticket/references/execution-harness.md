@@ -347,8 +347,13 @@ envelope that appears later is late. By design, in a mixed setup (the sweep opte
 already present when the sweep looks is settled by the frozen rule (recorded). Each attempt's outcome is arbitrated ONCE by an exclusively
 created decision file `attempts/<id>.decision`: the sweep claims `expired` before it signals, and a settler (the driver,
 `resume`, the sealed-runner owner) claims `accepted` before it records a result that is not provably on time; whoever creates
-it first decides, so a result published after the expiry claim is late, and a result accepted first is never signalled.
-`lib/deadline.mjs` `deadlineVerdict` reads it first. Without the opt-in and without any sweep record no decision file is
+it first decides for an UNSTAMPED result, so one published after the expiry claim is late, and one accepted first is never
+signalled. A result carrying a valid monotonic stamp is positioned by its stamp regardless of any decision (before the limit
+it is on time, otherwise late), and the sweep re-checks before each signal that no result is being published (envelope,
+its temp file or the sealed runner's pre-stamp `.result` marker). An empty or unreadable decision file is INDETERMINATE:
+neither side accepts or times out on it; the settler fails the node with `deadline_decision_indeterminate`. In a mixed
+setup (the sweep opted in, the driver not), an unstamped late success is accepted when the settler claims first: lateness
+is not enforceable for unstamped results. `lib/deadline.mjs` `deadlineVerdict` is the one decision function. Without the opt-in and without any sweep record no decision file is
 written. The kill escalation grace (SIGTERM to SIGKILL) is measured on a monotonic clock, and
 the identity is re-verified immediately before each signal. The supervisor's own journal sweep also binds the real clock
 under the opt-in and labels it `unqualified-optin`. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.

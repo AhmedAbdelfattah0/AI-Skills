@@ -582,3 +582,101 @@ test('round 2 default path: without the opt-in and without a sweep, settling a l
   assert.equal(fx.readState().nodes.a.state, 'done');
   assert.equal(decisionOf(fx, a), null);
 });
+
+// ---------------------------------------------------------------- review round 3: a VALID stamp is authoritative; INDETERMINATE fails closed
+
+const stampedEnvelope = (a, offsetMs) => JSON.stringify({ exit_code: 0, stdout_file: a.out_file, mono_ns: String(BigInt(a.deadline.start_ns) + BigInt(offsetMs) * 1000000n) });
+
+for (const [name, decision, offset, expect] of [
+  ['a result stamped BEFORE the deadline (limit-5 ms) after an `expired` claim (it became visible later) is ontime: done', 'expired', -5, 'done'],
+  ['a result stamped AFTER the deadline is late even with an `accepted` decision: timed_out', 'accepted', 5, 'timed_out'],
+]) {
+  test(`round 3 worker (SIMULATED claim + stamp): ${name}`, { skip: SKIP }, async (t) => {
+    const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+    const { claimDecision } = await import('./lib/deadline.mjs');
+    claimDecision(fx.attemptsDir(), a.attempt_id, decision);
+    killQuietly(a.pgid);
+    assert.ok(await waitUntil(() => !groupAlive(a.pgid), 5000));
+    writeFileSync(a.out_file, okOut);
+    writeFileSync(a.envelope_file, stampedEnvelope(a, a.deadline.limit_ms + offset));
+    cli(fx, 'resume');
+    const b = attemptOf(fx, a.attempt_id), node = fx.readState().nodes.a;
+    if (expect === 'done') { assert.equal(node.state, 'done', `HAZARD: an on-time stamped result was settled ${b.status}`); assert.equal(b.status, 'exited'); }
+    else { assert.equal(b.status, 'timed_out'); assert.equal(node.state, 'failed'); }
+  });
+}
+
+for (const [name, decision, startOffsetMs, limitMs, expect] of [
+  ['stamped on time against the attempt deadline, after an `expired` claim: accepted', 'expired', 0, 600000, 'accepted'],
+  ['stamped after the attempt deadline, with an `accepted` decision: timeout', 'accepted', -10000, 1, 'timeout'],
+]) {
+  test(`round 3 sealed runner (SIMULATED claim; real stamped frame; deadline handed to the owner at release): ${name}`, { skip: SKIP }, async (t) => {
+    const io = await import('./engine-io.mjs');
+    const { claimDecision } = await import('./lib/deadline.mjs');
+    const fx = fixture(t, { config: {} });
+    const dir = join(fx.root, 'attempts');
+    const run = io.gateRunner({ repoRoot: fx.repo, dir, platform: process.platform, env: { ...process.env, ...OPT_IN },
+      toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g) });
+    const launch = await run({ attempt_id: 'att-r3', command: { cmd: process.execPath, args: ['-e', 'setTimeout(() => {}, 200)'] }, timeoutMs: 600000 });
+    t.after(() => killQuietly(launch.pgid));
+    claimDecision(dir, 'att-r3', decision);
+    launch.release({ deadline: { start_ns: String(process.hrtime.bigint() + BigInt(startOffsetMs) * 1000000n), limit_ms: limitMs } });
+    const result = await launch.done;
+    if (expect === 'accepted') { assert.equal(result.timedOut, false, 'HAZARD: an on-time stamped runner result was ruled late'); assert.equal(result.exitCode, 0); }
+    else { assert.equal(result.timedOut, true); assert.equal(result.exitCode, null); }
+  });
+}
+
+test('round 3: an EMPTY decision file is INDETERMINATE: the settler neither accepts nor silently times out (named judgment); the sweep sends no signal', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  writeFileSync(join(fx.attemptsDir(), `${a.attempt_id}.decision`), '');
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  const r = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a) }));
+  assert.equal(r.swept[0].reason, 'decision_indeterminate');
+  assert.ok(groupAlive(a.pgid), 'no signal on an indeterminate decision');
+  await finishLate(fx, a);
+  cli(fx, 'resume');
+  const s = fx.readState(), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
+  assert.equal(s.nodes.a.state, 'failed');
+  assert.notEqual(b.status, 'timed_out', 'not timed out blindly');
+  assert.equal(b.envelope, undefined, 'not accepted');
+  assert.ok(codes(s).includes('deadline_decision_indeterminate'));
+});
+
+test('round 3 (SIMULATED pause after the claim): a result published before the signal is never signalled (envelope recheck before each signal)', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  const p = pauseAt('sweep-after-claim');
+  const sweeping = reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a), hooks: p.hooks }));
+  await Promise.race([p.reached, sweeping]);
+  writeFileSync(a.envelope_file + '.tmp', ''); // the launcher has begun publishing (it opens its temp file before its stamp)
+  p.release();
+  const r = await sweeping;
+  assert.equal(r.swept[0].action, 'claimed', 'no signal was sent');
+  assert.ok(groupAlive(a.pgid), 'HAZARD: a launcher publishing its result was signalled');
+  assert.equal(sweepLines(fx).some(l => l.type === 'signalled'), false);
+});
+
+test('round 3: a worker launcher that has opened its envelope temp file (before its stamp) is never claimed by the sweep', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  writeFileSync(a.envelope_file + '.tmp', '');
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  const r = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a) }));
+  assert.equal(r.swept[0].reason, 'envelope_present');
+  assert.equal(decisionOf(fx, a), null);
+  assert.ok(groupAlive(a.pgid));
+});
+
+test('round 3: the stamped sealed launcher creates its pre-stamp `.result` marker before the frame (real runner)', { skip: SKIP }, async (t) => {
+  const io = await import('./engine-io.mjs');
+  const fx = fixture(t, { config: {} });
+  const dir = join(fx.root, 'attempts');
+  const run = io.gateRunner({ repoRoot: fx.repo, dir, platform: process.platform, env: { ...process.env, ...OPT_IN },
+    toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g) });
+  const launch = await run({ attempt_id: 'att-r4', command: { cmd: process.execPath, args: ['-e', ''] }, timeoutMs: 600000 });
+  t.after(() => killQuietly(launch.pgid));
+  launch.release();
+  const result = await launch.done;
+  assert.equal(result.exitCode, 0);
+  assert.ok(existsSync(join(dir, 'att-r4.envelope.json.result')));
+});

@@ -294,8 +294,11 @@ const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
 const LAUNCHER_STAMPED = LAUNCHER.replace('ended_at: new Date().toISOString(),', 'ended_at: new Date().toISOString(), mono_ns: String(process.hrtime.bigint()),');
 if (LAUNCHER_STAMPED === LAUNCHER) throw new Error('launcher: the monotonic stamp anchor is missing');
 /** PR-1b round 1: the sealed runner launcher under the opt-in (`monoStamp`) adds `mono_ns` to its result frame header. */
-const SEALED_LAUNCHER_STAMPED = SEALED_LAUNCHER.replace('report_eof: repEof };', 'report_eof: repEof, mono_ns: String(process.hrtime.bigint()) };');
-if (SEALED_LAUNCHER_STAMPED === SEALED_LAUNCHER) throw new Error('launcher: the sealed monotonic stamp anchor is missing');
+const SEALED_LAUNCHER_STAMPED = SEALED_LAUNCHER.replace('report_eof: repEof };', 'report_eof: repEof, mono_ns: String(process.hrtime.bigint()) };')
+  // round 3: a `<envelope>.result` marker is created BEFORE the stamp, so the sweep sees "result in progress" from the instant
+  // the stamp exists (the frame and the forensic copies follow), never signalling a runner that is publishing its result
+  .replace('    const head = {', "    try { if (spec.envelopeFile) fs.closeSync(fs.openSync(spec.envelopeFile + '.result', 'w', 0o600)); } catch {}\n    const head = {");
+if (!SEALED_LAUNCHER_STAMPED.includes('mono_ns') || !SEALED_LAUNCHER_STAMPED.includes("'.result'")) throw new Error('launcher: the sealed monotonic stamp anchors are missing');
 const SEALED_KEYS = ['outFile', 'envelopeFile', 'attemptId'];
 const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 

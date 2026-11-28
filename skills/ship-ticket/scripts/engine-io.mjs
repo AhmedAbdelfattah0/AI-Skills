@@ -186,7 +186,7 @@ export const artifactDigests = (repoRoot, artifacts = {}) =>
   Object.fromEntries(Object.entries(artifacts).map(([k, p]) => [k, repoFileDigest(repoRoot, p)]));
 
 /** The typed refusals gateRunner rejects with: callers keep the code and never retry them automatically. */
-export const RUNNER_REFUSALS = new Set(['runner_output_tampered', 'runner_survivor', 'channel_unsupported']);
+export const RUNNER_REFUSALS = new Set(['runner_output_tampered', 'runner_survivor', 'channel_unsupported', 'deadline_decision_indeterminate']);
 
 /** Upper bound on a sealed result frame: its header plus the capped stdout and the capped report. */
 const FRAME_CAP = 2 * STDOUT_CAP + 1024 * 1024;
@@ -280,7 +280,7 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
     child.stdin.on('error', () => {});
     if (!child.pid) { await exited; throw new Error('runner launcher failed to spawn'); }
     const pgid = platform === 'win32' ? null : child.pid;
-    let timedOut = false, killing = null;
+    let timedOut = false, killing = null, owner = null;
     const done = (async () => {
       let expired;
       const deadline = new Promise(r => { expired = r; });
@@ -320,12 +320,18 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
       // PR-1b: the deadline decision from the persisted evidence read NOW (lib/deadline.mjs deadlineVerdict): the sweep's
       // receipt and this frame's monotonic stamp. A runner the sweep signalled, or whose (even agreeing, successful) result came
       // after a recorded expiry, timed out: never accepted, never runner_output_tampered (the sweep, not the candidate, ended it)
-      const verdict = pgid ? deadlineVerdict({ attempt_id: id, pgid }, dir, { env: agrees ? h : null }) : 'unknown';
+      const me = { attempt_id: id, pgid, ...(owner?.deadline ? { deadline: owner.deadline } : {}), ...(owner?.leader_start !== undefined ? { leader_start: owner.leader_start } : {}) };
+      const verdict = pgid ? deadlineVerdict(me, dir, { env: agrees ? h : null }) : 'unknown';
+      if (verdict === 'indeterminate') throw Object.assign(coded('deadline_decision_indeterminate', `runner ${id}: its decision file holds no valid decision; the result is neither accepted nor timed out`), { quiescent });
       const overdue = verdict === 'late' || verdict === 'timed_out';
       if (overdue) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
       // round 2: a successful agreeing result a sweep may be arbitrating is accepted only after winning the decision (`accepted`)
-      if (agrees && pgid && (sweepRecords(dir, { attempt_id: id, pgid }).length || readDecision(dir, id) !== null)
-        && claimDecision(dir, id, 'accepted').decision === 'expired') return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
+      // (a VALID stamp positioned on time needs no claim: it is authoritative)
+      if (agrees && pgid && verdict !== 'ontime' && (sweepRecords(dir, me).length || readDecision(dir, id) !== null)) {
+        const claimed = claimDecision(dir, id, 'accepted').decision;
+        if (claimed === 'expired') return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
+        if (claimed !== 'accepted') throw Object.assign(coded('deadline_decision_indeterminate', `runner ${id}: its decision file holds no valid decision; the result is neither accepted nor timed out`), { quiescent });
+      }
       if (!agrees) {
         if (timedOut) return { exitCode: null, stdout: '', stderr: '', timedOut, quiescent };
         const why = frame.reason ?? `launcher exit ${status.signal ?? status.code} disagrees with the frame's exit_code ${h.exit_code}`;
@@ -347,6 +353,8 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
         ...(report === true ? { report: frame.report, report_eof: true, ...(h.report_truncated ? { report_truncated: true, report_bytes: h.report_bytes } : {}) } : {}) };
     })();
     done.catch(() => {});
-    return { pid: child.pid, pgid, release: () => child.stdin.end(RELEASE), done };
+    // PR-1b round 3: `release(attempt)` hands the owner the attempt's persisted deadline (armed before the release byte), so a
+    // stamped frame is positioned against it exactly
+    return { pid: child.pid, pgid, release: (attempt) => { owner = attempt ?? null; child.stdin.end(RELEASE); }, done };
   };
 }
