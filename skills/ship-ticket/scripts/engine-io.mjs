@@ -15,6 +15,7 @@ import { launcherArgs, RELEASE_BYTE, SEALED_SCHEMA, STDOUT_CAP } from './launche
 import { sha, coded } from './engine-dag.mjs';
 import { END, parseRunState, malformedReason, eventLine } from './run-state.mjs';
 import { killGroup, quiesce, processInfo } from './engine-quiesce.mjs';
+import { signalReceipt } from './lib/deadline.mjs';
 
 export { sha, killGroup, quiesce, processInfo };
 // The lock protocol and the atomic state write live in lib/durable-io.mjs (S-30a); re-exported unchanged.
@@ -317,7 +318,9 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
       const h = frame.head;
       const agrees = h !== undefined && status.signal === null && status.code !== null && (status.code === 0) === (h.exit_code === 0);
       if (!agrees) {
-        if (timedOut) return { exitCode: null, stdout: '', stderr: '', timedOut, quiescent };
+        // PR-1b: a runner the lock-free deadline sweep signalled (its receipt in the run's sweep file) timed out: it is a
+        // timeout like the in-process one, never runner_output_tampered (the sweep, not the candidate, ended it)
+        if (timedOut || (pgid && signalReceipt(dir, { attempt_id: id, pgid }))) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
         const why = frame.reason ?? `launcher exit ${status.signal ?? status.code} disagrees with the frame's exit_code ${h.exit_code}`;
         throw Object.assign(coded('runner_output_tampered', `runner result refused: ${why}`), { quiescent });
       }

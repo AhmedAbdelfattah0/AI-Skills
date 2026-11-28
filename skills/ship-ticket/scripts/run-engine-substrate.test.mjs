@@ -161,7 +161,10 @@ test('N2 90% consumed across repeated enforcer outages, restarts, a sleep and wa
   const clock = await clockFor(a);
   const realNow = Date.now;
   t.after(() => { Date.now = realNow; });
-  const charged = () => attemptOf(fx.repo, a.attempt_id).deadline?.charged_ms;
+  // PR-1b: the lock-free sweep writes nothing to the driver's state; its charge is in its own result and file
+  const before = readFileSync(stateOf(fx.repo));
+  let out;
+  const charged = () => out?.swept?.find(x => x.attempt_id === a.attempt_id)?.charged_ms;
   // Each sweep is a fresh enforcer invocation (a restart); the gaps between them are outages; 0.40 -> 0.55 is a host sleep
   // on a clock that counts sleep (darwin uv_hrtime): it is charged, conservatively. The wall clock is stepped -1 h / +1 h.
   const marks = [0.10, 0.25, 0.40, 0.55, 0.70, 0.90];
@@ -169,14 +172,15 @@ test('N2 90% consumed across repeated enforcer outages, restarts, a sleep and wa
   let last = -1;
   for (const [i, f] of marks.entries()) {
     Date.now = () => realNow() + steps[i];
-    await sweep(fx, clock.at(Math.round(LIMIT_MS * f)));
+    out = await sweep(fx, clock.at(Math.round(LIMIT_MS * f)));
     const c = charged();
     assert.equal(c, Math.round(LIMIT_MS * f), `the charge at ${f} is the full monotonic elapsed time (no outage dropped or capped, wall clock ignored)`);
     assert.ok(c > last, 'the charge never decreases');
     last = c;
     assert.ok(groupAlive(a.pgid), `below the deadline (${f}) the worker is not signalled`);
   }
-  await sweep(fx, clock.at(Math.round(LIMIT_MS * 0.5))); // a backwards reading never reduces a recorded charge
+  out = await sweep(fx, clock.at(Math.round(LIMIT_MS * 0.5))); // a backwards reading never reduces a recorded charge
+  if (out?.settlement !== undefined) assert.deepEqual(readFileSync(stateOf(fx.repo)), before, 'below the deadline the sweep wrote nothing to the driver state');
   assert.equal(charged(), Math.round(LIMIT_MS * 0.9), 'consumed execution never disappears');
   await sweep(fx, clock.at(LIMIT_MS));
   assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the first observation at the deadline kills the group');
@@ -281,17 +285,20 @@ test('L3: after a reboot (another boot id) the attempt is settled through settle
   assert.deepEqual(b.deadline.unmeasured, [{ reason: 'boot_changed', after_ms: 1000, to_boot: 'another-boot' }]);
 });
 
-test('the CLI sweep is unqualified: it measures nothing, signals nothing, and records the attempt as unmeasured', { skip: SKIP }, async (t) => {
+test('the CLI sweep without the opt-in is unqualified: it measures nothing, signals nothing, and writes nothing (state byte-identical, no sweep file)', { skip: SKIP }, async (t) => {
   const { fx, a } = await orphanedHang(t);
+  const before = readFileSync(stateOf(fx.repo));
   const r = fx.cli('reconcile', { deadlines: 'true' });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.out.measurement, 'unqualified');
   assert.deepEqual(r.out.swept.map(x => [x.attempt_id, x.action, x.reason]), [[a.attempt_id, 'none', 'measurement_unqualified']]);
   assert.ok(groupAlive(a.pgid));
+  assert.deepEqual(readFileSync(stateOf(fx.repo)), before, 'PR-1b: the frozen (no opt-in) sweep never writes the driver state');
+  assert.equal(existsSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'attempts', 'deadline-sweep.jsonl')), false);
   const b = attemptOf(fx.repo, a.attempt_id);
   assert.equal(b.status, 'launched');
-  assert.deepEqual(b.deadline.last_sweep, { measured: false, reason: 'measurement_unqualified', identity: 'verified' });
   assert.equal(b.deadline.measurement, 'unqualified');
+  assert.equal(b.deadline.enforcement, undefined, 'nothing is armed under the opt-in by default');
 });
 
 // ---------------------------------------------------------------- Codex 2: worktree ownership before any observation or write

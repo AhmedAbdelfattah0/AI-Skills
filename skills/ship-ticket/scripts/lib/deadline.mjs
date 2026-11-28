@@ -4,11 +4,12 @@
  * STATUS: the measurement mechanism below is UNQUALIFIED. Its design and the G0 falsification fixtures (§8 P1-M a-f) are in
  * lib/deadline-g0.test-helper.mjs and the S1 report; not every fixture can run on a host in-session (a real wall-clock
  * step, host sleep and reboot cannot), so G0 has NOT passed and `MEASUREMENT_QUALIFIED` is false. While it is false the
- * engine never derives a signal from a measurement: the real clock is bound for ARMING only (the persisted origin), never
- * for enforcement; the sweep (`run-engine.mjs reconcile --deadlines`) classifies identity and records the attempt as
- * unmeasured, and the launcher's in-process timers stay the only enforcer. `resolveSweepClock` is the gate: the real clock
- * when MEASUREMENT_QUALIFIED, else only a clock created by `testClock()` (in-process tests; the CLI never passes one);
- * any other injected clock is refused (`deadline_clock_refused`).
+ * engine by default never derives a signal from a measurement: the real clock is bound for ARMING only (the persisted
+ * origin), never for enforcement; the lock-free sweep (`run-engine.mjs reconcile --deadlines`) classifies identity, reports,
+ * and writes nothing, and the launcher's in-process timers stay the only enforcer. `resolveSweepClock` is the gate: the real
+ * clock when MEASUREMENT_QUALIFIED or under the explicit operator opt-in ENFORCEMENT_ENV=1 (PR-1b: still UNQUALIFIED), else
+ * only a clock created by `testClock()` (in-process tests; the CLI never passes one); any other injected clock is refused
+ * (`deadline_clock_refused`).
  *
  * Mechanism (as designed, for falsification):
  * - Clock: `process.hrtime.bigint()`, libuv `uv_hrtime`. On darwin with libuv 1.51 (Node 22) it was MEASURED on the S1 host
@@ -32,7 +33,8 @@
  * - Unknown boot id (neither source readable): nothing is measured; the observation is recorded as unmeasured.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 export const DEADLINE_SCHEMA = 'ship-ticket-deadline-v0';
 export const CLOCK_ID = 'uv_hrtime+boot_id';
@@ -62,26 +64,44 @@ export function realClock() {
   return { nowNs: () => process.hrtime.bigint(), bootId: memoBoot.id };
 }
 
+/**
+ * PR-1b: the ONE explicit operator opt-in to the still UNQUALIFIED enforcement: this environment variable set to exactly '1'
+ * in the process that sweeps (it binds the real clock for that sweep) and/or the process that drives (its attempts are armed
+ * with `enforcement: 'unqualified_opt_in'`, so their settlement applies the deadline-precedence rule). Nothing sets it by
+ * default; MEASUREMENT_QUALIFIED stays false. Enabling it is an operator decision to run an UNQUALIFIED mechanism (G0 c, d and
+ * the reboot half of e have not passed on a physical host).
+ */
+export const ENFORCEMENT_ENV = 'SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT';
+export const OPT_IN = 'unqualified_opt_in';
+export const enforcementOptIn = (env = process.env) => env?.[ENFORCEMENT_ENV] === '1';
+
 const TEST_CLOCK = Symbol('ship-ticket unqualified test clock');
 /** A clock for in-process tests of the persisted-deadline logic: `{ bootId, nowNs }` tagged as a test clock. */
 export const testClock = (clock) => Object.assign(clock, { [TEST_CLOCK]: true });
+/** Whether `clock` was made by testClock(). */
+export const isTestClock = (clock) => clock?.[TEST_CLOCK] === true;
 /**
  * S1 (L5): the clock the deadline sweep may enforce with. MEASUREMENT_QUALIFIED -> the real clock (an injected one only when
- * it is a testClock); otherwise a testClock or null (nothing measured, nothing signalled). Throws `deadline_clock_refused`
- * for any other injected clock, so no caller can enable unqualified enforcement by passing one.
+ * it is a testClock); otherwise a testClock, the real clock under the explicit opt-in (`env` ENFORCEMENT_ENV=1, PR-1b), or
+ * null (nothing measured, nothing signalled). Throws `deadline_clock_refused` for any other injected clock, so no caller can
+ * enable unqualified enforcement by passing one.
  */
-export function resolveSweepClock(injected) {
+export function resolveSweepClock(injected, env = process.env) {
   if (injected !== undefined && injected !== null && injected[TEST_CLOCK] !== true)
     throw Object.assign(new Error('deadline_clock_refused: the D5 measurement is unqualified; only a testClock() may be injected'), { code: 'deadline_clock_refused' });
   if (injected) return injected;
-  return MEASUREMENT_QUALIFIED ? realClock() : null;
+  return MEASUREMENT_QUALIFIED || enforcementOptIn(env) ? realClock() : null;
 }
 
-/** The persisted deadline of a just-launched attempt (its group is the attempt's pgid): limit and clock origin. */
-export function armRecord(limitMs, clock = realClock()) {
+/**
+ * The persisted deadline of a just-launched attempt (its group is the attempt's pgid): limit and clock origin. PR-1b: armed
+ * under the opt-in (`env`), it also carries `enforcement: 'unqualified_opt_in'` (absent otherwise: default bytes unchanged).
+ */
+export function armRecord(limitMs, clock = realClock(), env = process.env) {
   const start = clock.nowNs();
   return { schema: DEADLINE_SCHEMA, limit_ms: limitMs, clock: CLOCK_ID, boot_id: clock.bootId, start_ns: String(start),
-    observed_ns: String(start), charged_ms: 0, unmeasured: [], measurement: MEASUREMENT_QUALIFIED ? 'qualified' : 'unqualified' };
+    observed_ns: String(start), charged_ms: 0, unmeasured: [], measurement: MEASUREMENT_QUALIFIED ? 'qualified' : 'unqualified',
+    ...(!MEASUREMENT_QUALIFIED && enforcementOptIn(env) ? { enforcement: OPT_IN } : {}) };
 }
 
 /**
@@ -109,4 +129,71 @@ export function observe(rec, clock) {
   rec.charged_ms = Math.max(rec.charged_ms, elapsed);
   if (now > BigInt(rec.observed_ns)) rec.observed_ns = String(now);
   return { charged_ms: rec.charged_ms, expired: rec.charged_ms >= rec.limit_ms, boot_ended: false, measured: true };
+}
+
+// ---- PR-1b: the sweep's own file, and the deadline precedence a locked settlement derives from persisted facts -----------
+
+/**
+ * The sweep's own append-only file in the run's attempts directory (archived and retired with it). The lock-free sweep writes
+ * ONLY here, never the driver's state: one JSON line per observation (`observe`: the charge it measured) and, BEFORE any
+ * signal, one `signal` receipt: "this attempt's deadline expired while its group was positively verified alive" (attempt id,
+ * pgid, leader_start, deadline origin, charge). Each line is a single append + fsync, so concurrent sweeps never lose each
+ * other's lines; a reader skips a torn or foreign line.
+ */
+export const SWEEP_FILE = 'deadline-sweep.jsonl';
+export const SWEEP_SCHEMA = 'ship-ticket-deadline-sweep-v0';
+
+/** Append record `rec` (one line, fsynced) to the sweep file of the attempts directory `dir`. */
+export function appendSweep(dir, rec) {
+  mkdirSync(dir, { recursive: true });
+  const fd = openSync(join(dir, SWEEP_FILE), 'a', 0o600);
+  try { writeSync(fd, JSON.stringify({ schema: SWEEP_SCHEMA, ...rec }) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+/** Every well-formed sweep record of attempt `a` (same attempt id, pgid and deadline origin) in `dir`. */
+export function sweepRecords(dir, a) {
+  let text;
+  try { text = readFileSync(join(dir, SWEEP_FILE), 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of text.split('\n')) {
+    let r;
+    try { r = JSON.parse(line); } catch { continue; }
+    if (r?.schema !== SWEEP_SCHEMA || r.attempt_id !== a?.attempt_id || r.pgid !== a?.pgid) continue;
+    if (a.deadline && r.start_ns !== a.deadline.start_ns) continue;
+    if (a.leader_start !== undefined && r.leader_start !== undefined && r.leader_start !== a.leader_start) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+/** The signal receipt of attempt `a` (the first), or null: the persisted evidence that it overran while verified alive. */
+export const signalReceipt = (dir, a) => sweepRecords(dir, a).find(r => r.type === 'signal') ?? null;
+
+/** The largest charge any sweep recorded for `a` (0 when none): a later observation never reports less. */
+export const recordedCharge = (dir, a) => sweepRecords(dir, a).reduce((m, r) => Math.max(m, Number.isFinite(r.charged_ms) ? r.charged_ms : 0), 0);
+
+/**
+ * The position of envelope `env` on the deadline `rec` (ms of consumed execution at the moment the launcher wrote it), from the
+ * launcher's monotonic stamp `mono_ns` (same uv_hrtime clock as the origin, same boot: a launcher never outlives its boot);
+ * null when the envelope carries no stamp. Never the wall clock (`ended_at`, mtimes): a clock step cannot move it.
+ */
+export function envelopePosition(env, rec) {
+  if (typeof env?.mono_ns !== 'string' || !/^\d+$/.test(env.mono_ns) || typeof rec?.start_ns !== 'string') return null;
+  const d = BigInt(env.mono_ns) - BigInt(rec.start_ns);
+  return Number((d > 0n ? d : 0n) / 1000000n);
+}
+
+/**
+ * PR-1b (FU-2): whether attempt deadline `rec` was overrun, for a locked settlement, from persisted facts only (never the
+ * settling process's own clock or opt-in): true = timed out (an envelope is then late evidence, never the result), false = an
+ * envelope positioned before the limit (accepted), null = not enforced (no signal receipt, not armed under the opt-in): the
+ * frozen rule applies (the launcher's own timer). `receipt` is signalReceipt(): positive evidence the group was alive past
+ * the limit; an unstamped envelope with a receipt is therefore late.
+ */
+export function deadlineOverrun(rec, env, receipt) {
+  if (!rec) return null;
+  if (!receipt && rec.enforcement !== OPT_IN && rec.measurement !== 'qualified') return null;
+  const pos = env ? envelopePosition(env, rec) : null;
+  if (pos !== null) return pos >= rec.limit_ms;
+  return receipt ? true : null;
 }

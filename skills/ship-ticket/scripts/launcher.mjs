@@ -286,6 +286,13 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
 `;
 
 const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
+/**
+ * PR-1b: `monoStamp: true` (durable-run workers only) selects LAUNCHER_STAMPED, whose envelope adds `mono_ns`, the
+ * launcher's uv_hrtime at the envelope write, so a settlement can position the envelope on the attempt's deadline without
+ * the wall clock. Without it the launcher script and argv stay byte-identical (AC5 pins).
+ */
+const LAUNCHER_STAMPED = LAUNCHER.replace('ended_at: new Date().toISOString(),', 'ended_at: new Date().toISOString(), mono_ns: String(process.hrtime.bigint()),');
+if (LAUNCHER_STAMPED === LAUNCHER) throw new Error('launcher: the monotonic stamp anchor is missing');
 const SEALED_KEYS = ['outFile', 'envelopeFile', 'attemptId'];
 const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 
@@ -302,6 +309,6 @@ export function launcherArgs(spec) {
       ...(spec.testHooks ? { testHooks: spec.testHooks } : {}), ...sample })];
   }
   const durable = typeof spec.envelopeFile === 'string' ? Object.fromEntries(DURABLE_KEYS.map(k => [k, spec[k]])) : {};
-  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable, ...sample })];
+  return ['-e', durable.envelopeFile && spec.monoStamp === true ? LAUNCHER_STAMPED : LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable, ...sample })];
 }
 
