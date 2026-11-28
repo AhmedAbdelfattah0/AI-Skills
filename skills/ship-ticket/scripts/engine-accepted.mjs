@@ -6,6 +6,8 @@
  * CLI: engine-accepted.mjs view|next --repo <dir> --ticket <key> --run-id <id> [--last <drive output JSON file>]
  *   view: { schema, ticket, run_id, candidate, last, freshness, blockers, phases[], gates, facts }   exit 0
  *   next: { schema, phase, action: run|dispatch|stop, command, role, reason, evidence, code?, stop_class?, facts? }
+ *         PR-5 (S7a): REVIEW repair_owed -> run `drive` (role repair); confirmation_owed -> dispatch `gate review` with input
+ *         { kind: 'confirmation', review_execution } (role reviewer). Both carry facts.owed. Every other REVIEW code still stops.
  *         exit 0 for run/dispatch, 2 for stop; 1 on a usage error (stderr `engine-accepted: <message>`).
  *   A stop with code `acceptance_unknown` carries `facts.settle_with`: the existing engine command whose output
  *   settles that phase (`drive`, or `gate red` while RED is owed), to be run and passed back with --last. It is
@@ -219,7 +221,7 @@ function review({ S, X, at }) {
     if (!(last.fix_findings ?? []).length) return P('REVIEW', 'not_accepted', 'the original FAILed with no finding to fix, so no repair opened: only an owner RETRY continues', ev, { code: 'review_fail_no_repair' });
     return P('REVIEW', 'not_accepted', 'an accepted FAIL original: its finding-bound repair is owed', ev, { code: 'repair_owed' });
   }
-  if (last.kind === 'repair') return P('REVIEW', 'not_accepted', 'the repair is recorded: a targeted confirmation is owed', ev, { code: 'confirmation_owed' });
+  if (last.kind === 'repair') return P('REVIEW', 'not_accepted', 'the repair is recorded: a targeted confirmation is owed', ev, { code: 'confirmation_owed', review_execution: last.review_execution });
   if (last.kind === 'confirmation') return P('REVIEW', 'not_accepted', 'the confirmation FAILed: only an owner RETRY continues', ev, { code: 'confirmation_fail' });
   return P('REVIEW', 'not_accepted', `unrecognized last chain record ${last.kind}`, ev, { code: 'chain_unrecognized' });
 }
@@ -355,7 +357,14 @@ export function nextStep(v) {
         if (p.code === 'review_owed') return gated('REVIEW', 'review', go('REVIEW', 'dispatch', cmd('gate review'), 'reviewer',
           'dispatch the primary reviewer and the second opinion on the frozen candidate, then record their artifacts with gate review (kind original)', p.evidence,
           { candidate_id: v.candidate.id, excluded_reviewers: v.facts.excluded_reviewers }));
-        return stop('REVIEW', p.code, ['repair_owed', 'confirmation_owed'].includes(p.code) ? 'off_happy_path' : p.code === 'chain_unrecognized' ? 'unknown' : 'owner', p.reason, p.evidence);
+        // PR-5 (S7a): the two owed steps of the bounded review loop are named instead of stopping. repair_owed: drive runs the
+        // finding-bound repair the engine enqueued (runRepairs). confirmation_owed: the targeted confirmation of that same
+        // review execution is dispatched (gate review kind confirmation). Every other REVIEW code stays a stop.
+        if (p.code === 'repair_owed') return go('REVIEW', 'run', cmd('drive'), 'repair', `${p.reason}: drive dispatches the finding-bound repair`, p.evidence, { owed: 'repair_owed' });
+        if (p.code === 'confirmation_owed') return gated('REVIEW', 'review', go('REVIEW', 'dispatch', cmd('gate review', { kind: 'confirmation', review_execution: p.review_execution }), 'reviewer',
+          'dispatch the targeted confirmation of the repaired candidate, then record it with gate review (kind confirmation)', p.evidence,
+          { owed: 'confirmation_owed', candidate_id: v.candidate.id, excluded_reviewers: v.facts.excluded_reviewers }));
+        return stop('REVIEW', p.code, p.code === 'chain_unrecognized' ? 'unknown' : 'owner', p.reason, p.evidence);
       case 'SHIP_READY': return gated('SHIP_READY', 'ship-ready', go('SHIP_READY', 'run', cmd('gate ship-ready', {}), null, p.reason, p.evidence));
       default: return stop(p.phase, 'unlisted_phase', 'unknown', p.reason, p.evidence);
     }

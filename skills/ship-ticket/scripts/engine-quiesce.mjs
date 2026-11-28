@@ -91,7 +91,10 @@ export function groupIdentity(a, isAlive, info = processInfo) {
   if (group === false) return 'gone';
   if (group !== true || !a.leader_start) return 'unknown';
   const now = info(a.pgid);
-  return now.alive && sameStart(now, a.leader_start) ? 'verified' : 'unknown';
+  if (now.alive && sameStart(now, a.leader_start)) return 'verified';
+  // The leader exits right after publishing its envelope, so it can die between the group probe and the start-time read:
+  // 'gone' only on a fresh positive proof that no member of the group exists (the same proof the first probe accepts).
+  return isAlive(a.pgid) === false ? 'gone' : 'unknown';
 }
 
 /**

@@ -184,5 +184,6 @@ test('B1 a core policy version at or above the early-checks offset is refused wh
   assert.throws(() => POL.withEarlyChecksTwins({ 1: Object.freeze({}), 2: Object.freeze({ earlyChecks: true }) }), /policy_table_ceiling/);
   const t2 = POL.withEarlyChecksTwins({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }) });
   assert.deepEqual(Object.keys(t2), ['1', '2', String(1 + POL.EARLY_CHECKS_OFFSET), String(2 + POL.EARLY_CHECKS_OFFSET)]);
-  assert.deepEqual(POL.POLICY_SEMANTICS, POL.withEarlyChecksTwins(POL.PRE_EARLY_CHECKS_SEMANTICS));
+  // PR-2: the merged table also derives the host-claim twins of the durable rows (engine-policy.mjs withHostClaimTwins)
+  assert.deepEqual(POL.POLICY_SEMANTICS, POL.withHostClaimTwins(POL.withEarlyChecksTwins(POL.PRE_EARLY_CHECKS_SEMANTICS)));
 });

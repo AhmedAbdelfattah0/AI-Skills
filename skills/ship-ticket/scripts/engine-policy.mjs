@@ -23,7 +23,7 @@ export const ENGINE_POLICY_VERSION = 1;
  * Version 2 (S-01b2 P5r) adds the test-kind freeze gate; `init` records it ONLY for a run that activates
  * test kinds (config.testKinds), so every other run is still version 1, byte for byte.
  */
-const CORE_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
+const BASE_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
   3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }),
   5: Object.freeze({ pinnedBase: true }), 6: Object.freeze({ testKinds: true, pinnedBase: true }),
   7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }),
@@ -44,6 +44,24 @@ const CORE_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ 
   24: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }) });
 
 /**
+ * PR-3 (STAB S4-min, P6): a second additive offset, composable with every flag of 1-24. Each base version v (1-24) has a
+ * stage-obligation twin v + STAGE_OBLIGATIONS_OFFSET (25-48) with the same flags plus stageObligations (config.stagePolicy,
+ * S.stage). The twins are DERIVED from the base table and become CORE rows, so S5's early-checks twins (+100) are derived on
+ * top of them: a run with both flags records v + 24 + 100 (125-148). Order of composition: every core flag, then stage
+ * (+24), then early checks (+100). An engine without PR-3 has no version 25-48 or 125-148 and refuses such a run
+ * (policy_version_unsupported) instead of resuming it with its obligations ignored. Every run without config.stagePolicy
+ * keeps its version, byte for byte.
+ */
+export const STAGE_OBLIGATIONS_OFFSET = 24;
+const CORE_SEMANTICS = Object.freeze({ ...BASE_SEMANTICS,
+  ...Object.fromEntries(Object.entries(BASE_SEMANTICS).map(([v, f]) => [Number(v) + STAGE_OBLIGATIONS_OFFSET, Object.freeze({ ...f, stageObligations: true })])) });
+/** The stage-obligation twin of base `version` (1-24) in `table`, or null when that engine has none (an engine without PR-3). */
+export const stageVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Number.isInteger(version) && Object.hasOwn(BASE_SEMANTICS, String(version)) ? version + STAGE_OBLIGATIONS_OFFSET : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].stageObligations === true && table[w].earlyChecks !== true ? w : null;
+};
+
+/**
  * STAB S5 (P5a): an additive capability offset, composable with any other flag. Every core version v (< EARLY_CHECKS_OFFSET)
  * has an early-checks twin v + EARLY_CHECKS_OFFSET with the same flags plus earlyChecks (config.earlyChecks: the pre-review
  * `gate prove` and REVIEW waiting for it). The twins are DERIVED from the core table, so a later slice that adds core rows
@@ -52,12 +70,12 @@ const CORE_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ 
  * longer waiting for prove. Every run without config.earlyChecks keeps its core version, byte for byte.
  */
 export const EARLY_CHECKS_OFFSET = 100;
-/** The core table (every version without earlyChecks): what an engine before S5 supports. Exported for the resume regression. */
+/** The core table (every version without earlyChecks; with PR-3 it includes the stage twins 25-48). Exported for the resume regression. */
 export const PRE_EARLY_CHECKS_SEMANTICS = CORE_SEMANTICS;
 /**
  * `core` plus the early-checks twin of each of its rows. Refuses (policy_table_ceiling), at module load, a core row at or above
  * EARLY_CHECKS_OFFSET or one that already carries earlyChecks: a twin would silently overwrite it and change the meaning of
- * existing runs. The offset is therefore a ceiling on the core table (24 rows today, 48 with S4): a later doubling flag that
+ * existing runs. The offset is therefore a ceiling on the core table (48 rows with PR-3's stage twins): a later doubling flag that
  * pushes the core to 100 rows must move the offset first.
  */
 export function withEarlyChecksTwins(core) {
@@ -65,7 +83,28 @@ export function withEarlyChecksTwins(core) {
   if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: core policy version(s) ${bad.join(', ')} reach EARLY_CHECKS_OFFSET ${EARLY_CHECKS_OFFSET} or already carry earlyChecks`), { code: 'policy_table_ceiling' });
   return Object.freeze({ ...core, ...Object.fromEntries(Object.entries(core).map(([v, f]) => [Number(v) + EARLY_CHECKS_OFFSET, Object.freeze({ ...f, earlyChecks: true })])) });
 }
-export const POLICY_SEMANTICS = withEarlyChecksTwins(CORE_SEMANTICS);
+/**
+ * PR-2 (S2-min host admission): a second additive offset. Every DURABLE row v (< HOST_CLAIM_OFFSET, durableRun true, after the
+ * early-checks twins) has a host-claim twin v + HOST_CLAIM_OFFSET with the same flags plus hostClaimRequired
+ * (config.hostClaimRequired: the run-engine CLI entry refuses a heavy command without an active host claim, host_claim_required).
+ * DERIVED from the merged table, never hand-assigned, so a later core or twin row gets its host-claim twin automatically. Only
+ * durable rows: the check binds a claim to the run's durable state file. An engine without PR-2 has no version >= 200 and
+ * refuses such a run (policy_version_unsupported) instead of driving it unclaimed. Every run without the flag keeps its version.
+ */
+export const HOST_CLAIM_OFFSET = 200;
+/** `table` plus the host-claim twin of each durable row; refuses (policy_table_ceiling) a row at or above the offset or already flagged. */
+export function withHostClaimTwins(table) {
+  const bad = Object.entries(table).filter(([v, f]) => !(Number(v) < HOST_CLAIM_OFFSET) || f.hostClaimRequired === true).map(([v]) => v);
+  if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: policy version(s) ${bad.join(', ')} reach HOST_CLAIM_OFFSET ${HOST_CLAIM_OFFSET} or already carry hostClaimRequired`), { code: 'policy_table_ceiling' });
+  return Object.freeze({ ...table, ...Object.fromEntries(Object.entries(table).filter(([, f]) => f.durableRun === true)
+    .map(([v, f]) => [Number(v) + HOST_CLAIM_OFFSET, Object.freeze({ ...f, hostClaimRequired: true })])) });
+}
+export const POLICY_SEMANTICS = withHostClaimTwins(withEarlyChecksTwins(CORE_SEMANTICS));
+/** The host-claim twin of durable `version` in `table`, or null when that engine has none (non-durable, or an engine without PR-2). */
+export const hostClaimVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Number.isInteger(version) && version < HOST_CLAIM_OFFSET ? version + HOST_CLAIM_OFFSET : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].hostClaimRequired === true ? w : null;
+};
 /** The early-checks twin of core `version` in `table`, or null when that engine has none (an engine without S5). */
 export const earlyChecksVersion = (version, table = POLICY_SEMANTICS) => {
   const w = Number.isInteger(version) && version < EARLY_CHECKS_OFFSET ? version + EARLY_CHECKS_OFFSET : null;

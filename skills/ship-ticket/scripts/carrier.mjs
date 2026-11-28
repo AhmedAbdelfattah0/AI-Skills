@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
  * Guarded writer carrier for BUILD/PROVE/SHIP/REPAIR nodes. PLAN and REVIEW are refused.
+ * PR-5: `prepareAgentTask` routes the supervisor's read-only REVIEW-phase tasks (review legs, RCA) through the same
+ * routing and adapter code; it is not a writer and `dispatch` still refuses REVIEW.
  *
  * Provider adapters use only flags verified against the installed CLIs
  * (Claude Code 2.1.318, Codex CLI 0.166.0, 2026-11-04):
@@ -193,6 +195,88 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution, write
   return 'run-log';
 }
 
+/**
+ * The ONE model routing of every dispatched task (PR-5 extracted it, unchanged, from prepareDispatch so the supervisor's
+ * read-only agent tasks are routed by the same code): the approved tier (routeModel) resolved through modelMap. An
+ * unresolved strong tier is refused.
+ */
+function resolveRoute(phase, config) {
+  const tier = routeModel(phase, { risk: config.risk ?? [], complexity: config.complexity ?? 'medium', model: config.modelTier });
+  const mapped = config.modelMap?.[tier];
+  if (mapped !== undefined && (typeof mapped !== 'string' || !MODEL_ID.test(mapped))) fail('invalid model ID in modelMap');
+  const verified = VERIFIED.has(config.provider);
+  // A strong requirement is never satisfied by an unknown provider default.
+  if (tier === 'strong' && (!verified || mapped === undefined))
+    fail('strong tier requires modelMap.strong on a verified adapter; refusing an unresolved model');
+  const model = verified ? mapped ?? null : null;
+  // inherit without modelMap.inherit runs the CLI's configured default, which may differ from the host's model.
+  const modelResolution = model !== null ? 'mapped' : 'provider-default';
+  return { tier, model, modelResolution, verified };
+}
+
+/** The verified adapters' exact argument lists (or an unverified provider's trusted template), extracted unchanged from prepareDispatch. */
+function adapterArgs(config, model, billing, { permissionMode, sandbox, readOnlyTools = false }) {
+  let executable, args;
+  if (config.provider === 'claude') {
+    if (config.args !== undefined || config.executable !== undefined) fail('claude adapter builds its own verified arguments');
+    const mode = permissionMode;
+    if (!CLAUDE_MODES.has(mode)) fail('unsupported claude permissionMode');
+    executable = 'claude';
+    args = ['-p', '--output-format', 'json', '--no-session-persistence', '--permission-mode', mode,
+      // PR-5 read-only agent tasks: only the built-in read tools and no MCP server (verified on Claude Code 2.1.331 --help:
+      // `--tools <tools...>` "Built-in tools to make available", `--strict-mcp-config` with no --mcp-config: none)
+      ...(readOnlyTools ? ['--tools', 'Read,Grep,Glob', '--strict-mcp-config'] : []),
+      ...(model ? ['--model', model] : [])];
+  } else if (config.provider === 'codex') {
+    if (config.args !== undefined || config.executable !== undefined) fail('codex adapter builds its own verified arguments');
+    if (!CODEX_SANDBOXES.has(sandbox)) fail('unsupported codex sandbox');
+    executable = 'codex';
+    args = ['exec', '--json', '--ephemeral', '-s', sandbox, ...(model ? ['-m', model] : []), '-'];
+  } else {
+    // Unverified providers: trusted template only, never model injection.
+    if (typeof config.executable !== 'string' || !/^[A-Za-z0-9_.\/:\\ -]{1,512}$/.test(config.executable))
+      fail(config.provider + ' requires an explicit trusted executable');
+    if (!Array.isArray(config.args) || !config.args.every(a => typeof a === 'string' && SAFE_ARG.test(a)))
+      fail('args must be safe tokens; send prompts on stdin');
+    if (billing === 'subscription' && config.acknowledgeUnverifiedAuth !== true)
+      fail(config.provider + ' subscription auth cannot be verified; the user must set acknowledgeUnverifiedAuth: true');
+    executable = config.executable;
+    args = config.args;
+  }
+  return { executable, args };
+}
+
+/**
+ * PR-5 (S7a): a READ-ONLY agent task of the supervisor (a review leg or an RCA), never a writer: phase REVIEW only (routeModel
+ * gives it the strong tier), no ownership (it writes nothing in the repository; its only output is its final message, which
+ * the durable launcher captures), the codex `read-only` sandbox and the claude `dontAsk` permission mode forced. Routing and
+ * arguments are resolveRoute/adapterArgs, the same code as prepareDispatch: a task is never routed beside it. Validation and
+ * argument construction only; the caller launches it through the durable launcher (engine-io startLauncher).
+ */
+export function prepareAgentTask(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) fail('invalid agent task config');
+  const phase = config.phase ?? 'REVIEW';
+  if (phase !== 'REVIEW') fail('an agent task is a REVIEW-phase task (review leg or RCA); writers go through prepareDispatch');
+  if (config.ownership !== undefined) fail('an agent task writes nothing: no ownership is accepted');
+  if (!PROVIDERS.has(config.provider)) fail('unsupported provider');
+  if (typeof config.nodeId !== 'string' || !SAFE_ID.test(config.nodeId)) fail('safe nodeId required');
+  if (typeof config.workdir !== 'string' || !isAbsolute(config.workdir) || !existsSync(config.workdir) || !statSync(config.workdir).isDirectory())
+    fail('absolute existing workdir required');
+  if (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 1000 || config.timeoutMs > 3600000) fail('timeoutMs must be 1000..3600000');
+  const billing = config.billing ?? 'subscription';
+  if (!['subscription', 'api'].includes(billing)) fail('billing must be subscription or api');
+  if (billing === 'api' && config.allowApiBilling !== true) fail('api billing requires allowApiBilling: true');
+  if (typeof config.promptFile !== 'string' || !isAbsolute(config.promptFile) || !existsSync(config.promptFile)
+    || !statSync(config.promptFile).isFile()) fail('absolute promptFile (a regular file) required; prompts go on stdin, never argv');
+  if (config.sandbox !== undefined && config.sandbox !== 'read-only') fail('an agent task runs only in the read-only codex sandbox');
+  if (config.permissionMode !== undefined && config.permissionMode !== 'dontAsk') fail('an agent task runs read-only: claude permissionMode is dontAsk');
+  const { tier, model, modelResolution, verified } = resolveRoute(phase, config);
+  const { executable, args } = adapterArgs(config, model, billing, { permissionMode: 'dontAsk', sandbox: 'read-only', readOnlyTools: true });
+  return { provider: config.provider, phase, node_id: config.nodeId, executable, args, workdir: realpathSync(resolve(config.workdir)),
+    timeoutMs: config.timeoutMs, billing, model_tier: tier, model: model ?? 'provider-default', model_resolution: modelResolution,
+    model_applied: model !== null, adapter: verified ? 'verified' : 'trusted-template', promptFile: resolve(config.promptFile) };
+}
+
 /** Validation and argument construction. No worker process is started (only read-only git rev-parse). */
 export function prepareDispatch(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) fail('invalid dispatch config');
@@ -238,42 +322,9 @@ export function prepareDispatch(config) {
   if (typeof config.promptFile !== 'string' || !isAbsolute(config.promptFile) || !existsSync(config.promptFile)
     || !statSync(config.promptFile).isFile()) fail('absolute promptFile (a regular file) required; prompts go on stdin, never argv');
 
-  const tier = routeModel(config.phase, { risk: config.risk ?? [], complexity: config.complexity ?? 'medium', model: config.modelTier });
-  const mapped = config.modelMap?.[tier];
-  if (mapped !== undefined && (typeof mapped !== 'string' || !MODEL_ID.test(mapped))) fail('invalid model ID in modelMap');
-  const verified = VERIFIED.has(config.provider);
-  // A strong requirement is never satisfied by an unknown provider default.
-  if (tier === 'strong' && (!verified || mapped === undefined))
-    fail('strong tier requires modelMap.strong on a verified adapter; refusing an unresolved model');
-  const model = verified ? mapped ?? null : null;
-  // inherit without modelMap.inherit runs the CLI's configured default, which may differ from the host's model.
-  const modelResolution = model !== null ? 'mapped' : 'provider-default';
-
-  let executable, args;
-  if (config.provider === 'claude') {
-    if (config.args !== undefined || config.executable !== undefined) fail('claude adapter builds its own verified arguments');
-    const mode = config.permissionMode ?? 'acceptEdits';
-    if (!CLAUDE_MODES.has(mode)) fail('unsupported claude permissionMode');
-    executable = 'claude';
-    args = ['-p', '--output-format', 'json', '--no-session-persistence', '--permission-mode', mode,
-      ...(model ? ['--model', model] : [])];
-  } else if (config.provider === 'codex') {
-    if (config.args !== undefined || config.executable !== undefined) fail('codex adapter builds its own verified arguments');
-    const sandbox = config.sandbox ?? 'workspace-write';
-    if (!CODEX_SANDBOXES.has(sandbox)) fail('unsupported codex sandbox');
-    executable = 'codex';
-    args = ['exec', '--json', '--ephemeral', '-s', sandbox, ...(model ? ['-m', model] : []), '-'];
-  } else {
-    // Unverified providers: trusted template only, never model injection.
-    if (typeof config.executable !== 'string' || !/^[A-Za-z0-9_.\/:\\ -]{1,512}$/.test(config.executable))
-      fail(config.provider + ' requires an explicit trusted executable');
-    if (!Array.isArray(config.args) || !config.args.every(a => typeof a === 'string' && SAFE_ARG.test(a)))
-      fail('args must be safe tokens; send prompts on stdin');
-    if (billing === 'subscription' && config.acknowledgeUnverifiedAuth !== true)
-      fail(config.provider + ' subscription auth cannot be verified; the user must set acknowledgeUnverifiedAuth: true');
-    executable = config.executable;
-    args = config.args;
-  }
+  const { tier, model, modelResolution, verified } = resolveRoute(config.phase, config);
+  const { executable, args } = adapterArgs(config, model, billing, {
+    permissionMode: config.permissionMode ?? 'acceptEdits', sandbox: config.sandbox ?? 'workspace-write' });
   return {
     provider: config.provider, phase: config.phase, node_id: config.nodeId, executable, args, workdir, repoRoot,
     attempt_id: config.attemptId ?? 'att-' + randomUUID(), role: config.role ?? DEFAULT_ROLE[config.phase],

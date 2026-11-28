@@ -256,7 +256,13 @@ test('T3 an accepted FAIL original is not acceptance; the repair and its confirm
   const d2 = drive(fx); // dispatches the finding-bound repair
   ok(d2.r);
   assert.equal(phaseOf(view(fx, { last: d2.file }).out, 'REVIEW').code, 'confirmation_owed');
-  stopped(next(fx, { last: d2.file }), 'confirmation_owed', 'REVIEW');
+  // PR-5 (S7a): a recorded repair owes its targeted confirmation, which next now names (dispatch), no longer a stop
+  const conf = next(fx, { last: d2.file });
+  assert.equal(conf.status, 0, conf.stdout + conf.stderr);
+  assert.equal(conf.out?.action, 'dispatch', conf.stdout);
+  assert.equal(conf.out?.phase, 'REVIEW');
+  assert.equal(conf.out?.command?.cmd, 'gate review');
+  assert.deepEqual(conf.out?.command?.input, { kind: 'confirmation', review_execution: 'rx-1' });
 
   const c2 = fx.candidate();
   ok(fx.gate('review', confirmReview('rx-1', c2)));
@@ -619,6 +625,34 @@ test('T8 pure core: the crafted baseline names the review dispatch (control for 
   assert.equal(n.action, 'dispatch');
   assert.equal(n.phase, 'REVIEW');
   assert.deepEqual(PHASES, ['INIT', 'BUILD', 'RED', 'PROVE', 'REASSESS', 'REVIEW', 'SHIP_READY']);
+});
+
+test('T8 pure core (PR-5): repair_owed names drive (the engine runs the finding-bound repair); confirmation_owed names the confirmation dispatch', () => {
+  const FAIL = { review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', candidate_id: X, fix_findings: [{ id: 'f1' }] };
+  const owed = pureNext((i) => { i.S.review_chain = [FAIL]; i.S.freeze = { candidate: X }; });
+  assert.equal(owed.action, 'run', JSON.stringify(owed));
+  assert.equal(owed.phase, 'REVIEW');
+  assert.equal(owed.command.cmd, 'drive');
+  assert.equal(owed.role, 'repair');
+  assert.equal(owed.facts.owed, 'repair_owed');
+  const conf = pureNext((i) => { i.S.review_chain = [FAIL, { review_execution: 'rx-1', kind: 'repair', candidate_id: X }]; i.S.freeze = { candidate: X }; });
+  assert.equal(conf.action, 'dispatch', JSON.stringify(conf));
+  assert.equal(conf.phase, 'REVIEW');
+  assert.equal(conf.command.cmd, 'gate review');
+  assert.deepEqual(conf.command.input, { kind: 'confirmation', review_execution: 'rx-1' });
+  assert.equal(conf.role, 'reviewer');
+  assert.equal(conf.facts.owed, 'confirmation_owed');
+  assert.equal(conf.facts.candidate_id, X);
+  // a refused review gate since its last acceptance still stops: next never re-names a refusing gate
+  const refused = pureNext((i) => { i.S.review_chain = [FAIL, { review_execution: 'rx-1', kind: 'repair', candidate_id: X }]; i.S.freeze = { candidate: X }; refusal(1, 'review', 'stale_candidate')(i); });
+  assert.equal(refused.action, 'stop');
+  assert.equal(refused.code, 'gate_refused');
+  // the terminal stops are unchanged: a failed confirmation, a terminal FAIL and a FAIL with nothing to fix stay owner stops
+  const cfail = pureNext((i) => { i.S.review_chain = [FAIL, { review_execution: 'rx-1', kind: 'repair' }, { review_execution: 'rx-1', kind: 'confirmation', outcome: 'FAIL', candidate_id: X }]; i.S.freeze = { candidate: X }; });
+  assert.equal(cfail.code, 'confirmation_fail');
+  assert.equal(cfail.stop_class, 'owner');
+  assert.equal(pureNext((i) => { i.S.review_chain = [{ ...FAIL, overflow: true }]; }).code, 'review_terminal');
+  assert.equal(pureNext((i) => { i.S.review_chain = [{ ...FAIL, fix_findings: [] }]; }).code, 'review_fail_no_repair');
 });
 
 test('T8 pure core: REASSESS is accepted only on the whole tuple (candidate, plan, catalog, addenda); an unreadable catalog is an owner stop', () => {
