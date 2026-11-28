@@ -293,6 +293,9 @@ const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
  */
 const LAUNCHER_STAMPED = LAUNCHER.replace('ended_at: new Date().toISOString(),', 'ended_at: new Date().toISOString(), mono_ns: String(process.hrtime.bigint()),');
 if (LAUNCHER_STAMPED === LAUNCHER) throw new Error('launcher: the monotonic stamp anchor is missing');
+/** PR-1b round 1: the sealed runner launcher under the opt-in (`monoStamp`) adds `mono_ns` to its result frame header. */
+const SEALED_LAUNCHER_STAMPED = SEALED_LAUNCHER.replace('report_eof: repEof };', 'report_eof: repEof, mono_ns: String(process.hrtime.bigint()) };');
+if (SEALED_LAUNCHER_STAMPED === SEALED_LAUNCHER) throw new Error('launcher: the sealed monotonic stamp anchor is missing');
 const SEALED_KEYS = ['outFile', 'envelopeFile', 'attemptId'];
 const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 
@@ -304,7 +307,7 @@ const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 export function launcherArgs(spec) {
   const sample = spec.sample === false || process.env[SAMPLER_OFF] === '1' ? { sample: false } : {};
   if (spec.sealed === true) {
-    return ['-e', SEALED_LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell,
+    return ['-e', spec.monoStamp === true ? SEALED_LAUNCHER_STAMPED : SEALED_LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell,
       ...Object.fromEntries(SEALED_KEYS.map(k => [k, spec[k]])), ...(spec.report === true ? { report: true } : {}),
       ...(spec.testHooks ? { testHooks: spec.testHooks } : {}), ...sample })];
   }

@@ -367,6 +367,16 @@ test('production sweep: the D5 measurement is unqualified, so nothing is measure
   await assert.rejects(sweep(opts(dir), worldDeps(dir, { sweepClock: { bootId: 'x', nowNs: () => 0n } })), /deadline_clock_refused/);
 });
 
+test('PR-1b m1: under the UNQUALIFIED opt-in the sweep never labels its real-clock measurement "qualified"', { skip: SKIP }, async (t) => {
+  const dir = world(t, [{ key: 'T1', behaviour: { drive: 'hang' } }]);
+  await tick(opts(dir), worldDeps(dir, { armClock: undefined }));
+  const prev = process.env.SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT;
+  process.env.SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT = '1';
+  t.after(() => { if (prev === undefined) delete process.env.SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT; else process.env.SHIP_TICKET_UNQUALIFIED_DEADLINE_ENFORCEMENT = prev; });
+  const s = await sweep(opts(dir), worldDeps(dir, { sweepClock: undefined }));
+  assert.match(s.out.measurement, /^unqualified-optin/);
+});
+
 test('admission held: nothing ran, re-tried under a derived generation (not a duplicate effect, not no-progress)', { skip: SKIP }, async (t) => {
   const dir = world(t, [{ key: 'T1', behaviour: { drive: 'held' } }]);
   await settleAll(dir, {}, 4).catch(() => {});

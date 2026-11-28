@@ -284,7 +284,7 @@ for (const [dir, step] of [['forward', 3600000], ['backward', -3600000]]) {
 
 // ---------------------------------------------------------------- runner settlement after a sweep kill
 
-test('a sealed runner killed by the sweep (its receipt present) is a timeout, never runner_output_tampered', { skip: SKIP }, async (t) => {
+test('a sealed runner killed by the sweep (SIMULATED: its receipt is appended by the test, not a sweep) is a timeout, never runner_output_tampered', { skip: SKIP }, async (t) => {
   const io = await import('./engine-io.mjs');
   const { appendSweep } = await import('./lib/deadline.mjs');
   const fx = fixture(t, { config: {} });
@@ -303,9 +303,9 @@ test('a sealed runner killed by the sweep (its receipt present) is a timeout, ne
 
 // ---------------------------------------------------------------- the sweep concurrent with a settling driver
 
-test('sweeps running concurrently with a live driver that settles three nodes never lose a driver update (the sweep writes no driver state)', { skip: SKIP }, async (t) => {
-  const behaviour = Object.fromEntries(Object.entries(STAGED_BEHAVIOUR).map(([k, v]) => [k, { ...v, delayMs: 400 }]));
-  const fx = fixture(t, { config: { timeoutMs: 600000 }, nodes: STAGED, behaviour });
+test('sweeps running concurrently with a live driver that settles the SAME EXPIRED attempt (and two normal nodes) never lose a driver update: the hung node ends timed_out once, the others done', { skip: SKIP }, async (t) => {
+  const behaviour = { a: { ...STAGED_BEHAVIOUR.a, delayMs: 300 }, b: { ...STAGED_BEHAVIOUR.b, delayMs: 300 }, c: { hang: true } };
+  const fx = fixture(t, { config: { timeoutMs: 4000 }, nodes: STAGED, behaviour });
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   const driver = spawn(process.execPath, [ENGINE_CLI, 'drive', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'], { env: { ...fx.env, ...OPT_IN }, stdio: 'ignore' });
   t.after(() => { try { driver.kill('SIGKILL'); } catch { /* gone */ } });
@@ -317,12 +317,143 @@ test('sweeps running concurrently with a live driver that settles three nodes ne
     const r = sweepCli(fx, OPT_IN);
     assert.equal(r.status, 0, `the lock-free sweep reads the atomically published state at any moment: ${r.stderr}`);
     sweeps++;
-    assert.equal(r.out.settlement, 'none', 'nothing expired: the sweep settled nothing and took no lock');
   }
-  assert.equal(await exited, 0);
-  assert.ok(sweeps > 0, 'at least one sweep ran while the driver was live');
+  await exited;
+  assert.ok(sweeps > 0, 'sweeps ran while the driver was live');
   const s = fx.readState();
-  assert.deepEqual(Object.fromEntries(Object.entries(s.nodes).map(([id, n]) => [id, n.state])), { a: 'done', b: 'done', c: 'done' });
-  assert.ok(s.attempts.every(x => x.status === 'exited' && x.quiesced === true));
-  assert.equal(s.judgments.length, 0);
+  assert.deepEqual(Object.fromEntries(Object.entries(s.nodes).map(([id, n]) => [id, n.state])), { a: 'done', b: 'done', c: 'failed' });
+  const c = s.attempts.filter(x => x.node === 'c');
+  assert.equal(c.length, 1, 'the expired attempt was dispatched once');
+  assert.equal(c[0].status, 'timed_out');
+  assert.equal(c[0].quiesced, true);
+  assert.ok(s.attempts.filter(x => x.node !== 'c').every(x => x.status === 'exited' && x.quiesced === true), 'no driver update was lost');
+  assert.equal(fx.runs('c').length, 1);
 });
+
+// ---------------------------------------------------------------- review round 1 (REVIEW-PR1b-OPUS M1, Codex MAJOR 1-4, m1/m4/m7)
+
+/** A sweep receipt for attempt `a` as phase A writes it (SIMULATED when a test appends it by hand). */
+const receiptFor = (a, extra = {}) => ({ type: 'signal', attempt_id: a.attempt_id, pgid: a.pgid, leader_start: a.leader_start ?? null,
+  start_ns: a.deadline.start_ns, limit_ms: a.deadline.limit_ms, charged_ms: a.deadline.limit_ms + 1, ...extra });
+const okOut = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'OK', usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } });
+
+for (const [name, driverEnv, sweepEnv] of [
+  ['mixed opt-in (sweep only)', {}, OPT_IN], ['full opt-in (driver and sweep)', OPT_IN, OPT_IN], ['control: no opt-in anywhere', {}, {}]]) {
+  test(`M1 ${name}: a worker that finished BEFORE its deadline while its stopped driver leaves the launcher a zombie ends done, never timed_out; no receipt, no signal`, { skip: SKIP }, async (t) => {
+    const fx = fixture(t, { config: { timeoutMs: 5000 }, nodes: [{ id: 'a', writes: ['src/a.txt'] }], behaviour: { a: { ...STAGED_BEHAVIOUR.a, delayMs: 1000 } } });
+    assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+    const { driver, a, exited } = await driveUntilRunning(t, fx, driverEnv);
+    driver.kill('SIGSTOP');
+    assert.ok(await waitUntil(() => existsSync(a.envelope_file), 15000), 'the worker finished and its launcher wrote the envelope');
+    assert.ok(await waitUntil(() => psState(a.pgid)?.startsWith('Z'), 10000), 'precondition: the finished launcher is a zombie of the stopped driver');
+    // sweep until well past the deadline (real clock)
+    await waitUntil(() => { const r = sweepCli(fx, sweepEnv); return (r.out?.swept?.[0]?.charged_ms ?? 0) > 5200 || (sweepEnv !== OPT_IN && Date.now() - Date.parse(a.started_at) > 5500); }, 30000);
+    assert.equal(sweepLines(fx).some(l => l.type === 'signal'), false, 'no receipt for an attempt whose envelope already exists');
+    driver.kill('SIGCONT');
+    await exited;
+    const b = attemptOf(fx, a.attempt_id);
+    assert.equal(fx.readState().nodes.a.state, 'done', `HAZARD: a completed on-time worker was settled ${b.status}`);
+    assert.equal(b.status, 'exited');
+  });
+}
+
+for (const [name, extra, expect] of [
+  ['receipt recorded the envelope ABSENT past the limit (envelope_present:false), then an unstamped success envelope appears: late, timed_out', { envelope_present: false }, 'timed_out'],
+  ['receipt WITHOUT the absence field (envelope not proven absent), unstamped envelope: frozen rule, recorded', {}, 'done'],
+]) {
+  test(`M1 mirror (SIMULATED receipt) ${name}`, { skip: SKIP }, async (t) => {
+    const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+    const { appendSweep } = await import('./lib/deadline.mjs');
+    appendSweep(fx.attemptsDir(), receiptFor(a, extra));
+    killQuietly(a.pgid);
+    assert.ok(await waitUntil(() => !groupAlive(a.pgid), 5000));
+    writeFileSync(a.out_file, okOut);
+    writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file }));
+    cli(fx, 'resume');
+    const b = attemptOf(fx, a.attempt_id);
+    if (expect === 'timed_out') { assert.equal(b.status, 'timed_out'); assert.equal(b.late_envelope?.exit_code, 0); assert.equal(fx.readState().nodes.a.state, 'failed'); }
+    else { assert.equal(fx.readState().nodes.a.state, 'done'); assert.equal(b.status, 'exited'); }
+  });
+}
+
+test('Codex 3 (SIMULATED interleave: the receipt is appended by an injected liveness probe DURING retirement): settle re-reads the evidence before deciding; a late unstamped success envelope of a worker launched without the opt-in is a timeout, not accepted', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  const { appendSweep } = await import('./lib/deadline.mjs');
+  killQuietly(a.pgid);
+  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 5000));
+  writeFileSync(a.out_file, okOut);
+  writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file }));
+  let appended = false;
+  const { resume } = await import('./run-engine.mjs');
+  await resume(fx.ctx({ groupAlive: (pgid) => {
+    if (!appended && pgid === a.pgid) { appended = true; appendSweep(fx.attemptsDir(), receiptFor(a, { envelope_present: false })); }
+    return groupAlive(pgid);
+  } }));
+  assert.ok(appended, 'the probe ran during settlement');
+  const b = attemptOf(fx, a.attempt_id);
+  assert.equal(b.status, 'timed_out', 'the receipt appended during retirement was not re-read');
+});
+
+test('Codex 1: killGroup re-verifies the identity immediately before EACH signal: an identity that flips after SIGTERM gets no SIGKILL', { skip: SKIP }, async (t) => {
+  const { killGroup } = await import('./engine-quiesce.mjs');
+  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); process.stdout.write('ready')"], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(() => killQuietly(child.pid));
+  await new Promise(r => child.stdout.once('data', r));
+  let checks = 0;
+  const res = await killGroup(child.pid, groupAlive, { verify: () => ++checks === 1, graceMs: 300 });
+  assert.ok(checks >= 2, 'the identity was re-checked before the second signal');
+  assert.equal(res, null, 'unverified, still alive: unknown, nothing proven');
+  assert.ok(groupAlive(child.pid), 'HAZARD: SIGKILL reached a group whose identity was no longer verified');
+});
+
+for (const [name, stamped, startOffsetMs, limitMs, expect] of [
+  ['unstamped frame after a receipt that recorded it absent: timeout', false, 0, 1, 'timeout'],
+  ['stamped frame positioned before the receipt\'s limit: accepted', true, 0, 600000, 'accepted'],
+  ['stamped frame positioned after the receipt\'s limit: timeout', true, -10000, 1, 'timeout'],
+]) {
+  test(`Codex 4 (SIMULATED receipt: the sweep "crashed" after its receipt, before any signal): a sealed runner whose frame AGREES and succeeds — ${name}`, { skip: SKIP }, async (t) => {
+    const io = await import('./engine-io.mjs');
+    const { appendSweep } = await import('./lib/deadline.mjs');
+    const fx = fixture(t, { config: {} });
+    const dir = join(fx.root, 'attempts');
+    const run = io.gateRunner({ repoRoot: fx.repo, dir, platform: process.platform, env: { ...process.env, ...(stamped ? OPT_IN : {}) },
+      toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g) });
+    const start = process.hrtime.bigint() + BigInt(startOffsetMs) * 1000000n;
+    const launch = await run({ attempt_id: 'att-r2', command: { cmd: process.execPath, args: ['-e', 'setTimeout(() => {}, 300)'] }, timeoutMs: 600000 });
+    t.after(() => killQuietly(launch.pgid));
+    appendSweep(dir, { type: 'signal', attempt_id: 'att-r2', pgid: launch.pgid, leader_start: null, start_ns: String(start), limit_ms: limitMs, charged_ms: limitMs + 1, envelope_present: false });
+    launch.release();
+    const result = await launch.done;
+    if (expect === 'timeout') { assert.equal(result.timedOut, true, 'HAZARD: a successful frame after a recorded expiry was accepted'); assert.equal(result.exitCode, null); }
+    else { assert.equal(result.timedOut, false); assert.equal(result.exitCode, 0); }
+  });
+}
+
+test('m7: a group verified at the first read and provably gone at the re-check is classified gone (nothing invented), never unknown/quiescence_unknown', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000, resources: ['db:main'] });
+  const { testClock } = await import('./lib/deadline.mjs');
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  let calls = 0;
+  const r = await reconcileDeadlines(fx.ctx({ deadlineClock: testClock({ bootId: a.deadline.boot_id, nowNs: () => BigInt(a.deadline.start_ns) + 600001n * 1000000n }),
+    groupAlive: (pgid) => { if (++calls === 2) { killQuietly(pgid); return false; } return groupAlive(pgid); } }));
+  assert.equal(r.swept[0].identity, 'gone');
+  const s = fx.readState();
+  assert.notEqual(s.attempts.find(x => x.attempt_id === a.attempt_id).status, 'unknown');
+  assert.equal(codes(s).includes('quiescence_unknown'), false);
+});
+
+test('m4: an attempt that already has a receipt for this expiry is not re-receipted or re-waited by every later sweep', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: { timeoutMs: 2000 }, nodes: [{ id: 'a', writes: ['src/a.txt'] }], behaviour: { a: { hang: true } } });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const { driver, a } = await driveUntilRunning(t, fx);
+  driver.kill('SIGSTOP');
+  await sweepUntil(fx, a.attempt_id, 'killed');
+  const receipts = () => sweepLines(fx).filter(l => l.type === 'signal').length;
+  assert.equal(receipts(), 1);
+  const t0 = performance.now();
+  const again = sweepCli(fx, OPT_IN);
+  assert.equal(again.status, 0);
+  assert.equal(receipts(), 1, 'no second receipt');
+  assert.ok(performance.now() - t0 < 2500, 'no second kill grace on the zombie');
+});
+

@@ -180,7 +180,7 @@ test('N2 90% consumed across repeated enforcer outages, restarts, a sleep and wa
     assert.ok(groupAlive(a.pgid), `below the deadline (${f}) the worker is not signalled`);
   }
   out = await sweep(fx, clock.at(Math.round(LIMIT_MS * 0.5))); // a backwards reading never reduces a recorded charge
-  if (out?.settlement !== undefined) assert.deepEqual(readFileSync(stateOf(fx.repo)), before, 'below the deadline the sweep wrote nothing to the driver state');
+  assert.deepEqual(readFileSync(stateOf(fx.repo)), before, 'below the deadline the sweep wrote nothing to the driver state');
   assert.equal(charged(), Math.round(LIMIT_MS * 0.9), 'consumed execution never disappears');
   await sweep(fx, clock.at(LIMIT_MS));
   assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the first observation at the deadline kills the group');
@@ -259,9 +259,16 @@ test('Codex 4 + L2: a sweep from another worktree kills an expired verified grou
   assert.equal(cli('init', { dag: fx.dagFile }).status, 0);
   const state = () => (existsSync(durableState(fx.repo)) ? durableState(fx.repo) : join(fx.repo, '.git', 'worktrees', 'feature', 'ai-skills', 'ship-ticket', 'T-1.state.json'));
   const a = await killDriverAfterLaunch(t, fx, wt, state);
-  writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file })); // "completed" after its deadline
+  // PR-1b round 1 (SIMULATED interleave): the envelope "completes" AFTER the sweep recorded it absent past the deadline (an
+  // envelope already present when the sweep looks is the owner's to settle, M1); the injected probe writes it right after the receipt
+  const sweepFile = join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'attempts', 'deadline-sweep.jsonl');
+  let wrote = false;
+  const probe = (pgid) => {
+    if (!wrote && existsSync(sweepFile) && readFileSync(sweepFile, 'utf8').includes('"type":"signal"')) { wrote = true; writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file })); }
+    return groupAlive(pgid);
+  };
   const { reconcileDeadlines } = await engine();
-  await reconcileDeadlines?.(fx.ctx({ deadlineClock: (await clockFor(a)).at(LIMIT_MS + 1) })); // from the MAIN checkout
+  await reconcileDeadlines?.(fx.ctx({ deadlineClock: (await clockFor(a)).at(LIMIT_MS + 1), groupAlive: probe })); // from the MAIN checkout
   assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the expired verified group was killed');
   const s = readJson(state()), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
   assert.equal(b.status, 'timed_out', 'the deadline wins over the late envelope');

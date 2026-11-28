@@ -341,7 +341,14 @@ else `deferred`, and every settler (the driver, `resume`, the sweep) derives the
 attempt ends `timed_out` and is never re-queued. A `drive` started with the variable arms its attempts with
 `enforcement: 'unqualified_opt_in'` and its workers' envelopes carry the launcher's monotonic `mono_ns`; for such an attempt an
 envelope written at or past the deadline is kept as `late_envelope` evidence while the attempt ends `timed_out`.
-The kill escalation grace (SIGTERM to SIGKILL) is measured on a monotonic clock. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
+The sweep never receipts or signals an attempt whose envelope already exists (its launcher finished; a stopped driver may
+leave it a zombie that still reads as alive); the receipt records the envelope ABSENT at or after the limit, so an unstamped
+envelope that appears later is late. By design, in a mixed setup (the sweep opted in, the driver not), an unstamped envelope
+already present when the sweep looks is settled by the frozen rule (recorded). The decision is one function
+(`lib/deadline.mjs` `deadlineVerdict`), evaluated from the persisted evidence read at decision time by the settling process,
+the sealed-runner owner and the sweep. The kill escalation grace (SIGTERM to SIGKILL) is measured on a monotonic clock, and
+the identity is re-verified immediately before each signal. The supervisor's own journal sweep also binds the real clock
+under the opt-in and labels it `unqualified-optin`. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
 
 **Stage obligations** (PR-3, S4-min: `config.stagePolicy: { version: 1 }`, opt-in, UNQUALIFIED; `scripts/stage-obligations.mjs`).
 The stage policy is ONE visible `stage-policy-v1: <json>` line of the approved narrative (never inside an HTML comment or

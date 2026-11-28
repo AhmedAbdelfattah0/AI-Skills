@@ -109,17 +109,18 @@ function unverifiedLeader(a) {
 export const KILL_GRACE_MS = 3000;
 
 /**
- * SIGTERM then SIGKILL the group, waiting for it to go; returns the final liveness (null when unknowable).
+ * SIGTERM then SIGKILL the group, waiting for it to go; returns the final liveness (false gone, true alive, null unknowable).
  * PR-1b: the grace is measured on a monotonic clock (`now`, default performance.now()), never Date.now(): a wall-clock step
  * during the wait can neither delay the SIGKILL (backward step) nor cut the grace short (forward step). Once the group is
  * seen gone it is never signalled again (from then on its pgid number may be reused). `verify` (a non-launcher enforcer:
- * the deadline sweep) is re-checked immediately before the first signal; anything but true sends nothing.
+ * the deadline sweep) is re-checked immediately before EACH signal (SIGTERM and SIGKILL): when it is not true nothing more
+ * is sent, and the result is false (gone) or null (alive but no longer verified: unknown, nothing proven).
  */
 export async function killGroup(pgid, isAlive, { verify, now = () => performance.now(), graceMs = KILL_GRACE_MS } = {}) {
-  if (verify && isAlive(pgid) === true && verify() !== true) return isAlive(pgid);
   for (const sig of ['SIGTERM', 'SIGKILL']) {
     const before = isAlive(pgid);
     if (before !== true) return before;
+    if (verify && verify() !== true) return isAlive(pgid) === false ? false : null;
     try { process.kill(-pgid, sig); } catch { /* gone */ }
     const until = now() + graceMs;
     let state = isAlive(pgid);

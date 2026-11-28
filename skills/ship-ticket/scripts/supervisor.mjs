@@ -45,7 +45,9 @@
  * observed with the clock resolveSweepClock allows, only an identity-VERIFIED expired group is signalled (killGroup), and
  * the timeout is recorded only if the journal lock is free (else the next tick settles it from the group identity).
  * UNQUALIFIED: lib/deadline MEASUREMENT_QUALIFIED is false (G0 not passed), so in production resolveSweepClock gives no
- * clock and the sweep measures and signals nothing (reported `unmeasured`); tests inject a testClock().
+ * clock and the sweep measures and signals nothing (reported `unmeasured`); tests inject a testClock(). Under the explicit
+ * operator opt-in (lib/deadline ENFORCEMENT_ENV=1 in this process, PR-1b) it binds the real clock and enforces, still
+ * UNQUALIFIED, and reports `measurement: 'unqualified-optin: ...'`, never 'qualified'.
  *
  * PR-2 SEAM: real host admission is `host-admit.mjs run -- <cmd>` (merged with PR-2: claim, derived weight, stdout passed
  * through, a hold exits ADMISSION_HELD_EXIT 75; a permanent refusal exits 2 and reads as nothing_ran). Every heavy command goes
@@ -64,7 +66,7 @@ import { prepareAgentTask, childEnv, verifySubscription, spawnSpec } from './car
 import { startLauncher, RELEASE, groupAlive, commonGitDir, boundary } from './engine-io.mjs';
 import { finalMessage } from './worker-report.mjs';
 import { groupIdentity, killGroup, leaderStart, processInfo, sameStart } from './engine-quiesce.mjs';
-import { armRecord, observe, resolveSweepClock } from './lib/deadline.mjs';
+import { armRecord, observe, resolveSweepClock, isTestClock, MEASUREMENT_QUALIFIED } from './lib/deadline.mjs';
 import { enginePaths } from './lib/run-placement.mjs';
 import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { journalPaths, withJournal, readJournal, opId, repoId, coded, MAX_PROBES } from './supervisor-journal.mjs';
@@ -614,6 +616,7 @@ export async function sweep({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, de
   }
   const clock = resolveSweepClock(deps.sweepClock);
   if (!clock) out.measurement = 'unqualified: MEASUREMENT_QUALIFIED is false (G0), nothing measured or signalled';
+  else if (!MEASUREMENT_QUALIFIED && !isTestClock(clock)) out.measurement = 'unqualified-optin: real clock under the operator opt-in, MEASUREMENT_QUALIFIED is false (G0)';
   const killed = [];
   for (const o of Object.values(doc.ops)) {
     if (!live(o) || !o.pgid || !o.deadline) continue;

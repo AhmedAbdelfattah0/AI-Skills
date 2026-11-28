@@ -183,17 +183,35 @@ export function envelopePosition(env, rec) {
   return Number((d > 0n ? d : 0n) / 1000000n);
 }
 
+/** The envelope file of attempt `a` in the attempts directory `dir` (a worker records it; a sealed runner's is by id). */
+export const envelopeFileOf = (a, dir) => a.envelope_file ?? join(dir, `${a.attempt_id}.envelope.json`);
+const readEnvelope = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
+
 /**
- * PR-1b (FU-2): whether attempt deadline `rec` was overrun, for a locked settlement, from persisted facts only (never the
- * settling process's own clock or opt-in): true = timed out (an envelope is then late evidence, never the result), false = an
- * envelope positioned before the limit (accepted), null = not enforced (no signal receipt, not armed under the opt-in): the
- * frozen rule applies (the launcher's own timer). `receipt` is signalReceipt(): positive evidence the group was alive past
- * the limit; an unstamped envelope with a receipt is therefore late.
+ * PR-1b round 1: THE deadline decision, for every decider (worker settle(), the sealed runner owner gateRunner, the sweep),
+ * from the persisted facts READ AT DECISION TIME (call it again after any wait or retirement, never decide from an earlier
+ * snapshot): the sweep's signal receipt (sweepRecords), the envelope (its existence and its monotonic stamp, if stamped)
+ * and the opt-in recorded on the attempt's deadline. `env` overrides the envelope read (a sealed runner's decoded frame
+ * header, or null for "no result"); otherwise envelopeFileOf(a, dir) is read now. Returns:
+ * - 'ontime'    a stamped result positioned before the limit (accepted even when a timer fired after it);
+ * - 'late'      a result that must not be accepted: stamped at or past the limit (enforced attempt), or unstamped while a
+ *               receipt recorded the envelope ABSENT (`envelope_present: false`) after the limit, so it provably came later;
+ * - 'timed_out' no result, and a receipt proves the deadline expired while the group was verified alive;
+ * - 'unknown'   nothing persisted decides it: the FROZEN rule applies (the launcher's own timer; a result is accepted).
+ *   By design this includes an UNSTAMPED result already present when the sweep looked (mixed opt-in: the driver ran
+ *   without it): the sweep then writes no receipt, and the result is accepted, as without the opt-in.
+ * The deadline origin and limit come from the attempt (`a.deadline`) or, for a sealed runner whose owner does not hold it,
+ * from the receipt itself.
  */
-export function deadlineOverrun(rec, env, receipt) {
-  if (!rec) return null;
-  if (!receipt && rec.enforcement !== OPT_IN && rec.measurement !== 'qualified') return null;
-  const pos = env ? envelopePosition(env, rec) : null;
-  if (pos !== null) return pos >= rec.limit_ms;
-  return receipt ? true : null;
+export function deadlineVerdict(a, dir, { env } = {}) {
+  const receipt = signalReceipt(dir, a);
+  const rec = a.deadline ?? (receipt ? { start_ns: receipt.start_ns, limit_ms: receipt.limit_ms } : null);
+  if (!rec) return 'unknown';
+  const result = env !== undefined ? env : readEnvelope(envelopeFileOf(a, dir));
+  if (result) {
+    const pos = envelopePosition(result, rec);
+    if (pos !== null) return !(receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified') ? 'unknown' : pos >= rec.limit_ms ? 'late' : 'ontime';
+    return receipt?.envelope_present === false ? 'late' : 'unknown';
+  }
+  return receipt ? 'timed_out' : 'unknown';
 }

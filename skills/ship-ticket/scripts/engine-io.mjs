@@ -15,7 +15,7 @@ import { launcherArgs, RELEASE_BYTE, SEALED_SCHEMA, STDOUT_CAP } from './launche
 import { sha, coded } from './engine-dag.mjs';
 import { END, parseRunState, malformedReason, eventLine } from './run-state.mjs';
 import { killGroup, quiesce, processInfo } from './engine-quiesce.mjs';
-import { signalReceipt } from './lib/deadline.mjs';
+import { deadlineVerdict, enforcementOptIn } from './lib/deadline.mjs';
 
 export { sha, killGroup, quiesce, processInfo };
 // The lock protocol and the atomic state write live in lib/durable-io.mjs (S-30a); re-exported unchanged.
@@ -143,7 +143,7 @@ export function readIfExists(file) {
  * a pipe that carries the result frame; without it (workers) the launch is unchanged.
  */
 export function startLauncher({ spawnFn = spawn, spec, cwd, env, platform, files, sealed }) {
-  return spawnFn(process.execPath, launcherArgs({ ...spec, ...files, ...(sealed ? { sealed: true, report: sealed.report === true } : {}) }),
+  return spawnFn(process.execPath, launcherArgs({ ...spec, ...files, ...(sealed ? { sealed: true, report: sealed.report === true, ...(sealed.monoStamp === true ? { monoStamp: true } : {}) } : {}) }),
     { cwd, env, detached: platform !== 'win32', stdio: ['pipe', sealed ? 'pipe' : 'ignore', 'ignore'], windowsHide: true });
 }
 export const RELEASE = RELEASE_BYTE;
@@ -266,7 +266,7 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
     mkdirSync(dir, { recursive: true });
     const outFile = forensic ? join(dir, id + '.out') : null, envelopeFile = join(dir, id + '.envelope.json');
     const child = startLauncher({ spawnFn, spec: toSpec(command.cmd, command.args ?? []), cwd: repoRoot, env: runEnv, platform,
-      files: { outFile, envelopeFile, attemptId: id }, sealed: { report: report === true } });
+      files: { outFile, envelopeFile, attemptId: id }, sealed: { report: report === true, ...(enforcementOptIn(env) ? { monoStamp: true } : {}) } });
     const chunks = [];
     let got = 0;
     // Read the result pipe from the start: a large frame must never block the launcher's write.
@@ -317,10 +317,14 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
         : got > FRAME_CAP ? { reason: `the result exceeds ${FRAME_CAP} bytes` } : decodeSealedFrame(Buffer.concat(chunks), id);
       const h = frame.head;
       const agrees = h !== undefined && status.signal === null && status.code !== null && (status.code === 0) === (h.exit_code === 0);
+      // PR-1b: the deadline decision from the persisted evidence read NOW (lib/deadline.mjs deadlineVerdict): the sweep's
+      // receipt and this frame's monotonic stamp. A runner the sweep signalled, or whose (even agreeing, successful) result came
+      // after a recorded expiry, timed out: never accepted, never runner_output_tampered (the sweep, not the candidate, ended it)
+      const verdict = pgid ? deadlineVerdict({ attempt_id: id, pgid }, dir, { env: agrees ? h : null }) : 'unknown';
+      const overdue = verdict === 'late' || verdict === 'timed_out';
+      if (overdue) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
       if (!agrees) {
-        // PR-1b: a runner the lock-free deadline sweep signalled (its receipt in the run's sweep file) timed out: it is a
-        // timeout like the in-process one, never runner_output_tampered (the sweep, not the candidate, ended it)
-        if (timedOut || (pgid && signalReceipt(dir, { attempt_id: id, pgid }))) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
+        if (timedOut) return { exitCode: null, stdout: '', stderr: '', timedOut, quiescent };
         const why = frame.reason ?? `launcher exit ${status.signal ?? status.code} disagrees with the frame's exit_code ${h.exit_code}`;
         throw Object.assign(coded('runner_output_tampered', `runner result refused: ${why}`), { quiescent });
       }
