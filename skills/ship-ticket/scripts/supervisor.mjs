@@ -326,7 +326,7 @@ async function settle(J, ctx, o) {
     return J.op(o.op_id);
   };
   if (env) {
-    // terminal only with whole-group quiescence proven: a descendant still in the group keeps it unsettled (bounded)
+    // recorded only once whole-group quiescence is proven: a descendant still in the group keeps it unsettled (bounded)
     // the launcher exits right after its envelope: give the group a short bounded moment before counting a probe
     for (const until = performance.now() + QUIESCE_WAIT_MS; o.pgid && deps.isAlive(o.pgid) !== false && performance.now() < until;) await delay(50);
     if (o.pgid && deps.isAlive(o.pgid) !== false) return bounded('group_not_quiescent', 'envelope written but its process group is still alive');
