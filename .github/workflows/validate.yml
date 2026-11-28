@@ -120,6 +120,7 @@ jobs:
           skills/ship-ticket/scripts/eval-cycles.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/engine-accepted.test.mjs
+          skills/ship-ticket/scripts/supervisor.test.mjs
           skills/ship-ticket/scripts/engine-dag.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
           skills/ship-ticket/scripts/brief-start-check.test.mjs
