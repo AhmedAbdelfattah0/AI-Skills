@@ -291,7 +291,10 @@ export async function acquireLock(ctx, options = {}) {
   let staged; // undefined: not staged yet; true: tmp holds our record; false: it cannot be used (the fallback runs)
   const unstage = () => { if (staged) try { unlinkSync(tmp); } catch { /* already gone */ } staged = undefined; };
   const create = () => {
-    if (staged === undefined) { try { writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 }); staged = true; } catch { staged = false; } }
+    if (staged === undefined) { try { writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 }); staged = true; } catch (e) {
+      staged = false;
+      if (e.code !== 'EEXIST') try { unlinkSync(tmp); } catch { /* never created */ } // a partly written temp file (ENOSPC, EIO) is ours
+    } }
     let linked = false;
     if (staged) {
       try { link(tmp, lockFile); linked = true; } catch (e) { if (e.code === 'EEXIST') return false; } // EEXIST: the lock exists
