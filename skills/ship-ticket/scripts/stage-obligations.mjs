@@ -29,10 +29,10 @@ const sha = (s) => 'sha256:' + createHash('sha256').update(s).digest('hex');
 const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : isObj(v) ? `{${Object.keys(v).sort().map(k => `${J(k)}:${canon(v[k])}`).join(',')}}` : J(v));
 
 export const STAGE_LINE = 'stage-policy-v1: ';
-const POLICY_KEYS = ['merge_stage', 'stages', 'rows', 'deferred', 'artifacts', 'runners', 'no_runtime_boundary'];
+const POLICY_KEYS = ['merge_stage', 'stages', 'rows', 'deferred', 'artifacts', 'no_runtime_boundary'];
 const ROW_KEYS = ['id', 'check', 'stage', 'pair'];
 const DEFER_KEYS = ['row', 'stage', 'environment', 'subject', 'required_evidence', 'trigger', 'tracker_ref'];
-const EVIDENCE_KEYS = ['stage', 'environment', 'subject', 'candidate_id', 'ref', 'summary'];
+const EVIDENCE_KEYS = ['stage', 'environment', 'subject', 'candidate_id', 'required_evidence', 'result', 'ref', 'summary'];
 const PAIR = /^[^:]+:VAPT-[A-Z]+-\d+$/;
 
 export const stageOn = (config) => config?.stagePolicy !== undefined;
@@ -45,6 +45,10 @@ export const stageOn = (config) => config?.stagePolicy !== undefined;
  */
 export function parseStagePolicy(narrative, { ticket } = {}) {
   const lines = narrative.split(/\r?\n/).filter(l => l.startsWith(STAGE_LINE));
+  // R1 MINOR-2: the authorizing line must be one the owner sees: never inside an HTML comment (terminated or not) or a code fence.
+  const visible = narrative.replace(/<!--[\s\S]*?(?:-->|$)/g, '').replace(/^(```|~~~)[^\n]*\n[\s\S]*?(?:^\1[^\n]*$|(?![\s\S]))/gm, '')
+    .split(/\r?\n/).filter(l => l.startsWith(STAGE_LINE));
+  if (visible.length !== lines.length) throw coded('stage_policy_invalid', 'a stage-policy line sits inside an HTML comment or a code fence: the approved line must be visible in the rendered plan');
   if (!lines.length) throw coded('stage_policy_missing', `config.stagePolicy needs one "${STAGE_LINE}<json>" line in the approved narrative (the plan approval carries the stage policy)`);
   if (lines.length > 1) throw coded('stage_policy_invalid', 'more than one stage-policy line in the approved narrative');
   let p;
@@ -55,7 +59,9 @@ export function parseStagePolicy(narrative, { ticket } = {}) {
   if (extra.length) bad(`unknown stage policy field(s): ${extra.join(', ')}`);
   if (!Array.isArray(p.stages) || !p.stages.length || !p.stages.every(str) || new Set(p.stages).size !== p.stages.length) bad('stages: the unique stages that exist in this run');
   if (!p.stages.includes(p.merge_stage)) bad('merge_stage must be one of stages (SHIP_READY covers it)');
-  if (!Array.isArray(p.rows) || !p.rows.length) bad('rows: one per verification row of plan §3b');
+  // R1 MINOR-6: `rows` are the verification rows the plan DECLARES here; they are not cross-checked against the §3b table text
+  // (no canonical row inventory exists), so a row missing from this line is simply not stage-checked.
+  if (!Array.isArray(p.rows) || !p.rows.length) bad('rows: the verification rows this plan declares (not cross-checked against the §3b table)');
   const rows = new Map();
   for (const r of p.rows) {
     if (!isObj(r) || Object.keys(r).some(k => !ROW_KEYS.includes(k)) || !str(r.id) || !str(r.check) || !str(r.stage) || (r.pair !== undefined && !(str(r.pair) && PAIR.test(r.pair))))
@@ -80,13 +86,12 @@ export function parseStagePolicy(narrative, { ticket } = {}) {
     throw coded('stage_unavailable', `row ${r.id} (${r.check}) runs at stage ${J(r.stage)}, which does not exist in this run: declare it deferred with a trigger or tracker, or re-plan`);
   const artifacts = p.artifacts ?? [];
   if (!Array.isArray(artifacts) || !artifacts.every(a => str(a) && normalSpecs(a) && (!ticket || a !== `.specs/plans/${ticket}.md`))) bad('artifacts: normalized orchestrator-written paths under .specs/ (never the plan itself)');
-  const runners = p.runners ?? {};
-  if (!isObj(runners) || !Object.values(runners).every(g => Array.isArray(g) && g.every(str))) bad('runners: { <formatted testCommands entry>: [globs of the spec files it runs] }');
   if (p.no_runtime_boundary !== undefined && typeof p.no_runtime_boundary !== 'boolean') bad('no_runtime_boundary must be a boolean');
-  return { merge_stage: p.merge_stage, stages: [...p.stages], rows: [...rows.values()], deferred: [...deferred.values()], artifacts: [...artifacts], runners, no_runtime_boundary: p.no_runtime_boundary === true,
+  return { merge_stage: p.merge_stage, stages: [...p.stages], rows: [...rows.values()], deferred: [...deferred.values()], artifacts: [...artifacts], no_runtime_boundary: p.no_runtime_boundary === true,
     policy_digest: sha(canon(p)) };
 }
-const normalSpecs = (p) => !p.includes('\\') && p.startsWith('.specs/') && p.split('/').every(s => s && s !== '.' && s !== '..');
+// R1 MINOR-3: exact paths only (no glob character), so an artifact never widens the Design Contract beyond itself.
+const normalSpecs = (p) => !/[\\*?[\]{}!]/.test(p) && p.startsWith('.specs/') && p.split('/').every(s => s && s !== '.' && s !== '..');
 
 /** Glob match (`*` one segment, `**` any depth), the reassess Design Contract dialect. */
 function globRe(g) {
@@ -111,8 +116,8 @@ function executable(cmd, root, env = process.env) {
 /**
  * The plan-feasibility checks preflight AND init run for a flagged run (refusals thrown as coded errors):
  * required_artifact_outside_contract (a repository-required artifact, today the design-parity artifact of a `ui` run,
- * is not declared in `artifacts`; a node can never write under .specs/), stage_policy_invalid (a `runners` key that is
- * not a formatted testCommands entry), red_runner_missing (a RED or pair spec no declared runner glob covers),
+ * is not declared in `artifacts`; a node can never write under .specs/), red_runner_missing (a RED or pair spec that no
+ * formatted runner command reaches by a file, directory or glob argument),
  * runner_not_executable (a testCommands cmd that does not resolve to an executable file). `inventoryGaps` is the
  * security-plan pre-scan (path-only, L4): its surface gaps are refused for every block format, and the whole path
  * pre-scan is returned so the plan sees each signal its writes will raise.
@@ -128,13 +133,14 @@ export function feasibility({ policy, config, nodes, ticket, repoRoot, riskLabel
   const runHere = policy.deferred.filter(d => inRun.has(policy.rows.find(r => r.id === d.row).check));
   if (runHere.length) throw coded('stage_deferral_invalid', `deferred row(s) ${runHere.map(d => d.row).join(', ')} name a check this run executes (config.testCommands or a node check): a current-stage control is never deferred`);
   const formatted = Object.keys(tc).filter(k => tc[k].format);
-  const ghost = Object.keys(policy.runners).filter(k => !formatted.includes(k));
-  if (ghost.length) throw coded('stage_policy_invalid', `runners names ${ghost.join(', ')}, not a formatted config.testCommands entry`);
   const specs = [...new Set([...nodes.flatMap(n => (n.redSpecs ?? []).map(s => (typeof s === 'string' ? s : s.file))),
     ...(config.controlCoverage ?? []).flatMap(c => c.specs.map(s => s.file))])].sort();
-  const covered = (f) => Object.values(policy.runners).some(globs => globs.some(g => globRe(g).test(f)));
-  const uncovered = specs.filter(f => !covered(f));
-  if (uncovered.length) throw coded('red_runner_missing', `no declared runner runs RED/proof spec(s) ${uncovered.join(', ')} (stage policy runners): a designed harness is needed before approval`);
+  // R1 (Codex 4): coverage is derived from the COMMAND, never declared: a formatted entry reaches a spec only when one of its
+  // non-option arguments names that file, a directory holding it, or a glob matching it (gate red runs cmd + args as given).
+  const reaches = (f) => formatted.some(k => (tc[k].args ?? []).filter(a => !a.startsWith('-')).map(a => a.replace(/^\.\//, '').replace(/\/+$/, ''))
+    .some(a => a === f || f.startsWith(a + '/') || (/[*?]/.test(a) && globRe(a).test(f))));
+  const uncovered = specs.filter(f => !reaches(f));
+  if (uncovered.length) throw coded('red_runner_missing', `no formatted config.testCommands entry's command reaches RED/proof spec(s) ${uncovered.join(', ')} (by file, directory or glob argument): a designed harness is needed before approval`);
   const notExec = Object.entries(tc).filter(([, e]) => !executable(e.cmd, repoRoot, env)).map(([k, e]) => `${k} (${e.cmd})`);
   if (notExec.length) throw coded('runner_not_executable', `config.testCommands ${notExec.join(', ')} does not resolve to an executable file`);
   if (!sp) return { signal_prescan: [] };
@@ -171,6 +177,7 @@ export function shipStage(S, candidate, base) {
     }
     o.candidate = candidate; o.base = base ?? null; o.generation = generation;
   }
+  // NIT-4: on a same-candidate re-run only `base` (and generation) move, with no lineage entry, as S.ship_ready.base does.
   return { verified_through: st.merge_stage, obligations_open: st.obligations.filter(o => o.status === 'open').map(o => o.row) };
 }
 
@@ -186,18 +193,63 @@ export function verifyObligation(S, row, evidence) {
   if (!o) throw coded('obligation_unknown', `no obligation for row ${row}: obligations come only from the approved stage policy`);
   if (o.candidate === null) throw coded('obligation_unbound', `obligation ${row} is not bound to a candidate yet (SHIP_READY binds it)`);
   if (o.status === 'verified') throw coded('obligation_already_verified', `obligation ${row} is verified for ${o.candidate}`);
-  if (!isObj(evidence) || Object.keys(evidence).length !== EVIDENCE_KEYS.length || !EVIDENCE_KEYS.every(k => str(evidence[k])))
-    throw coded('obligation_evidence_missing', `evidence is exactly { ${EVIDENCE_KEYS.join(', ')} } of non-empty strings`);
-  const off = ['stage', 'environment', 'subject'].filter(k => evidence[k] !== o[k === 'stage' ? 'deferred_stage' : k]);
+  if (!isObj(evidence) || Object.keys(evidence).length !== EVIDENCE_KEYS.length || !EVIDENCE_KEYS.every(k => str(evidence[k])) || !['pass', 'fail'].includes(evidence.result))
+    throw coded('obligation_evidence_missing', `evidence is exactly { ${EVIDENCE_KEYS.join(', ')} } of non-empty strings, result 'pass' or 'fail'`);
+  const off = ['stage', 'environment', 'subject', 'required_evidence'].filter(k => evidence[k] !== o[k === 'stage' ? 'deferred_stage' : k]);
   if (evidence.candidate_id !== o.candidate) off.push('candidate_id');
-  if (off.length) throw coded('obligation_evidence_mismatch', `evidence ${off.join(', ')} differ(s) from obligation ${row} (${o.deferred_stage} / ${o.environment} / ${o.subject} / ${o.candidate})`);
+  if (off.length) throw coded('obligation_evidence_mismatch', `evidence ${off.join(', ')} differ(s) from obligation ${row} (${o.deferred_stage} / ${o.environment} / ${o.subject} / ${o.required_evidence} / ${o.candidate})`);
+  // R1 (Codex 5): a reported failure never verifies; the evidence identity is its ref (the run, job or record it names), not its free text.
+  if (evidence.result !== 'pass') throw coded('obligation_evidence_failed', `evidence ${evidence.ref} reports result ${evidence.result}: obligation ${row} stays open`);
+  const ref = evidence.ref.trim();
+  if (S.stage.obligations.some(x => x.evidence?.ref_id === ref)) throw coded('obligation_evidence_reused', `evidence ref ${ref} already verified an obligation`);
   const digest = sha(canon(evidence));
-  if (S.stage.obligations.some(x => x.evidence?.digest === digest)) throw coded('obligation_evidence_reused', `this evidence record already verified an obligation`);
   o.status = 'verified';
-  o.evidence = { ...evidence, digest, seq: S.seq };
+  o.evidence = { ...evidence, digest, ref_id: ref, seq: S.seq };
   return { event: 'OBLIGATION_VERIFIED', row, deferred_stage: o.deferred_stage, candidate_id: o.candidate, evidence_digest: digest, ref: evidence.ref };
 }
 
-/** The Design Contract extension of a flagged run: its declared orchestrator artifacts (exact paths). */
-export const stageArtifacts = (S) => S.stage?.artifacts ?? [];
+const RS_BEGIN = '<!-- RUN-STATE:BEGIN -->', RS_END = '<!-- RUN-STATE:END -->';
+/** The approved narrative of a plan text: the RUN-STATE body removed (it is never approved content). */
+const narrativeOf = (text) => { const b = text.indexOf(RS_BEGIN), e = text.indexOf(RS_END); return b >= 0 && e > b ? text.slice(0, b) + text.slice(e) : text; };
+
+/**
+ * R1 (Codex 3): the approved stage policy re-read from the plan for gate reassess: `no_runtime_boundary` and `artifacts` come
+ * from the approved line, never from the mutable state record.
+ */
+export function reassessStagePolicy(planText, ticket) {
+  const p = parseStagePolicy(narrativeOf(planText), { ticket });
+  return { no_runtime_boundary: p.no_runtime_boundary, artifacts: p.artifacts };
+}
+
+const IMMUTABLE = ['row', 'check', 'verified_through', 'deferred_stage', 'environment', 'subject', 'required_evidence', 'trigger', 'tracker_ref'];
+const OB_KEYS = [...IMMUTABLE, 'candidate', 'base', 'generation', 'status', 'evidence', 'lineage'].sort().join();
+/**
+ * R1 (Codex 1): on EVERY load, the stage record must be the one the approved policy derives: version, digest, merge stage,
+ * stages, artifacts, no_runtime_boundary and each obligation's immutable fields, in order (none missing, added or edited).
+ * The mutable part is checked for shape: status open (evidence null) or verified (evidence of this candidate with an
+ * identity), lineage an array. Returns a refusal reason, or null.
+ */
+export function stageStateRefusal(S, planText, ticket) {
+  let policy;
+  try { policy = parseStagePolicy(narrativeOf(planText ?? ''), { ticket }); } catch (e) { return `the approved stage policy does not parse (${e.code ?? e.message})`; }
+  const want = initialStage(policy), st = S.stage;
+  if (!isObj(st)) return 'S.stage is not an object';
+  for (const k of ['version', 'policy_digest', 'merge_stage', 'stages', 'artifacts', 'no_runtime_boundary'])
+    if (canon(st[k]) !== canon(want[k])) return `S.stage.${k} is not the approved policy's`;
+  if (Object.keys(st).sort().join() !== Object.keys(want).sort().join()) return 'S.stage has missing or extra fields';
+  if (!Array.isArray(st.obligations) || st.obligations.length !== want.obligations.length) return 'S.stage.obligations is not the approved set (missing or added)';
+  for (const [i, o] of st.obligations.entries()) {
+    const w = want.obligations[i];
+    if (!isObj(o) || Object.keys(o).sort().join() !== OB_KEYS) return `obligation ${i} has missing or extra fields`;
+    const edited = IMMUTABLE.filter(k => canon(o[k]) !== canon(w[k]));
+    if (edited.length) return `obligation ${w.row}: ${edited.join(', ')} differ(s) from the approved policy`;
+    if (!Array.isArray(o.lineage)) return `obligation ${w.row}: lineage is not an array`;
+    if (o.status === 'open') { if (o.evidence !== null) return `obligation ${w.row}: open with evidence`; }
+    else if (o.status === 'verified') {
+      if (!isObj(o.evidence) || o.candidate === null || o.evidence.candidate_id !== o.candidate || o.evidence.result !== 'pass' || !str(o.evidence.ref_id) || !str(o.evidence.digest))
+        return `obligation ${w.row}: verified without pass evidence of its bound candidate`;
+    } else return `obligation ${w.row}: unknown status ${J(o.status)}`;
+  }
+  return null;
+}
 

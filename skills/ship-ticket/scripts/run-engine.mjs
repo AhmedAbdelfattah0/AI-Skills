@@ -40,6 +40,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
+import { stageVersion } from './engine-policy.mjs';
 import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion, durableVersion } from './engine-policy.mjs';
 import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
@@ -52,7 +53,7 @@ import { samePath } from './lib/run-log-paths.mjs';
 import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
-import { stageOn, parseStagePolicy, feasibility, initialStage, verifyObligation } from './stage-obligations.mjs';
+import { stageOn, parseStagePolicy, feasibility, initialStage, verifyObligation, stageStateRefusal } from './stage-obligations.mjs';
 
 export { writeStateAtomic } from './engine-io.mjs';
 /** The ticket's engine lock (S1: in the run's placement: an existing run's, else the default of a new run, durable). */
@@ -168,9 +169,14 @@ function open(ctx, prefer) {
       // V0 single-entry invariant (R1), re-checked on every load: P4r refuses two RECORDS, not two DECLARED entries
       if (E.S.test_kinds && evidenceEntries(E.S.config).map(([n]) => n).join() !== E.S.test_kinds.entry)
         throw coded('multi_entry_unsupported_v0', `the run's evidence entries (${evidenceEntries(E.S.config).map(([n]) => n).join(', ') || 'none'}) are not exactly its bound entry ${E.S.test_kinds.entry}`);
-      // STAB S4: config.stagePolicy and S.stage come together or not at all (a dropped obligation record never ships)
-      if ((E.S.config?.stagePolicy !== undefined) !== (E.S.stage !== undefined))
-        throw coded('stage_state_missing', 'config.stagePolicy and the stage obligation state disagree: a partial stage record is never resumed');
+      // STAB S4: the stageObligations flag of the run's version, config.stagePolicy and S.stage come together or not at all, and
+      // (R1) the stage record is, on EVERY load, exactly the one the approved policy derives (no dropped, added or edited obligation)
+      if (new Set([E.policy.semantics.stageObligations === true, E.S.config?.stagePolicy !== undefined, E.S.stage !== undefined]).size !== 1)
+        throw coded('stage_state_missing', `policy_version ${E.S.policy_version}, config.stagePolicy and the stage obligation state disagree: a partial stage record is never resumed`);
+      if (E.S.stage !== undefined) {
+        const why = stageStateRefusal(E.S, io.readIfExists(P.plan), ctx.ticket);
+        if (why) throw coded('stage_state_invalid', `the stage obligation record does not match the approved stage policy: ${why}; it is never resumed`);
+      }
       // S-12: the pinned-base flag of the run's version, S.base and config.pinnedBase come together or not at all (no partial pin is resumed)
       // (S-12 Round 1: presence is the KEY, so a null/false/0 S.base counts; a pin must be well-formed, never read as no pin)
       if (new Set([E.policy.semantics.pinnedBase === true, Object.hasOwn(E.S, 'base'), pinnedBaseOn(E.S)]).size !== 1)
@@ -433,7 +439,9 @@ export async function preflight(ctx) {
   const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
   return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
     dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix,
-    ...(stage ? { stage: { policy_digest: stage.policy.policy_digest, merge_stage: stage.policy.merge_stage, obligations: stage.policy.deferred.map(d => d.row),
+    ...(stage ? { stage: { policy_digest: stage.policy.policy_digest, merge_stage: stage.policy.merge_stage, stages: stage.policy.stages,
+      no_runtime_boundary: stage.policy.no_runtime_boundary, obligations: stage.policy.deferred.map(d => d.row),
+      deferrals: stage.policy.deferred.map(d => ({ row: d.row, deferred_stage: d.stage, trigger: d.trigger ?? null, tracker_ref: d.tracker_ref ?? null })),
       artifacts: stage.policy.artifacts, signal_prescan: stage.signal_prescan } } : {}) };
 }
 
@@ -441,7 +449,7 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, stage = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
@@ -452,7 +460,10 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false, 
   // S1 (M1): a durable run records the durable row of its other flags (13-24); an engine without one cannot start it
   const recorded = durable ? durableVersion(flagged, engine.semantics) : flagged;
   if (recorded === null) throw coded('policy_version_unsupported', `no durable-run policy version for policy_version ${flagged}`);
-  return { policy_version: runPolicy({ policy_version: recorded }, engine).version,
+  // STAB S4 (R1): a stage run records the stage row of its other flags (25-48), so an engine without S4 refuses to resume it
+  const staged = stage ? stageVersion(recorded, engine.semantics) : recorded;
+  if (staged === null) throw coded('policy_version_unsupported', `no stage-obligation policy version for policy_version ${recorded}`);
+  return { policy_version: runPolicy({ policy_version: staged }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -541,7 +552,7 @@ async function initLocked(ctx, placement) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable'), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', stage !== null), ...(testKinds ? { test_kinds: testKinds } : {}),
       ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
@@ -898,7 +909,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'stage_state_missing']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'stage_state_missing', 'stage_state_invalid']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;

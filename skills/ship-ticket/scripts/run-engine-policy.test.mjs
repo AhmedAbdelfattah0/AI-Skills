@@ -119,7 +119,7 @@ test('[AC3] skillCommit ignores an inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FIL
 test('[seam] policySemantics maps supported versions to frozen capability flags; v1 is today\'s (no flags); anything else is policy_version_unsupported', async () => {
   const { policySemantics, ENGINE_POLICY_VERSION, POLICY_SEMANTICS } = await policy();
   assert.equal(ENGINE_POLICY_VERSION, 1);
-  assert.deepEqual(Object.keys(POLICY_SEMANTICS), Array.from({ length: 24 }, (_, i) => String(i + 1)));
+  assert.deepEqual(Object.keys(POLICY_SEMANTICS), Array.from({ length: 48 }, (_, i) => String(i + 1)));
   assert.deepEqual(policySemantics(1), {});
   assert.deepEqual(policySemantics(2), { testKinds: true }, 'v2 (S-01b2 P5r) adds the test-kind freeze gate');
   assert.deepEqual(policySemantics(3), { securityObligations: true }, 'v3 (F12a) binds a format-3 security block (dropped pairs)');
@@ -133,8 +133,13 @@ test('[seam] policySemantics maps supported versions to frozen capability flags;
     assert.deepEqual(policySemantics(v + 12), { ...policySemantics(v), durableRun: true }, `v${v + 12} is v${v} as a durable run`);
     assert.equal(policySemantics(v).durableRun, undefined, `v${v} has no durable flag`);
   }
-  assert.ok(Array.from({ length: 24 }, (_, i) => i + 1).every((v) => Object.isFrozen(policySemantics(v))) && Object.isFrozen(POLICY_SEMANTICS));
-  for (const v of [25, 0, -1, 1.5, '1', null, undefined]) {
+  // STAB S4: 25-48 are 1-24 plus stageObligations (config.stagePolicy); 1-24 are unchanged
+  for (let v = 1; v <= 24; v++) {
+    assert.deepEqual(policySemantics(v + 24), { ...policySemantics(v), stageObligations: true }, `v${v + 24} is v${v} with stage obligations`);
+    assert.equal(policySemantics(v).stageObligations, undefined, `v${v} has no stage flag`);
+  }
+  assert.ok(Array.from({ length: 48 }, (_, i) => i + 1).every((v) => Object.isFrozen(policySemantics(v))) && Object.isFrozen(POLICY_SEMANTICS));
+  for (const v of [49, 0, -1, 1.5, '1', null, undefined]) {
     assert.throws(() => policySemantics(v), (e) => e.code === 'policy_version_unsupported', `version ${JSON.stringify(v)}`);
   }
 });
@@ -146,7 +151,7 @@ test('[seam] runPolicy: a missing key is version 1 (oldest); a present key is ta
   assert.deepEqual(runPolicy({}, newer), { version: 1, semantics: {} }, 'legacy state under a v2 engine keeps v1 semantics');
   assert.deepEqual(runPolicy({ policy_version: 1 }, newer), { version: 1, semantics: {} });
   assert.deepEqual(runPolicy({ policy_version: 2 }, newer), { version: 2, semantics: { strictThing: true } });
-  for (const v of [25, null, '1', 0, 1.5]) { // S-12: 5-8 are supported (pinned base), S-28a: 9-12 (repoIdentity), S1: 13-24 (durableRun); 25 is the next unsupported version
+  for (const v of [49, null, '1', 0, 1.5]) { // S-12: 5-8 are supported (pinned base), S-28a: 9-12 (repoIdentity), S1: 13-24 (durableRun), S4: 25-48 (stageObligations); 49 is the next unsupported version
     assert.throws(() => runPolicy({ policy_version: v }), (e) => e.code === 'policy_version_unsupported'
       && e.message.includes(JSON.stringify(v)) && /supports policy_version 1\b/.test(e.message), `state version ${JSON.stringify(v)}`);
   }
@@ -198,19 +203,19 @@ function evalReport(fx) {
   return { status: r.status, out: null, stderr: r.stderr, stdout: r.stdout };
 }
 
-test('[AC2] an engine without v25 (it supports 1 to 24) refuses a v25 run at EVERY entry command with policy_version_unsupported naming both versions, writing nothing', async (t) => {
-  // The v25 run is created by an injected v25 engine (a real upgrade), then every command runs through the installed v1..v24 CLI (the downgrade).
-  // S-12: not v5, since 5-8 (a pinned remote base) are supported by this engine; S-28a: v25, since 9-12 (repoIdentity) and S1: 13-24 (durableRun) are too.
+test('[AC2] an engine without v49 (it supports 1 to 48) refuses a v49 run at EVERY entry command with policy_version_unsupported naming both versions, writing nothing', async (t) => {
+  // The v49 run is created by an injected v49 engine (a real upgrade), then every command runs through the installed v1..v48 CLI (the downgrade).
+  // S-12: not v5, since 5-8 (a pinned remote base) are supported by this engine; S-28a: v49, since 9-12 (repoIdentity) and S1: 13-24 (durableRun) and S4: 25-48 (stageObligations) are too.
   const fx = fixture(t, { commit: true });
-  await engine.init(fx.ctx({ policy: { current: 25, semantics: { 1: {}, 2: {}, 3: {}, 4: {}, 25: {} } } }));
+  await engine.init(fx.ctx({ policy: { current: 49, semantics: { 1: {}, 2: {}, 3: {}, 4: {}, 49: {} } } }));
   const before = readFileSync(fx.stateFile());
-  assert.equal(JSON.parse(before).policy_version, 25);
+  assert.equal(JSON.parse(before).policy_version, 49);
   for (const [name, run, exit] of ENTRY) {
     const r = run(fx);
     assert.equal(r.status, exit, `${name}: exit ${r.status}\n${r.stdout}${r.stderr}`);
     const text = r.stderr + (r.out ? JSON.stringify(r.out) : '');
     assert.match(text, /policy_version_unsupported/, `${name}: coded refusal\n${r.stdout}${r.stderr}`);
-    assert.match(text, /policy_version 25/, `${name}: names the run's version`);
+    assert.match(text, /policy_version 49/, `${name}: names the run's version`);
     assert.match(text, /supports policy_version 1\b/, `${name}: names the engine's version`);
     if (exit === 2) assert.deepEqual([r.out.ok, r.out.code, r.out.judgment_point], [false, 'policy_version_unsupported', true], name);
     assert.deepEqual(readFileSync(fx.stateFile()), before, `${name}: state bytes unchanged`);
@@ -231,16 +236,16 @@ test('[AC2] a present but malformed policy_version is refused, never read as leg
 
 test('[AC2] archive stays open for an unsupported run (it copies bytes and applies no semantics: the rollback rescue path)', (t) => {
   const fx = initialised(t);
-  fx.editState((s) => { s.policy_version = 25; });
+  fx.editState((s) => { s.policy_version = 49; });
   const r = fx.cli('archive');
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.equal(JSON.parse(readFileSync(join(r.out.archive, 'state.json'), 'utf8')).policy_version, 25);
+  assert.equal(JSON.parse(readFileSync(join(r.out.archive, 'state.json'), 'utf8')).policy_version, 49);
 });
 
 test('[AC2] the carrier refuses to authorize a REPAIR from the engine state of an unsupported run', async (t) => {
   const { verifyReviewExecution } = await import('./carrier.mjs');
   const fx = initialised(t);
-  fx.editState((s) => { s.policy_version = 25; s.review_chain = [{ review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', write_set: ['src/a.txt'] }]; });
+  fx.editState((s) => { s.policy_version = 49; s.review_chain = [{ review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', write_set: ['src/a.txt'] }]; });
   assert.throws(() => verifyReviewExecution(fx.repo, { ticket: 'T-1', run_id: 'run-1' }, 'rx-1', ['src/a.txt']), /policy_version_unsupported/);
   fx.editState((s) => { delete s.policy_version; });
   assert.equal(verifyReviewExecution(fx.repo, { ticket: 'T-1', run_id: 'run-1' }, 'rx-1', ['src/a.txt']), 'engine', 'a legacy state still authorizes');

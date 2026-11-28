@@ -7,7 +7,8 @@
  * ============================ CONTRACT (S4, PROVISIONAL, UNQUALIFIED) ============================
  * stage-policy-v1 line (approved narrative, so the plan digest binds it): { merge_stage, stages[], rows[{id, check,
  *   stage, pair?}], deferred[{row, stage, environment, subject, required_evidence, trigger? | tracker_ref?}],
- *   artifacts?[], runners?{entry: [globs]}, no_runtime_boundary? }.
+ *   artifacts?[] (exact .specs/ paths), no_runtime_boundary? }. RED/pair spec coverage is derived from the runner COMMAND
+ *   (an argument naming the spec, a directory holding it or a glob matching it), never declared.
  * obligation: a deferred row becomes an OPEN obligation {row, verified_through: merge_stage, deferred_stage, environment,
  *   subject, required_evidence, trigger, tracker_ref, candidate, base, generation, status, lineage[]}: never a waiver,
  *   never verified by SHIP_READY. SHIP_READY covers the merge stage only and lists the open obligations.
@@ -72,7 +73,7 @@ const specText = (list) => `import test from 'node:test';\nimport assert from 'n
 function secRun(t, { policy, flag = true, nodes = [], config = {}, implFiles = {} } = {}) {
   const sel = realSelection();
   const cov = sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] }));
-  const pol = policy ?? { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [], runners: { unit: ['spec/**'] } };
+  const pol = policy ?? { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [] };
   const fx = fixture(t, { commit: true, narrativeExtra: SP.renderSection3a(sel) + '\n\n' + (pol === null ? '' : stageLine(pol) + '\n\n'),
     config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } },
       securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: cov, ...(flag ? { stagePolicy: { version: 1 } } : {}), ...config },
@@ -90,7 +91,7 @@ test('[P6-N1] a deferral with no trigger and no tracker is refused (preflight an
   const bare = POLICY_236(); delete bare.deferred[0].tracker_ref;
   const fx = stageRun(t, { policy: bare });
   assert.equal(initCode(fx.cli('init', { dag: fx.dagFile })), 'obligation_trigger_missing');
-  const sec = secRun(t, { policy: { ...bare, runners: { unit: ['spec/**'] } } });
+  const sec = secRun(t, { policy: { ...bare } });
   await rejects(pf(sec), 'obligation_trigger_missing');
   // positive twins: a tracker or a trigger
   const good = stageRun(t);
@@ -145,7 +146,8 @@ test('[P6-N3] a rebased or changed candidate re-binds the obligation (lineage ke
   okc(fx.gate('review', passReview('review-1', c1)), 'review 1');
   okc(fx.gate('ship-ready', {}), 'ship-ready 1');
   const ev = join(fx.root, 'ev.json');
-  writeFileSync(ev, J({ stage: 'production', environment: 'production', subject: 'api release of this candidate', candidate_id: c1, ref: 'gh-run-1', summary: 'probe passed' }));
+  writeFileSync(ev, J({ stage: 'production', environment: 'production', subject: 'api release of this candidate', candidate_id: c1,
+    required_evidence: 'read-only probe output against production after deploy', result: 'pass', ref: 'gh-run-1', summary: 'probe passed' }));
   okc(fx.cli('obligation-verify', { id: 'R2', input: ev }), 'verify on c1');
   assert.equal(fx.readState().stage.obligations[0].status, 'verified');
   // the candidate changes through the engine's own path: an owner RETRY review (FAIL), its repair, the confirmation
@@ -173,7 +175,8 @@ test('[P6-N4] the deferred stage cannot be marked verified without new evidence 
   okc(fx.cli('init', { dag: fx.dagFile }), 'init');
   const ev = join(fx.root, 'ev.json');
   const verify = (id, e) => { writeFileSync(ev, J(e)); return fx.cli('obligation-verify', { id, input: ev }); };
-  const good = (c) => ({ stage: 'production', environment: 'production', subject: 'api release of this candidate', candidate_id: c, ref: 'gh-run-7', summary: 'probe passed' });
+  const good = (c) => ({ stage: 'production', environment: 'production', subject: 'api release of this candidate', candidate_id: c,
+    required_evidence: 'read-only probe output against production after deploy', result: 'pass', ref: 'gh-run-7', summary: 'probe passed' });
   // unbound: no SHIP_READY yet, so there is no candidate the evidence could be for
   assert.equal(verify('R2', good('x'.repeat(64))).out?.code, 'obligation_unbound');
   okc(fx.cli('drive'), 'drive');
@@ -186,12 +189,17 @@ test('[P6-N4] the deferred stage cannot be marked verified without new evidence 
   assert.equal(code(verify('R2', { ...good(cand), stage: 'merge' })), 'obligation_evidence_mismatch', 'merge-stage evidence is not production evidence');
   assert.equal(code(verify('R2', { ...good(cand), environment: 'staging' })), 'obligation_evidence_mismatch');
   assert.equal(code(verify('R2', { ...good(cand), candidate_id: 'f'.repeat(64) })), 'obligation_evidence_mismatch');
+  assert.equal(code(verify('R2', { ...good(cand), required_evidence: 'a screenshot' })), 'obligation_evidence_mismatch', 'evidence of another kind than the obligation requires');
+  assert.equal(code(verify('R2', { ...good(cand), result: 'fail', summary: 'probe FAILED: rls off' })), 'obligation_evidence_failed', 'a reported failure never verifies');
+  assert.equal(code(verify('R2', { ...good(cand), result: 'passed' })), 'obligation_evidence_missing', 'result is exactly pass or fail');
   assert.equal(code(verify('R9', good(cand))), 'obligation_unknown', 'no runtime path creates an obligation');
   for (const r of ['R2']) assert.equal(fx.readState().stage.obligations.find((o) => o.row === r).status, 'open');
   okc(verify('R2', good(cand)), 'new evidence verifies');
   assert.equal(fx.readState().stage.obligations.find((o) => o.row === 'R2').status, 'verified');
   // the same evidence (identical record) cannot verify a second obligation
-  assert.equal(code(verify('R3', good(cand))), 'obligation_evidence_reused');
+  assert.equal(code(verify('R3', good(cand))), 'obligation_evidence_mismatch', 'R3 requires other evidence');
+  assert.equal(code(verify('R3', { ...good(cand), required_evidence: 'DKIM lookup output' })), 'obligation_evidence_reused');
+  assert.equal(code(verify('R3', { ...good(cand), required_evidence: 'DKIM lookup output', summary: 'a different text, same run' })), 'obligation_evidence_reused', 'identity is the evidence ref, not its free text');
   assert.equal(fx.readState().stage.obligations.find((o) => o.row === 'R3').status, 'open');
   assert.equal(code(verify('R2', good(cand))), 'obligation_already_verified');
   const ids = runStateEvents(fx.planFile).filter((e) => e.event === 'OBLIGATION_VERIFIED');
@@ -221,7 +229,7 @@ test('[P6-N5] a failed CURRENT-stage control can never be deferred: an available
   const sec = secRun(t);
   const pair = `${sec.sel.pairs[0].boundary_id}:${sec.sel.pairs[0].control_id}`;
   const sp = secRun(t, { policy: { ...POLICY_236(), rows: [...POLICY_236().rows, { id: 'P1', check: pair, stage: 'production', pair }],
-    deferred: [...POLICY_236().deferred, { row: 'P1', stage: 'production', environment: 'production', subject: 'x', required_evidence: 'y', tracker_ref: 'T-9' }], runners: { unit: ['spec/**'] } } });
+    deferred: [...POLICY_236().deferred, { row: 'P1', stage: 'production', environment: 'production', subject: 'x', required_evidence: 'y', tracker_ref: 'T-9' }] } });
   await rejects(pf(sp), 'stage_deferral_invalid');
   // runtime: gate inputs carry no deferral
   const fx = stageRun(t);
@@ -249,7 +257,7 @@ test('[P6-N0] a row whose stage does not exist must be declared deferred; the st
 // =============================================================================================== preflight
 
 test('[P6-N6a] 124 v1 plan: a UI run whose plan omits the parity artifact is refused BEFORE approval (preflight) and at init; declared, it passes', { skip: WIN_SKIP }, async (t) => {
-  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [], runners: { unit: ['spec/**'] } };
+  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [] };
   const v1 = secRun(t, { policy: pol, config: { riskLabels: ['ui'] } });
   await rejects(pf(v1), 'required_artifact_outside_contract');
   assert.equal(initCode(v1.cli('init', { dag: v1.dagFile })), 'required_artifact_outside_contract', 'init runs the same check (preflight is not optional)');
@@ -262,16 +270,23 @@ test('[P6-N6a] 124 v1 plan: a UI run whose plan omits the parity artifact is ref
   await rejects(pf(self), 'stage_policy_invalid');
 });
 
-test('[P6-N6b] 124 RED for a new client file: a RED spec no formatted runner covers is refused before approval; a runner command that is not executable is refused', { skip: WIN_SKIP }, async (t) => {
+test('[P6-N6b] 124 RED for a new client file: a RED spec the runner COMMAND cannot reach is refused before approval; a declared coverage list is not accepted; a runner command that is not executable is refused', { skip: WIN_SKIP }, async (t) => {
   const client = { id: 'client', deps: [], writes: ['apps/admin'], redSpecs: [{ file: 'apps/admin/src/settings.service.spec.ts', name: 'loads settings' }] };
-  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [], runners: { unit: ['spec/**'] } };
+  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [] };
   const v1 = secRun(t, { policy: pol, nodes: [client] });
   await rejects(pf(v1), 'red_runner_missing');
-  const v2 = secRun(t, { policy: { ...pol, runners: { unit: ['spec/**', 'apps/admin/**/*.spec.ts'] } }, nodes: [client] });
-  assert.equal((await pf(v2)).code, 'preflight_ok');
-  // a runner entry named in `runners` that is not a formatted testCommands entry is invalid
-  const ghost = secRun(t, { policy: { ...pol, runners: { unit: ['spec/**'], karma: ['apps/**'] } } });
-  await rejects(pf(ghost), 'stage_policy_invalid');
+  // a declared coverage list (the former `runners` field) is refused: coverage is never invented by declaration
+  const declared = secRun(t, { policy: { ...pol, runners: { unit: ['spec/**', 'apps/admin/**/*.spec.ts'] } }, nodes: [client] });
+  await rejects(pf(declared), 'stage_policy_invalid');
+  // a runner whose command really reaches the spec: by file, by directory, by glob
+  const UNIT = { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' };
+  for (const arg of ['apps/admin/src/settings.service.spec.ts', 'apps/admin', 'apps/admin/**/*.spec.ts']) {
+    const v2 = secRun(t, { policy: pol, nodes: [client], config: { testCommands: { unit: UNIT, client: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', arg], format: 'tap' } } } });
+    assert.equal((await pf(v2)).code, 'preflight_ok', arg);
+  }
+  // an unformatted entry naming the spec is not a RED runner (RED parses formatted output)
+  const raw = secRun(t, { policy: pol, nodes: [client], config: { testCommands: { unit: UNIT, client: { cmd: process.execPath, args: ['--test', 'apps/admin'] } } } });
+  await rejects(pf(raw), 'red_runner_missing');
   // executability: a relative script that does not exist, and one without the executable bit
   const missing = secRun(t, { policy: pol, config: { testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' }, lint: { cmd: './scripts/lint.sh', args: [] } } } });
   await rejects(pf(missing), 'runner_not_executable');
@@ -365,6 +380,14 @@ test('[P6-N7b] a seeded server route can NEVER close by the disposition: bare, m
     ['src/server/settings.ts', ["this.api.route('/settings').get(handler);"]], // route() chains register handlers
     ['src/server/settings.ts', ["this.api.route({ method: 'GET', url: '/x', handler: h });"]],
     ['src/server/settings.ts', ["this.api.all('/x');"]],
+    ['src/server/settings.ts', ["this.api.get('/settings', { handler: handleSettings }.handler);"]], // an object expression, not a plain literal
+    ['src/server/settings.ts', ["this.api.get('/settings' /* ) */, handleSettings);"]], // a comment hides the real argument list
+    ['src/server/settings.ts', ["this.api.get('/x' /* ' */, this.handle /* ' */);"]],
+    ['src/server/settings.ts', ["this.api.get(/'/, h, /'/);"]], // regex literals
+    ['src/server/settings.ts', ["this.api.get('/x'); // , handler"]],
+    ['src/server/settings.ts', ["this.api.get('/x', { params: h });"]], // an identifier value could be anything
+    ['src/server/settings.ts', ["this.api.get(`/x/${mount(h)}`);"]], // a template with a call inside
+    ['src/server/settings.ts', ["this.api.get(makeUrl(h));"]],
     ['src/server/settings.ts', ["this.api.get('/x'); fastify.get('/y', h);"]],
     ['src/server/settings.ts', ['@Get(":id")', CLIENT_LINE]],
     ['src/server/settings.ts', ['export async function GET(req) {', CLIENT_LINE]],
@@ -416,7 +439,7 @@ test('[P6-N7c] the disposition is bound to the candidate and the matched lines: 
 });
 
 test('[P6-N7d] engine: gate reassess honours a disposition only on an approved no_runtime_boundary stage policy; sticky REAPPROVAL is never cleared by one', { skip: WIN_SKIP }, async (t) => {
-  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [], runners: { unit: ['spec/**'] },
+  const pol = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }], deferred: [],
     no_runtime_boundary: true, artifacts: ['.specs/design-parity/T-1.md'] };
   const client = 'src/settings.service.ts';
   const fx = secRun(t, { policy: pol, implFiles: { [client]: `export class S {\n  async load() {\n${CLIENT_LINE}\n  }\n}\n` } });
@@ -468,4 +491,96 @@ test('[P6-N8] a flagged run whose state lost its stage record never resumes (no 
   const sr = fx.gate('ship-ready', {});
   assert.equal(sr.out?.code ?? (/stage_state_missing/.test(sr.stderr) ? 'stage_state_missing' : sr.stdout), 'stage_state_missing');
   assert.equal(runStateEvents(fx.planFile).filter((e) => e.event === 'SHIP_READY').length, 0);
+});
+
+test('[P6-R1] the stage record is checked against the approved policy on EVERY load: a dropped obligation, a flipped no_runtime_boundary or an edited immutable field is never resumed', { skip: WIN_SKIP }, async (t) => {
+  const tamper = [
+    ['obligations emptied', (st) => { st.stage.obligations = []; }],
+    ['obligation added', (st) => { st.stage.obligations.push({ ...st.stage.obligations[0], row: 'R9' }); }],
+    ['no_runtime_boundary flipped', (st) => { st.stage.no_runtime_boundary = true; }],
+    ['stages widened', (st) => { st.stage.stages = [...st.stage.stages, 'production']; }],
+    ['artifacts widened', (st) => { st.stage.artifacts = ['.specs/x.md']; }],
+    ['required_evidence edited', (st) => { st.stage.obligations[0].required_evidence = 'nothing'; }],
+    ['policy digest edited', (st) => { st.stage.policy_digest = 'sha256:' + '0'.repeat(64); }],
+    ['status forged verified without evidence', (st) => { st.stage.obligations[0].status = 'verified'; }],
+    ['unknown status', (st) => { st.stage.obligations[0].status = 'waived'; }],
+  ];
+  for (const [what, edit] of tamper) {
+    const fx = stageRun(t);
+    okc(fx.cli('init', { dag: fx.dagFile }), 'init');
+    fx.editState(edit);
+    const st = fx.cli('status');
+    assert.notEqual(st.status, 0, what);
+    assert.match(st.stderr, /stage_state_invalid/, `${what}: ${st.stderr}`);
+    const sr = fx.gate('ship-ready', {});
+    assert.notEqual(sr.status, 0, what);
+    assert.equal(runStateEvents(fx.planFile).filter((e) => e.event === 'SHIP_READY').length, 0, what);
+  }
+  // the mutable part stays mutable: the engine's own binding loads fine
+  const fx = stageRun(t);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive');
+  okc(fx.gate('review', passReview('review-1', fx.candidate())), 'review'); okc(fx.gate('ship-ready', {}), 'ship-ready');
+  okc(fx.cli('status'), 'status after binding');
+});
+
+test('[P6-R1b] gate reassess derives no_runtime_boundary and artifacts from the approved policy, never from mutable state', async () => {
+  const { reassessStagePolicy } = await import('./stage-obligations.mjs');
+  const plan = (p) => `# Plan\n\n${stageLine(p)}\n\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n`;
+  const off = reassessStagePolicy(plan({ ...POLICY_236() }), 'T-1');
+  assert.equal(off.no_runtime_boundary, false);
+  assert.deepEqual(off.artifacts, []);
+  const on = reassessStagePolicy(plan({ ...POLICY_236(), no_runtime_boundary: true, artifacts: ['.specs/design-parity/T-1.md'] }), 'T-1');
+  assert.equal(on.no_runtime_boundary, true);
+  assert.deepEqual(on.artifacts, ['.specs/design-parity/T-1.md']);
+  const hidden = `# Plan\n\n${stageLine(POLICY_236())}\n\n<!-- RUN-STATE:BEGIN -->\n${stageLine({ ...POLICY_236(), no_runtime_boundary: true })}\n<!-- RUN-STATE:END -->\n`;
+  assert.equal(reassessStagePolicy(hidden, 'T-1').no_runtime_boundary, false, 'a line in the RUN-STATE body is never the approved one');
+});
+
+test('[P6-R3] a stage run records a distinguishable policy version: an engine without S4 (the main policy table, 1-24) refuses to resume it', { skip: WIN_SKIP }, async (t) => {
+  const POL = await import('./engine-policy.mjs');
+  const fx = stageRun(t);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init');
+  const v = fx.readState().policy_version;
+  assert.ok(v >= 25 && v <= 48, `stage run version ${v}`);
+  assert.deepEqual(POL.POLICY_SEMANTICS[v], { ...POL.POLICY_SEMANTICS[v - 24], stageObligations: true });
+  const main = { current: 1, semantics: Object.fromEntries(Array.from({ length: 24 }, (_, i) => [i + 1, POL.POLICY_SEMANTICS[i + 1]])) };
+  assert.throws(() => POL.runPolicy({ policy_version: v }, main), (e) => e.code === 'policy_version_unsupported');
+  const { status } = await import('./run-engine.mjs');
+  await rejects(status(fx.ctx({ policy: main })), 'policy_version_unsupported');
+  const plain = stageRun(t, { flag: false, line: false });
+  okc(plain.cli('init', { dag: plain.dagFile }), 'init plain');
+  assert.ok(plain.readState().policy_version <= 24, 'a non-stage run keeps its S1 version');
+  plain.editState((st) => { st.policy_version += 24; });
+  assert.match(plain.cli('status').stderr, /stage_state_missing/, 'version and stage record come together');
+});
+
+test('[P6-R4] the approved stage line must be visible (not in an HTML comment or code fence); artifacts are exact paths; preflight echoes the authorizing fields', { skip: WIN_SKIP }, async (t) => {
+  const { parseStagePolicy } = await import('./stage-obligations.mjs');
+  const code = (n) => { try { parseStagePolicy(n, { ticket: 'T-1' }); return 'ok'; } catch (e) { return e.code; } };
+  assert.equal(code(`x\n${stageLine(POLICY_236())}\n`), 'ok');
+  assert.equal(code(`x\n<!--\n${stageLine(POLICY_236())}\n-->\n`), 'stage_policy_invalid');
+  assert.equal(code(`x\n\`\`\`\n${stageLine(POLICY_236())}\n\`\`\`\n`), 'stage_policy_invalid');
+  assert.equal(code(`x\n${stageLine(POLICY_236())}\n<!--\n${stageLine(POLICY_236())}\n-->\n`), 'stage_policy_invalid', 'a hidden second line');
+  assert.equal(code(`x\n<!-- unterminated\n${stageLine(POLICY_236())}\n`), 'stage_policy_invalid');
+  for (const a of ['.specs/**', '.specs/plans/*.md', '.specs/design-parity/T-?.md', '.specs/[ab].md', '.specs/{a,b}.md'])
+    assert.equal(code(`${stageLine({ ...POLICY_236(), artifacts: [a] })}\n`), 'stage_policy_invalid', a);
+  const fx = secRun(t, { policy: { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'pair specs', stage: 'local' }, { id: 'R2', check: 'prod probe', stage: 'production' }],
+    deferred: [{ row: 'R2', stage: 'production', environment: 'production', subject: 's', required_evidence: 'e', tracker_ref: 'TRK-1' }], no_runtime_boundary: true } });
+  const r = await pf(fx);
+  assert.deepEqual(r.stage.stages, ['local', 'merge']);
+  assert.equal(r.stage.no_runtime_boundary, true);
+  assert.deepEqual(r.stage.deferrals, [{ row: 'R2', deferred_stage: 'production', trigger: null, tracker_ref: 'TRK-1' }]);
+});
+
+// Frozen-behaviour pins of the real hazards (NIT-2): each held on 83c731a and still holds today WITHOUT config.stagePolicy.
+test('[P6-H1..H5] frozen hazards stay frozen without the flag: parity artifact, runner reach, missing command, `this.api.get(`, sticky REAPPROVAL', { skip: WIN_SKIP }, async (t) => {
+  assert.equal((await pf(secRun(t, { flag: false, policy: null, config: { riskLabels: ['ui'] } }))).code, 'preflight_ok', 'H1');
+  assert.equal((await pf(secRun(t, { flag: false, policy: null, nodes: [{ id: 'client', deps: [], writes: ['apps/admin'], redSpecs: [{ file: 'apps/admin/src/settings.service.spec.ts', name: 'loads settings' }] }] }))).code, 'preflight_ok', 'H2');
+  assert.equal((await pf(secRun(t, { flag: false, policy: null, config: { testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' }, lint: { cmd: './scripts/lint.sh', args: [] } } } }))).code, 'preflight_ok', 'H3');
+  const id = `new-route@${CLIENT}`;
+  for (const c of [[], [{ signal_id: id, reason: 'HTTP client call' }]]) assert.equal(rea([{ path: CLIENT, added: [CLIENT_LINE] }], { allow: false, classifications: c }).code, 'classification_missing', 'H4');
+  const fx = secRun(t, { flag: false, policy: null });
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive');
+  mkdirSync(join(fx.repo, '.specs', 'design-parity'), { recursive: true }); writeFileSync(join(fx.repo, '.specs', 'design-parity', 'T-1.md'), '# parity\n');
+  assert.equal(fx.gate('reassess', {}).out?.code, 'security_reapproval', 'H5');
 });

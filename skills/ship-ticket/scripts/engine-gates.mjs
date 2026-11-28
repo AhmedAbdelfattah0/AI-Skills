@@ -22,7 +22,7 @@ import { checkedIdentity, identityStage } from './engine-identity.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
-import { shipStage, stageArtifacts } from './stage-obligations.mjs';
+import { shipStage, reassessStagePolicy } from './stage-obligations.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -814,13 +814,15 @@ async function reassessGate(E, input, candidate) {
   if (refusal) return refusal;
   const plan = io.readIfExists(E.P.plan) ?? '';
   // STAB S4: a disposition needs the approved stage policy's no_runtime_boundary (the DAG flag alone never loosens the classifier).
-  const allowDispositions = S.stage?.no_runtime_boundary === true;
+  // R1 (Codex 1): read from the APPROVED line (the plan narrative the binding just verified), never from the mutable S.stage record.
+  const approvedStage = S.stage ? reassessStagePolicy(plan, S.ticket) : { no_runtime_boundary: false, artifacts: [] };
+  const allowDispositions = approvedStage.no_runtime_boundary === true;
   if (input.dispositions !== undefined && !allowDispositions) return gateNo('disposition_not_approved', ['the approved stage policy does not set no_runtime_boundary: a disposition closes nothing on this run']);
   // The input surfaces pass straight through: reassess unites them with the approved ones (an identical one is
   // that surface; one that redefines an approved boundary id is refused bad_input; one outside the Design
   // Contract is a REAPPROVAL basis).
   const res = sec.sp.reassess({ plan, catalog: sec.catalog, inventory: { candidate_id: candidate, surfaces: input.surfaces ?? [] },
-    changed: { contract_paths: [...designContract(Object.values(S.nodes)), ...stageArtifacts(S)], files: changedFiles(E, E.candidatePaths ?? []) },
+    changed: { contract_paths: [...designContract(Object.values(S.nodes)), ...approvedStage.artifacts], files: changedFiles(E, E.candidatePaths ?? []) },
     classifications: input.classifications ?? [], addenda: sec.events.addenda.map(a => ({ pairs: a.pairs.map(pairKey) })),
     ...(allowDispositions ? { allowDispositions, ...(input.dispositions ? { dispositions: input.dispositions } : {}) } : {}) });
   const briefs = res.disposition_briefs ? { disposition_briefs: res.disposition_briefs } : {};

@@ -1038,6 +1038,39 @@ function callArgs(l, from) {
   }
   return null;
 }
+/** Why the line cannot be lexed with strings alone ('/' outside a string, a non-trivial `${}`), or null. */
+function unquotedProblem(l) {
+  let q = null;
+  for (let i = 0; i < l.length; i++) {
+    const ch = l[i];
+    if (q) {
+      if (ch === '\\') { i++; continue; }
+      if (q === '`' && ch === '$' && l[i + 1] === '{') {
+        const end = l.indexOf('}', i + 2);
+        if (end < 0 || !/^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*$/.test(l.slice(i + 2, end))) return 'a template interpolation that is not a plain name';
+        i = end; continue;
+      }
+      if (ch === q) q = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') q = ch;
+    else if (ch === '/') return "a '/' outside a string (comment, regex literal or division): the line cannot be verified";
+  }
+  return q ? 'an unterminated string' : null;
+}
+/** A plain first argument: a string literal, a template (its interpolations already checked), or a name / member path. */
+const PLAIN_FIRST = /^(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[^`]*`|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)$/;
+const LITERAL = /^(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)$/;
+/** A plain object literal: { key: <literal | plain object>, ... } and nothing after its closing brace. */
+function plainObject(x) {
+  if (!x.startsWith('{') || !x.endsWith('}')) return false;
+  const body = x.slice(1, -1).trim();
+  if (!body) return true;
+  return topLevelArgs(body).every((kv) => {
+    const m = /^(?:[A-Za-z_$][\w$]*|'[^']*'|"[^"]*")\s*:\s*([\s\S]+)$/.exec(kv);
+    return Boolean(m) && (LITERAL.test(m[1].trim()) || plainObject(m[1].trim()));
+  });
+}
 /** The top-level comma-separated arguments of `args` (quotes and brackets respected), trimmed; [] for none. */
 function topLevelArgs(args) {
   const out = [];
@@ -1057,6 +1090,10 @@ function topLevelArgs(args) {
 /** Why `l` (a route-shaped added line) is not a client-only line, or null when every route-shaped match is a client call. */
 function serverForm(l) {
   if (ROUTE_LINE_V3.test(l)) return 'a format-3 route registration form';
+  // R1 (Codex 2, Opus MINOR-4): the scanner knows strings only, so any '/' outside a string (a comment, a regex literal or a
+  // division) and any template interpolation that is not a plain name or member path make the line unverifiable: refused.
+  const lexed = unquotedProblem(l);
+  if (lexed) return lexed;
   let m, any = false;
   NEW_ROUTE_ALL.lastIndex = 0;
   while ((m = NEW_ROUTE_ALL.exec(l))) {
@@ -1067,7 +1104,9 @@ function serverForm(l) {
     const args = callArgs(l, m.index + m[0].length);
     if (args === null) return 'the call does not close on its line (cannot be verified)';
     if (/=>|\bfunction\b/.test(args)) return 'a handler-shaped argument';
-    if (topLevelArgs(args).slice(1).some((x) => !x.startsWith('{'))) return 'a non-literal argument after the first (it could be a handler)';
+    const parts = topLevelArgs(args);
+    if (parts.length && !PLAIN_FIRST.test(parts[0])) return 'a first argument that is not a string literal, template or plain name';
+    if (parts.slice(1).some((x) => !plainObject(x))) return 'an argument after the first that is not a plain object literal of literal values (it could be a handler)';
   }
   return any ? null : 'no route-shaped match';
 }

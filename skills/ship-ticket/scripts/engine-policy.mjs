@@ -23,7 +23,7 @@ export const ENGINE_POLICY_VERSION = 1;
  * Version 2 (S-01b2 P5r) adds the test-kind freeze gate; `init` records it ONLY for a run that activates
  * test kinds (config.testKinds), so every other run is still version 1, byte for byte.
  */
-export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
+const BASE_SEMANTICS = { 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
   3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }),
   5: Object.freeze({ pinnedBase: true }), 6: Object.freeze({ testKinds: true, pinnedBase: true }),
   7: Object.freeze({ securityObligations: true, pinnedBase: true }), 8: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true }),
@@ -41,7 +41,19 @@ export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.
   20: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, durableRun: true }),
   21: Object.freeze({ pinnedBase: true, repoIdentity: true, durableRun: true }), 22: Object.freeze({ testKinds: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
   23: Object.freeze({ securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
-  24: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }) });
+  24: Object.freeze({ testKinds: true, securityObligations: true, pinnedBase: true, repoIdentity: true, durableRun: true }),
+  // STAB S4 (P6, R1): 25-48 are 1-24 plus stageObligations (config.stagePolicy, S.stage): an engine without S4 supports none of
+  // them and refuses such a run (policy_version_unsupported) instead of resuming it with its stage obligations ignored.
+};
+export const POLICY_SEMANTICS = Object.freeze({ ...BASE_SEMANTICS,
+  ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => [i + 25, Object.freeze({ ...BASE_SEMANTICS[i + 1], stageObligations: true })])) });
+
+/** STAB S4: the stage-obligation version of each version 1-24 (its flags plus stageObligations), or null when `table` has none. */
+export const STAGE_VERSION_OF = Object.freeze(Object.fromEntries(Array.from({ length: 24 }, (_, i) => [i + 1, i + 25])));
+export const stageVersion = (version, table = POLICY_SEMANTICS) => {
+  const w = Object.hasOwn(STAGE_VERSION_OF, String(version)) ? STAGE_VERSION_OF[version] : null;
+  return w !== null && Object.hasOwn(table, String(w)) && table[w].stageObligations === true ? w : null;
+};
 
 /**
  * S1 (P1): the durable version of each version 1-12 (its flags plus durableRun). `init` records it for every NEW run unless
