@@ -187,7 +187,8 @@ function claimMarker(path, rec, info, host, depth = 0, link = linkSync) {
  *   await), `sleep`/`slept` (around each back-off sleep) and `commit` (immediately before the final
  *   cancellation check, which is the last thing before the one success return). A test aborts the signal from
  *   it, synchronously or after N microtasks, to reach every await and microtask boundary.
- * - `link(from, to)` (S1) replaces linkSync in the recovery marker publish (a filesystem without hard links).
+ * - `link(from, to)` (S1) replaces linkSync in the recovery marker publish and (N4) in the lock publish (a filesystem
+ *   without hard links).
  * - `readLock`/`unlinkLock` replace readFileSync/unlinkSync in the cancellation release only
  *   (fault injection for the leak report). The normal `handle.release()` and the stale-lock
  *   recovery never use them.
@@ -207,7 +208,7 @@ export const TEST_SEAM = Symbol('durable-io acquireLock test seam');
  * thrown as it arises (`signal` is still honoured). `now` (monotonic ms) and `sleep(ms, signal)`
  * are test seams, defaulting to performance.now and an abortable timer. With `waitMs` (finite, >= 0) a refused attempt is retried with back-off until the
  * deadline. Retried: `lock_held` (live holder, recovery in progress, lost race), `lock_malformed`
- * (the holder may be between its exclusive create and its write), `ENOENT` (the holder released
+ * (a pre-N4 writer, or the no-hard-link fallback, may be between its exclusive create and its write), `ENOENT` (the holder released
  * between our create and our read) and, on win32, `EPERM` (a lock still being deleted). At the
  * deadline `lock_held` and `ENOENT` become `lock_timeout`; `lock_malformed` and `EPERM` are
  * rethrown as they are. Any other error (`lock_foreign_host`, `not_a_repo`, EISDIR, ...) is thrown
@@ -273,9 +274,30 @@ export async function acquireLock(ctx, options = {}) {
   mine = { pid, process_start_time: started.process_start_time, host, run_id: ctx.runId, nonce: randomUUID(),
     ...(started.start_identity !== undefined ? { start_identity: started.start_identity } : {}) };
   mkdirSync(dirname(lockFile), { recursive: true });
+  const link = seam?.link ?? linkSync;
+  /**
+   * N4 (D6): the lock is published complete or not at all. The record goes to a private temp file beside the lock, which is
+   * then hard-linked to the lock path (link fails with EEXIST when the lock exists: the same exclusivity as O_EXCL), so a
+   * contender never reads a created-but-unwritten lock as `lock_malformed`. Same bytes and mode as the pre-N4 create. If
+   * the temp file cannot be written or the link fails for any reason but EEXIST (no hard links: exFAT, some SMB/volume
+   * mounts; or an error the pre-N4 create would surface itself), the pre-N4 exclusive create runs instead, so no acquire
+   * that succeeded before can fail now; only that fallback keeps the create-then-write window.
+   */
   const create = () => {
-    try { writeFileSync(lockFile, JSON.stringify(mine), { flag: 'wx', mode: 0o600 }); }
-    catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+    const body = JSON.stringify(mine), tmp = `${lockFile}.${mine.nonce}.tmp`;
+    let wrote = false, linked = false;
+    try {
+      writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 });
+      wrote = true;
+      link(tmp, lockFile);
+      linked = true;
+    } catch (e) {
+      if (wrote && e.code === 'EEXIST') return false; // the link's EEXIST: the lock exists
+    } finally { try { unlinkSync(tmp); } catch { /* never created, or already gone */ } }
+    if (!linked) {
+      try { writeFileSync(lockFile, body, { flag: 'wx', mode: 0o600 }); }
+      catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+    }
     owned = true;
     step('acquired');
     return true;
