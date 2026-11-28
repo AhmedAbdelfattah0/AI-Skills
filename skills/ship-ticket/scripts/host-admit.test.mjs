@@ -131,7 +131,7 @@ test('CLI: exactly one JSON line on stdout, usage error exits 2 (real process, n
   const lines = p.stdout.split('\n').filter(Boolean);
   assert.equal(lines.length, 1); assert.equal(JSON.parse(lines[0]).reason, 'usage'); assert.ok(p.stdout.endsWith('\n'));
 });
-test('F11 (behavioural RED on frozen): two concurrent `run --class heavy` at ONE heavy slot start exactly one command', { skip: process.platform === 'win32' ? 'POSIX process groups' : false }, async () => {
+test('F11 (RED on frozen: the claiming `run` is absent there) two concurrent `run --class heavy` at ONE heavy slot start exactly one command', { skip: process.platform === 'win32' ? 'POSIX process groups' : false }, async () => {
   const dir = tmpStore();
   const marks = [join(dir, 'a.ran'), join(dir, 'b.ran')];
   const go1 = mk({ latest: { pressure_level: 2 } }), go2 = mk({ latest: { pressure_level: 2 } });

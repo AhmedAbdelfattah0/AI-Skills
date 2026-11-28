@@ -72,6 +72,7 @@ const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
   'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'policy', 'catalogFile', 'now']);
 CTX_KEYS.add('deadlineClock'); // S1: the in-process test clock of the deadline sweep (never set by the CLI)
+CTX_KEYS.add('authorize'); // PR-2: the CLI's synchronous host-claim authorization of the locked snapshot (hostClaimAuthorizer)
 const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check', 'evidence'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -235,6 +236,11 @@ async function locked(ctx, fn, { load = true, waitMs, prefer, foreign = false } 
   try {
     if (load) {
       E.load();
+      // PR-2 (review round 1, Codex MAJOR-1): the CLI's host-claim authorization (main: hostClaimAuthorizer) is checked against
+      // THIS locked snapshot, synchronously, before ownership, observation or any write: a refused command leaves the state
+      // byte-identical. Unflagged runs and in-process callers without it are unchanged (null).
+      const denied = ctx.authorize?.(E.S, E.P.state);
+      if (denied) throw coded(denied.code, denied.reason);
       // S1 (Codex 2): ownership is checked right after the load, before any observation or write: a refused command leaves
       // the shared state byte-identical. A command allowed from elsewhere (`foreign`: the deadline sweep) never observes
       // authority from the caller's plan, which is not the run's.
@@ -890,7 +896,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'host_claims_state_missing']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'host_claims_state_missing', 'host_claim_required']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -954,26 +960,24 @@ export async function gate(ctx) {
     });
   } catch (e) {
     if (!GATE_REFUSALS.has(e.code)) throw e;
-    return { gate: ctx.gate, ...gateNo(e.code, [e.message], { judgment_point: e.code !== 'lock_held' }) };
+    return { gate: ctx.gate, ...gateNo(e.code, [e.message], { judgment_point: e.code !== 'lock_held' && e.code !== 'host_claim_required' }) };
   }
 }
 
 /**
- * PR-2 (S2-min): the CLI-entry host-claim check. Only a heavy command (drive, gate red|prove|ship-ready) of an EXISTING run
- * whose recorded policy carries hostClaimRequired is checked (engine-host-claim.mjs checkHostClaim: a read-only check, never
- * an await); any other run, command or an unreadable state returns null before the claim store is touched, so the command
- * itself behaves (and refuses) exactly as before. The exported library entry points (drive(), gate()) are not checked.
+ * PR-2 (S2-min): the CLI-entry host-claim authorization, a synchronous check of the LOCKED snapshot (locked() calls it right
+ * after the load; review round 1: a pre-lock read could miss a state an `init` published in between). Only a heavy command
+ * (drive, gate red|prove|ship-ready, gate review of a test-kinds run) of a run whose recorded policy carries
+ * hostClaimRequired is checked (engine-host-claim.mjs checkHostClaim: a read, never an await); any other run returns null
+ * before the claim store is touched. The exported library entry points are checked only when a caller passes it.
  */
-function hostClaimRefusal(ctx, cmd, gateKind) {
-  if (!heavyCommand(cmd, gateKind)) return null;
-  let P, S;
-  try {
-    P = locate(ctx);
-    if (!existsSync(P.state)) return null;
-    S = JSON.parse(readFileSync(P.state, 'utf8'));
-    if (runPolicy(S).semantics.hostClaimRequired !== true) return null;
-  } catch { return null; }
-  return checkHostClaim({ S, statePath: P.state, cmd, gateKind });
+export function hostClaimAuthorizer(cmd, gateKind) {
+  return (S, statePath) => {
+    if (!heavyCommand(cmd, gateKind, S)) return null;
+    let flagged = false;
+    try { flagged = runPolicy(S).semantics.hostClaimRequired === true; } catch { return null; } // the load already refused it
+    return flagged ? checkHostClaim({ S, statePath, cmd, gateKind }) : null;
+  };
 }
 
 async function main(argv) {
@@ -994,12 +998,8 @@ async function main(argv) {
   if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive|adopt --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs archive ... [--retire true] | adopt ... --from <archive dir>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess|prove --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
-  // PR-2: a heavy command of a run whose policy requires a host claim is refused here, at the CLI entry, without one.
-  const refusal = hostClaimRefusal(ctx, cmd, gateKind);
-  if (refusal) {
-    if (cmd === 'gate') return { gate: gateKind, ...gateNo(refusal.code, [refusal.reason], { judgment_point: false }) };
-    throw coded(refusal.code, refusal.reason);
-  }
+  // PR-2: a heavy command of a run whose policy requires a host claim is refused, on the locked snapshot, without one.
+  if (cmd === 'drive' || cmd === 'gate') ctx.authorize = hostClaimAuthorizer(cmd, gateKind);
   const commands = { init, status, drive, resume,
     reconcile: () => { if (flags.deadlines !== 'true') throw new Error('Usage: run-engine.mjs reconcile --deadlines true --repo <dir> --ticket <key> --run-id <id>');
       return reconcileDeadlines(ctx); },

@@ -20,7 +20,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture } from './engine-test-fixture.mjs';
 import { fakeHost } from './host-claims.test-helper.mjs';
@@ -114,7 +114,7 @@ test('A2 a directly invoked lone-heavy-node drive is refused (host_claim_require
   assert.equal(readFileSync(fx.stateFile(), 'utf8'), before, 'the state is byte-identical');
   assert.deepEqual(fx.runs(), [], 'the worker never ran');
   for (const kind of ['red', 'ship-ready', 'prove']) {
-    const g = fx.gate(kind, {});
+    const g = fx.gate(kind, kind === 'red' ? { node: 'a' } : {});
     assert.equal(g.status, 2, `${kind}: ${g.stdout}${g.stderr}`);
     assert.equal(g.out?.code, 'host_claim_required', kind);
   }
@@ -240,4 +240,113 @@ test('A1 unknown identity: an unsettled attempt whose group cannot be attributed
   const settled = await heavyClaim(dir, 'h3');
   assert.equal(settled.admit, true, `every attempt settled and the outer group gone: reclaimed (${settled.reasons})`);
   assert.ok(!claimIds(dir).includes('drv'));
+});
+
+// ------------------------------------------------------------------ PR-2 review round 1 repairs (tests first)
+
+const SP_MOD = () => import('./security-plan.mjs');
+/** A config.hostClaimRequired + config.testKinds run (the real test-kinds fixture shape: fake vitest, empty §3a), driven and reassessed. */
+async function testKindsRun(t) {
+  const { mkdirSync, chmodSync } = await import('node:fs');
+  const { dirname: dn } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const { narrativeDigest, BEGIN, END } = await import('./engine-test-fixture.mjs');
+  const SP = await SP_MOD();
+  const CATALOG = SP.loadCatalog();
+  const BOOLS = Object.entries(CATALOG.catalog.fact_vocabulary).filter(([, d]) => d.type === 'bool').map(([k]) => k);
+  const EMPTY_SEL = SP.selectControls(CATALOG, { security_policy: 2, surfaces: [], facts: Object.fromEntries(BOOLS.map(k => [k, false])),
+    evidence: Object.fromEntries(BOOLS.map(k => [k, 'src/x.ts:1'])) });
+  const ENTRY = { cmd: 'node_modules/.bin/vitest', args: ['run', '--pool=forks', '--reporter=json', '--outputFile={report}', '{files}'], format: 'vitest-json',
+    evidence: { report: 'fd', covers: ['test/**'], files: true, config_paths: ['vitest.config.ts'] } };
+  const FAKE_VITEST = readFileSync(fileURLToPath(new URL('./run-engine-test-kinds.test.mjs', import.meta.url)), 'utf8').split('const FAKE_VITEST = `')[1].split('`;\n')[0].replace(/\\\\/g, '\\');
+  const git = (cwd, ...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd, encoding: 'utf8' });
+  const put = (repo, rel, text) => { mkdirSync(dn(join(repo, rel)), { recursive: true }); writeFileSync(join(repo, rel), text); };
+  const config = { width: 1, testCommands: { unit: ENTRY }, securityPolicy: 2, catalogDigest: CATALOG.digest, controlCoverage: [], testKinds: { policy: 1 }, ...REQUIRED };
+  const fx = fixture(t, { commit: true, config, nodes: [{ id: 'a', writes: ['test', 'src'] }], behaviour: { a: { write: { 'test/a.test.ts': "test('ok', () => {});\n" } } },
+    narrativeExtra: `${SP.renderSection3a(EMPTY_SEL)}\n\ntest-triggers: input-path\nFLOOR_LINE\n` });
+  put(fx.repo, 'node_modules/.bin/vitest', FAKE_VITEST); chmodSync(join(fx.repo, 'node_modules/.bin/vitest'), 0o755);
+  put(fx.repo, 'node_modules/vitest/package.json', '{"name":"vitest","version":"4.0.7"}\n');
+  put(fx.repo, '.gitignore', 'node_modules/\n');
+  git(fx.repo, 'add', '-A'); assert.equal(git(fx.repo, 'commit', '-q', '-m', 'base').status, 0);
+  const base = git(fx.repo, 'rev-parse', 'HEAD').stdout.trim();
+  const floor = `risk-floor: floor=STANDARD; classes=none; claimed=STANDARD; ai=STANDARD; final=STANDARD; paths=1; matched=0; base=${base.slice(0, 12)}; head=worktree; declaration=none`;
+  const text = readFileSync(fx.planFile, 'utf8'), narrative = text.slice(0, text.indexOf(BEGIN)).replace('FLOOR_LINE', floor);
+  const start = { run_id: 'run-1', event: 'START', timestamp: '2026-11-05T00:00:00Z', approved_plan_digest: narrativeDigest(`${narrative}${BEGIN}\n${END}\n`) };
+  writeFileSync(fx.planFile, `${narrative}${BEGIN}\n${JSON.stringify(start)}\n${END}\n`);
+  fx.env.FAKE_VITEST = join(fx.root, 'vitest.json');
+  const dir = tmpStore(t);
+  fx.env.AI_SKILLS_HOST_RESOURCES_DIR = dir;
+  const init = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const d = await admitRun(fx, dir, engineArgv(fx, 'drive'));
+  assert.equal(d.code, 0, JSON.stringify(d.line));
+  assert.equal(fx.gate('reassess', {}).status, 0);
+  return { fx, dir };
+}
+const NOT_DARWIN = process.platform === 'darwin' ? false : 'the test-kinds fixture runner is exercised on darwin (as run-engine-test-kinds.test.mjs)';
+
+test('R1 (Opus MAJOR-1) testKinds run: `gate review` runs the evidence suite, so it is HEAVY: unclaimed it is refused and no runner starts; claimed it runs', { skip: NOT_DARWIN }, async (t) => {
+  const { requiredWeight, heavyCommand } = await import('./engine-host-claim.mjs');
+  assert.equal(heavyCommand('gate', 'review', { config: { testKinds: { policy: 1 } } }), true);
+  assert.equal(heavyCommand('gate', 'review', { config: {} }), false, 'without test kinds a review gate stays light');
+  assert.equal(requiredWeight({ config: { testKinds: { policy: 1 } }, nodes: {} }, 'gate', 'review'), 1);
+  const { fx, dir } = await testKindsRun(t);
+  const { passReview } = await import('./engine-test-fixture.mjs');
+  const evidence = () => fx.readState().attempts.filter(a => a.kind === 'evidence').length;
+  const runs = () => (existsSync(fx.env.FAKE_VITEST + '.log') ? readFileSync(fx.env.FAKE_VITEST + '.log', 'utf8').split('\n').filter(Boolean).length : 0);
+  const [e0, r0] = [evidence(), runs()];
+  const g = fx.gate('review', passReview('rx-1', fx.candidate()));
+  assert.equal(g.out?.code, 'host_claim_required', g.stdout + g.stderr);
+  assert.deepEqual([evidence(), runs()], [e0, r0], 'no evidence attempt, no runner invocation');
+  const input = join(fx.root, 'review-in.json');
+  writeFileSync(input, JSON.stringify(passReview('rx-1', fx.candidate())));
+  const seen = [];
+  const claimed = await admitRun(fx, dir, [...engineArgv(fx, 'gate', 'review').slice(0, 4), ...engineArgv(fx, 'gate', 'review').slice(4), '--input', input], { log: (l) => seen.push(l) });
+  assert.equal(seen[0].weight, 1, 'host-admit derives weight 1 for a test-kinds review');
+  assert.notEqual(claimed.code, 1, JSON.stringify(seen));
+});
+
+test('R2 (Codex MAJOR-1) the claim check binds to the LOCKED snapshot: a run whose flagged state appears after the command starts is still refused', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: REQUIRED });
+  fx.env.AI_SKILLS_HOST_RESOURCES_DIR = tmpStore(t);
+  const RE = await import('./run-engine.mjs');
+  assert.equal(typeof RE.hostClaimAuthorizer, 'function');
+  const authorize = RE.hostClaimAuthorizer('drive'); // built when the command starts: no state exists yet
+  assert.equal(existsSync(fx.stateFile()), false);
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0); // a concurrent init publishes the flagged state
+  const before = readFileSync(fx.stateFile(), 'utf8');
+  await assert.rejects(RE.drive({ ...fx.ctx(), authorize }), { code: 'host_claim_required' });
+  assert.equal(readFileSync(fx.stateFile(), 'utf8'), before, 'nothing written');
+  assert.deepEqual(fx.runs(), [], 'no worker launched');
+  const unflagged = fixture(t);
+  assert.equal(unflagged.cli('init', { dag: unflagged.dagFile }).status, 0);
+  const out = await RE.drive({ ...unflagged.ctx(), authorize: RE.hostClaimAuthorizer('drive') });
+  assert.equal(unflagged.readState().nodes.a.state, 'done', `an unflagged run is unaffected: ${JSON.stringify(out?.outcome)}`);
+});
+
+test('R3 (Codex MAJOR-2) a deferred claim of a run retired by `archive --retire` is reclaimed by proof from the archive; a missing proof stays unknown', { skip: SKIP }, async (t) => {
+  const fx = fixture(t);
+  const dir = tmpStore(t);
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.equal(fx.cli('drive').status, 0); // the engine finished; every attempt settled
+  const runState = realpathSync(fx.stateFile());
+  const { spawn } = await import('node:child_process');
+  const { hostname } = await import('node:os');
+  const { mkdirSync } = await import('node:fs');
+  const gone = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+  await new Promise(r => gone.on('exit', r));
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  // the wrapper died before its own release: its claim names the run, its group is gone, its claimer dead
+  const orphan = (id, extra) => writeFileSync(join(dir, 'claims', `${id}.json`), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: id, class: 'heavy', weight: 1,
+    resources: [], container_label: null, pgid: gone.pid, leader_start: 'x', claimer: { pid: 999999, process_start_time: 'x', host: hostname() },
+    run_state: runState, run_id: 'run-1', claimed_at: 'x', bound_at: 'x', ...extra }));
+  orphan('drv');
+  const r = fx.cli('archive', { retire: 'true' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(existsSync(runState), false, 'the state was moved into the archive');
+  orphan('missing', { run_state: join(dirname(runState), '..', 'NOPE', 'state.json'), run_id: 'run-9' });
+  orphan('other-run', { run_id: 'run-2' }); // same path, but no archive of run-2 exists: absence alone is never proof
+  const h = await heavyClaim(dir, 'next', 1);
+  assert.ok(!claimIds(dir).includes('drv'), 'the retired run is proven settled from its archived final state: reclaimed');
+  assert.deepEqual(h.unknown.sort(), ['missing', 'other-run'], 'a missing or unattributable proof stays unknown (charged, Blocked)');
 });

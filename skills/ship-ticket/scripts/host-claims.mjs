@@ -14,7 +14,8 @@
  * test runner the default is refused, so a test can never touch the real store):
  *   claims/<op_id>.json  ship-ticket-host-claim-v1 { op_id, class, weight, resources:[{resource, mode}], container_label,
  *                        pgid, leader_start, claimer:{pid, process_start_time, start_identity?, host}, run_state?, claimed_at,
- *                        bound_at }   run_state: the absolute durable state.json of the engine run the command drives (or null)
+ *                        bound_at }   run_state: the absolute durable state.json of the engine run the command drives (or null);
+ *                        run_id?: that run's id (finds its archived final state once `archive --retire` moved state.json)
  *   claims.lock          the durable-io lock, held only while the claims are re-read, decided and written (never while sampling)
  *   samples.jsonl        every admission decision with its host samples, every reclaim, and each post-admission peak
  *   blocked.json         the ONE host-scoped Blocked while any holder is unknown (cleared with its cause)
@@ -114,7 +115,8 @@ function validClaim(c, id) {
     && isObj(c.claimer) && Number.isInteger(c.claimer.pid) && c.claimer.pid > 0 && typeof c.claimer.host === 'string'
     && (c.claimer.process_start_time === null || typeof c.claimer.process_start_time === 'string')
     && (c.claimer.start_identity === undefined || c.claimer.start_identity === null || typeof c.claimer.start_identity === 'string')
-    && (c.run_state === undefined || c.run_state === null || (typeof c.run_state === 'string' && isAbsolute(c.run_state)));
+    && (c.run_state === undefined || c.run_state === null || (typeof c.run_state === 'string' && isAbsolute(c.run_state)))
+    && (c.run_id === undefined || c.run_id === null || (typeof c.run_id === 'string' && SAFE_OP.test(c.run_id)));
 }
 
 /** Every claim record: [{ id, claim }] with claim null when unreadable or malformed. Read-only. */
@@ -151,10 +153,16 @@ const DOCKER_STATE = { gone: { state: 'reclaimable', why: 'group_and_containers_
  * without a pid: the launcher exits 125 without the byte), or its group proven gone; 'live' when an attempt's group is
  * verified (pgid + leader start); 'unknown' otherwise (unreadable or malformed record, an unattributable group). No new store.
  */
-export function attemptsVerdict(file, { isAlive = groupAlive, info = processInfo } = {}) {
+export function attemptsVerdict(file, { isAlive = groupAlive, info = processInfo, runId = null } = {}) {
   let S;
-  try { S = JSON.parse(readFileSync(file, 'utf8')); } catch { return { state: 'unknown', why: 'run_state_unreadable' }; }
+  try { S = JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
+    // Review round 1 (Codex MAJOR-2): `archive --retire` moves state.json into the archive (engine-adopt.mjs retireLive).
+    // A MISSING file is followed to that run's archived FINAL state; absence alone is never proof.
+    S = e?.code === 'ENOENT' ? retiredState(file, runId) : null;
+    if (!S) return { state: 'unknown', why: 'run_state_unreadable' };
+  }
   if (!isObj(S) || !Array.isArray(S.attempts)) return { state: 'unknown', why: 'run_state_malformed' };
+  if (runId !== null && S.run_id !== runId) return { state: 'unknown', why: 'run_state_other_run' };
   let live = false, unknown = false;
   for (const a of S.attempts) {
     if (!isObj(a)) { unknown = true; continue; }
@@ -164,6 +172,29 @@ export function attemptsVerdict(file, { isAlive = groupAlive, info = processInfo
     if (id === 'verified') live = true; else if (id === 'unknown') unknown = true;
   }
   return unknown ? { state: 'unknown', why: 'attempt_unknown' } : live ? { state: 'live', why: 'attempt_live' } : { state: 'settled' };
+}
+
+/**
+ * The archived final state of run `runId` whose live state file was `file` (<common>/ai-skills/ship-ticket/runs/<ticket>/
+ * state.json): <common>/ai-skills/ship-ticket/archive/<ticket>/<runId>-<n>/retired/state.json, taken only when its retire
+ * record (retire.json, written before the rename) names the run and the state's sha256, and the bytes match. Else null.
+ */
+function retiredState(file, runId) {
+  if (typeof runId !== 'string' || !SAFE_OP.test(runId)) return null;
+  const ticketDir = dirname(file), runsDir = dirname(ticketDir);
+  if (basename(file) !== 'state.json' || basename(runsDir) !== 'runs') return null;
+  const base = join(dirname(runsDir), 'archive', basename(ticketDir));
+  let names = [];
+  try { names = readdirSync(base); } catch { return null; }
+  for (const n of names.filter(x => x.startsWith(runId + '-') && /^\d+$/.test(x.slice(runId.length + 1))).sort()) {
+    try {
+      const rec = JSON.parse(readFileSync(join(base, n, 'retired', 'retire.json'), 'utf8'));
+      const raw = readFileSync(join(base, n, 'retired', 'state.json'));
+      const S = JSON.parse(raw);
+      if (rec?.retired === true && rec.run_id === runId && rec.state_sha256 === 'sha256:' + createHash('sha256').update(raw).digest('hex') && S?.run_id === runId) return S;
+    } catch { /* not a complete retired archive */ }
+  }
+  return null;
 }
 
 /**
@@ -191,7 +222,7 @@ export function holderState(c, deps = {}, docker) {
     if (DOCKER_STATE[docker].state !== 'reclaimable') return DOCKER_STATE[docker];
   }
   if (c.run_state) {
-    const v = attemptsVerdict(c.run_state, { isAlive, info });
+    const v = attemptsVerdict(c.run_state, { isAlive, info, runId: c.run_id ?? null });
     if (v.state !== 'settled') return { state: v.state, why: v.why };
   }
   return { state: 'reclaimable', why: c.container_label ? 'group_and_containers_gone' : c.run_state ? 'group_and_attempts_gone' : 'group_gone' };
@@ -276,7 +307,7 @@ function resourcesOf(resources, cwd) {
  * blocked, sampled }. Holds: held_resource (R/W conflict), admitHost's reasons (held_heavy included), held_resample (the
  * sample went stale while waiting for the lock), claim_exists.
  */
-export async function claim({ dir, opId, cls, weight, resources = [], containerLabel = null, runState = null, cwd, snapshot = hostSnapshot, now = Date.now,
+export async function claim({ dir, opId, cls, weight, resources = [], containerLabel = null, runState = null, runId = null, cwd, snapshot = hostSnapshot, now = Date.now,
   history, platform = process.platform, ...deps }) {
   if (typeof dir !== 'string' || !isAbsolute(dir)) throw coded('host_store_invalid', 'dir must be an absolute path');
   if (!SAFE_OP.test(opId ?? '')) throw coded('host_claim_invalid', `op_id ${JSON.stringify(opId)} must be a safe id`);
@@ -328,7 +359,7 @@ export async function claim({ dir, opId, cls, weight, resources = [], containerL
       await writeStateAtomic(claimFile(dir, opId), { schema: CLAIM_SCHEMA, op_id: opId, class: cls, weight: w, resources: mine,
         container_label: containerLabel, pgid: null, leader_start: null,
         claimer: { pid: process.pid, ...self, host: deps.host ?? hostname() }, // S1 identity: process_start_time + start_identity
-        run_state: runState, claimed_at: new Date().toISOString(), bound_at: null });
+        run_state: runState, run_id: runId, claimed_at: new Date().toISOString(), bound_at: null });
     }
     return { admit, reason: admit ? 'admitted' : reasons[0], reasons, op_id: opId, class: cls, weight: w, occupancy, heavy_slots: heavySlots,
       conflicts, unknown: rec.unknown.map(u => u.id), blocked: rec.blocked, sampled: snap !== null, history: hist };

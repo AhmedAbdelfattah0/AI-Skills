@@ -133,8 +133,14 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   claim stays charged and a later claim reclaims it on proof (an unknown holder stays charged and raises one
   host-scoped `blocked.json`). Each admission and each post-admission peak is appended to `samples.jsonl`. An
   engine command (`run -- node .../run-engine.mjs <cmd> ...`) derives its class and weight (`drive`:
-  min(`config.width`, DAG nodes); `gate red|prove|ship-ready`: 1; every other command light), so `--class`/`--weight`
-  are refused for it. A run whose DAG sets `config.hostClaimRequired: { version: 1 }` (durable placement and an
+  min(`config.width`, DAG nodes); `gate red|prove|ship-ready`: 1; `gate review` of a `config.testKinds` run: 1, because it
+  runs the evidence suite; every other command light), so `--class`/`--weight` are refused for it. This holds for an
+  unflagged run too: a wrapped drive needs a weight of at most 2 (the host maximum), else it is refused with
+  `weight_exceeds_host_capacity` (an unset `config.width` means `min(3, cpu_count)`, so set `config.width` 1 or 2).
+  Width 1 is the default for flagged runs: a weight-2 drive is admitted only while the host is healthy (2 heavy slots)
+  and no other heavy claim is held; there is no queue, so on a busy host it waits (exit 1) until both hold.
+  A claim whose run was retired (`archive --retire`) is judged on that run's archived final state (its retire record and
+  state digest); a missing or unmatched state is never proof. A run whose DAG sets `config.hostClaimRequired: { version: 1 }` (durable placement and an
   explicit `config.width` required; the drive weight must fit the host maximum of 2 heavy slots) records a
   host-claim policy version (`engine-policy.mjs` `HOST_CLAIM_OFFSET`), and the run-engine CLI entry refuses its heavy
   commands with `host_claim_required` unless they run inside an active claim of sufficient weight bound to that run.

@@ -9,8 +9,9 @@
  * The engine library (drive(), gate(), dispatch, units, gates) never imports this module.
  *
  * Weights: drive = min(config.width, DAG nodes) (every node counts as heavy: main has no per-node class); gate red, gate
- * prove and gate ship-ready = 1 (one runner at a time); every other engine command is light (0): status, resume, review
- * gates, mark, archive, ... Reviews and other LLM-only operations are light.
+ * prove and gate ship-ready = 1 (one runner at a time); `gate review` = 1 in a config.testKinds run, because it runs the
+ * evidence suite (engine-gates.mjs reviewGate -> ensureEvidence -> runEvidence; review round 1 MAJOR-1); every other engine
+ * command is light (0): status, resume, a review gate without test kinds, mark, archive, ... LLM-only operations are light.
  */
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { cpus, hostname } from 'node:os';
@@ -25,12 +26,17 @@ import { groupIdentity, processInfo } from './engine-quiesce.mjs';
 /** The environment variable through which `host-admit run` names its claim to the command it launches. */
 export const CLAIM_OP_ENV = 'AI_SKILLS_HOST_CLAIM_OP';
 const HEAVY_GATES = new Set(['red', 'prove', 'ship-ready']);
-/** Whether engine command `cmd` (with `gateKind` for `gate`) launches heavy work: drive, gate red|prove|ship-ready. */
-export const heavyCommand = (cmd, gateKind) => cmd === 'drive' || (cmd === 'gate' && HEAVY_GATES.has(gateKind));
+/**
+ * Whether engine command `cmd` (with `gateKind` for `gate`) of run state `S` launches heavy work: drive, gate
+ * red|prove|ship-ready, and gate review when the run has config.testKinds (its evidence runner). `S` absent (before init):
+ * the review gate is light, since it cannot run without a state.
+ */
+export const heavyCommand = (cmd, gateKind, S) => cmd === 'drive'
+  || (cmd === 'gate' && (HEAVY_GATES.has(gateKind) || (gateKind === 'review' && S?.config?.testKinds !== undefined)));
 
 /** The claim weight engine command `cmd` of run state `S` needs (0 = light). Width without config.width is the runtime default. */
 export function requiredWeight(S, cmd, gateKind) {
-  if (!heavyCommand(cmd, gateKind)) return 0;
+  if (!heavyCommand(cmd, gateKind, S)) return 0;
   if (cmd !== 'drive') return 1;
   const width = Number.isInteger(S?.config?.width) ? S.config.width : Math.max(1, Math.min(3, cpus().length)); // harness.mjs schedule default
   return driveWeight({ width }, Object.keys(S?.nodes ?? {}).length || 1);
@@ -64,6 +70,7 @@ export function engineClaimSpec(argv) {
   if (P && existsSync(P.state)) { try { S = JSON.parse(readFileSync(P.state, 'utf8')); } catch { S = null; } }
   const weight = S ? requiredWeight(S, e.cmd, e.gateKind) : heavyCommand(e.cmd, e.gateKind) ? 1 : 0;
   return { cls: weight > 0 ? 'heavy' : 'light', weight, runState: P && existsSync(P.state) ? realpathSync(P.state) : null,
+    runId: typeof S?.run_id === 'string' ? S.run_id : null,
     opId: boundedOpId([e.ticket, e.runId ?? 'run', e.cmd, ...(e.gateKind ? [e.gateKind] : []), randomUUID().slice(0, 8)]) };
 }
 

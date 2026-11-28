@@ -135,7 +135,8 @@ decision, and an ownership violation fails that node into bounded repair.
 
 **Before HEAVY work** (full suites, builds, mutation runs) start it through
 `node <SHIP_TICKET_SKILL>/scripts/host-admit.mjs run --class heavy -- <command>` (an engine command,
-`run -- node .../run-engine.mjs drive ...`, derives its own class and weight), which takes a host claim
+`run -- node .../run-engine.mjs drive ...`, derives its own class and weight; keep `config.width` at 1 or 2),
+which takes a host claim
 from the shared claim store before the command starts; reduce parallelism or wait while it holds (exit 1; memory pressure level 2 is only a warning, level 4 holds; level 4 is a pragmatic, unproven threshold, see execution-harness.md); on non-macOS it prints `platform_unsupported`
 (exit 2), which is not an allow: apply the manual rule (check memory and load
 yourself, run one heavy job at a time). Details in execution-harness.md.
