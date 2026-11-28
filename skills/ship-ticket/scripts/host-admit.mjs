@@ -140,11 +140,21 @@ async function runClaimed(argv, deps, platform, usage) {
     log(line); return { line, code: 2 };
   }
   const peak = peakSampler();
-  child.stdin.end(RELEASE_BYTE);
-  const st = await exited;
-  // The release needs the whole group gone: give lingering descendants a bounded moment, then let the store decide.
-  for (const end = Date.now() + 10000; groupAlive(child.pid) === true && Date.now() < end;) await new Promise(r => setTimeout(r, 50));
-  const rel = await releaseClaim({ dir, opId, peak: peak.stop() });
+  // PR-5b: the command runs in its OWN group (detached), so a signal to host-admit's group (the supervisor sweep's killGroup:
+  // SIGTERM, then SIGKILL 3 s later) would not reach it: forward SIGTERM/SIGINT to the command's whole group. The claim
+  // release and the exit-status mirror below are unchanged. A command that ignores SIGTERM outlives a later SIGKILL of
+  // host-admit; its claim stays bound to its pgid, so the store keeps it charged until that group is gone.
+  const forward = (sig) => { try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, sig); } catch { /* gone */ } };
+  const handlers = ['SIGTERM', 'SIGINT'].map((sig) => [sig, () => forward(sig)]);
+  for (const [sig, h] of handlers) process.on(sig, h);
+  let st, rel;
+  try {
+    child.stdin.end(RELEASE_BYTE);
+    st = await exited;
+    // The release needs the whole group gone: give lingering descendants a bounded moment, then let the store decide.
+    for (const end = Date.now() + 10000; groupAlive(child.pid) === true && Date.now() < end;) await new Promise(r => setTimeout(r, 50));
+    rel = await releaseClaim({ dir, opId, peak: peak.stop() });
+  } finally { for (const [sig, h] of handlers) process.removeListener(sig, h); }
   const line = { op_id: opId, exit_code: st.code, signal: st.signal, released: rel.released, release_reason: rel.reason,
     ...(rel.released ? {} : { release_deferred: true, note: 'the claim stays charged; a later claim reclaims it on proof (group and every run attempt gone)' }) };
   log(line);
