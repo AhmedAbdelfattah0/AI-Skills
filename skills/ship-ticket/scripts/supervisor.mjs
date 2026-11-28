@@ -20,13 +20,18 @@
  * a plan change), settle every unsettled op (envelopes, probes), then for each READY ticket in admission order
  * (evaluateReadiness/admissionOrder over the engine-derived states, with journal-Blocked tickets overlaid as failed so their
  * dependents hold and independent tickets continue): readRun + nextStep and at most one effect:
- *   run drive | gate red | gate ship-ready  -> a launch op through the host-admission adapter (admittedCommand)
- *   dispatch review (original/confirmation) -> three read-only launch ops (primary, second opinion, reconcile), then ONE
+ *   run drive | gate red | gate reassess | gate ship-ready -> a launch op through the host-admission adapter (admittedCommand)
+ *   dispatch review original                -> three read-only launch ops (primary, second opinion, reconcile), then ONE
  *                                              collect op that records the assembled input with `gate review` once
+ *   dispatch review confirmation            -> primary + second-opinion legs, then the collect op (no reconciliation)
  *   stop owner_publish                      -> recorded ship-ready; merge per the persisted strategy (never merged here)
  *   stop after two failed review rounds     -> an RCA op (routed agent task) -> a different evidence-backed path ->
  *                                              `succeed` (PR-4b: not merged, refused -> ticket Blocked), else ticket Blocked
  *   any stop needing an authority event     -> refused (requestAuthority), the ticket alone is Blocked
+ *   every other engine stop                 -> PARKED (recomputed every tick from the engine; never journal-Blocked)
+ * Journal-Blocked (permanent for this wave) is reserved for the supervisor's own dead ends: an exhausted ambiguous op, a
+ * failed or refused review leg, a refused authority need, an exhausted recovery. There is no unblock command (owner: a new
+ * wave journal).
  * Never drives or repairs a ticket while any op of it is live (a review in flight included). A third review of the same
  * loop is never dispatched: two FAILs in the engine's review_chain route to recovery.
  *
@@ -73,12 +78,16 @@ export const DRIVE_BOUND_MS = 4 * 60 * 60 * 1000;
 export const GATE_BOUND_MS = 2 * 60 * 60 * 1000;
 export const AGENT_BOUND_MS = 45 * 60 * 1000;
 export const RECONCILE_BOUND_MS = 120 * 1000;
+/** `gate review` runs inside the tick under the journal lock, so it is bounded well below TICK_BOUND_MS. */
+export const COLLECT_BOUND_MS = 10 * 60 * 1000;
 /** PR-2 seam: the exit status by which `host-admit run` reports "held, the command did not run" (assumed; re-point with PR-2). */
 export const ADMISSION_HELD_EXIT = 75;
 /** Two unsuccessful review rounds on a candidate line end the review/repair loop (§7.1 rule 2). */
 export const MAX_FAILED_ROUNDS = 2;
 /** The ONLY engine commands the supervisor launches. None of them writes RUN-STATE. */
-export const ENGINE_COMMANDS = Object.freeze(['drive', 'gate red', 'gate ship-ready', 'gate review', 'reconcile']);
+export const ENGINE_COMMANDS = Object.freeze(['drive', 'gate red', 'gate reassess', 'gate ship-ready', 'gate review', 'reconcile']);
+/** The engine commands nextStep may name that the supervisor launches as ops (gate review is the collect op). */
+const LAUNCHED = Object.freeze(['drive', 'gate red', 'gate reassess', 'gate ship-ready']);
 export const DEFAULT_STATE_DIR = () => join(homedir(), '.ai-skills-state', 'supervisor');
 const OUTPUT_CAP = 1024 * 1024;
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -120,7 +129,7 @@ const defaultDeps = () => ({
   isAlive: (pgid) => groupAlive(pgid),
   armClock: undefined, // the real clock (arming only); tests pass a testClock()
   sweepClock: undefined, // resolveSweepClock: no clock while MEASUREMENT_QUALIFIED is false
-  runGate: (t, gate, inputFile) => runEngine(engineArgv(`gate ${gate}`, t, ['--input', inputFile]), GATE_BOUND_MS),
+  runGate: (t, gate, inputFile) => runEngine(engineArgv(`gate ${gate}`, t, ['--input', inputFile]), COLLECT_BOUND_MS),
   reconcile: (t) => runEngine(engineArgv('reconcile', t, ['--deadlines', 'true']), RECONCILE_BOUND_MS),
   succeed: succeedUnavailable,
   secondOpinionRoute: () => null, // OPEN: no approved configuration names the second-opinion route yet
@@ -297,7 +306,7 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
   const leg = (name) => J.op(opId(repo, t.key, `${prefix}.${name}`, rx));
   const routes = { primary: primaryRoute, second: secondRoute, reconcile: primaryRoute };
   // every leg's route is resolved (tier -> modelMap, the carrier's own refusals) before any leg is launched
-  for (const name of LEGS) {
+  for (const name of kind === 'original' ? LEGS : LEGS.slice(0, 2)) {
     try { prepareAgentTask({ ...routes[name], nodeId: `${prefix}-${name}`, workdir: t.worktree, timeoutMs: 1000, promptFile: fileURLToPath(import.meta.url) }); }
     catch (e) { return { blocked: await J.block(t.key, 'review_route_refused', `${name}: ${e.message}`) }; }
   }
@@ -313,6 +322,10 @@ async function review(J, ctx, t, S, { kind, rx, facts }) {
   if (failedLeg) return { blocked: await J.block(t.key, 'review_leg_failed', `${failedLeg.op_id} ended ${failedLeg.result?.outcome}`, { op_id: failedLeg.op_id }) };
   const artifacts = { primary: agentJson(p), second_opinion: agentJson(s) };
   if (!isObj(artifacts.primary) || !isObj(artifacts.second_opinion)) return { blocked: await J.block(t.key, 'review_leg_unreadable', 'a review leg left no JSON artifact', { op_id: (!isObj(artifacts.primary) ? p : s).op_id }) };
+  if (kind === 'confirmation') { // gate.mjs confirm(): primary + (policy) second opinion, no reconciliation
+    const c = await collect(J, ctx, t, { prefix, kind, rx, input: { kind, review_execution: rx, ...artifacts } });
+    return { collected: { op_id: c.op_id, state: c.state, result: c.result ?? null } };
+  }
   const r = leg('reconcile');
   if (!r) return { dispatched: [await launch(J, ctx, t, { op: `${prefix}.reconcile`, gen: rx, bound: AGENT_BOUND_MS, route: routes.reconcile, nodeId: `${prefix}-reconcile`,
     prompt: reviewPrompt(t, 'reconcile', kind, rx, facts, artifacts) })] };
@@ -389,31 +402,30 @@ async function recover(J, ctx, t, S) {
 
 // ---------------------------------------------------------------------------------------------------- one ticket
 
-const TRANSIENT_STOPS = new Set(['attempts_live', 'state_moved']);
-
 async function stepTicket(J, ctx, t) {
   const { deps } = ctx;
   const ops = opsOf(J, t.key);
   if (ops.some(live)) return { skipped: 'op_live', ops: ops.filter(live).map((o) => o.op_id) };
   const S = deps.readState(t);
+  const rounds = failedRounds(S);
+  if (rounds >= MAX_FAILED_ROUNDS) return recover(J, ctx, t, S); // §7.1: the loop ends; never a third review, never a stale drive
   const lastDrive = ops.filter((o) => o.op === 'drive' && o.result?.out && existsSync(o.result.out)).sort((a, b) => genSeq(b.gen) - genSeq(a.gen))[0];
   const n = await deps.next(t, lastDrive?.result.out);
-  const rounds = failedRounds(S);
   const engineRun = async (cmd, input) => {
     const op = cmd === 'drive' ? 'drive' : `gate.${cmd.split(' ')[1]}`;
-    if (cmd !== 'drive' && cmd !== 'gate red' && cmd !== 'gate ship-ready') return { blocked: await J.block(t.key, `${op.replace('.', '_')}_not_supervised`, `${cmd} needs a judgment or an owner input the supervisor does not supply`) };
+    if (!LAUNCHED.includes(cmd)) return { parked: `${cmd}_not_supervised` };
     const base = `s${seqOf(S)}`;
     const gen = launchGen(J, ctx.repo(t), t.key, op, base);
     const prior = J.op(opId(ctx.repo(t), t.key, op, gen));
-    if (prior?.state === 'recorded') return { blocked: await J.block(t.key, 'no_progress', `${op} at engine seq ${seqOf(S)} already ran (${prior.result?.outcome}) and the engine state did not move`, { op_id: prior.op_id }) };
+    // already ran at this engine state: no blind re-run. Parked (recomputed every tick) until the engine state moves.
+    if (prior?.state === 'recorded') return { parked: 'no_progress', op_id: prior.op_id, outcome: prior.result?.outcome ?? null };
     return { launched: await launch(J, ctx, t, { op, gen, argv: engineArgv(cmd, t), bound: cmd === 'drive' ? DRIVE_BOUND_MS : GATE_BOUND_MS, input }) };
   };
   if (n.action === 'run') {
-    if (n.command.cmd === 'init') return { waiting_owner: 'init_not_supervised' }; // init binds the owner START and the DAG file: the owner starts the run
+    if (n.command.cmd === 'init') return { parked: 'init_not_supervised' }; // init binds the owner START and the DAG file: the owner starts the run
     return engineRun(n.command.cmd, n.command.input);
   }
   if (n.action === 'dispatch') {
-    if (rounds >= MAX_FAILED_ROUNDS) return recover(J, ctx, t, S); // never a third review of the same loop
     const kind = n.command.input?.kind ?? 'original';
     const rx = n.command.input?.review_execution ?? 'rx-1';
     if (kind === 'original' && (S?.review_chain ?? []).length) return requestAuthority(J, t.key, 'RETRY', 'a new original review after one already ran');
@@ -426,11 +438,10 @@ async function stepTicket(J, ctx, t) {
     await J.commit();
     return { ship_ready: J.doc.ship_ready[t.key] };
   }
-  if (rounds >= MAX_FAILED_ROUNDS) return recover(J, ctx, t, S);
   if (['review_terminal', 'review_fail_no_repair', 'confirmation_fail', 'candidate_moved'].includes(n.code)) return requestAuthority(J, t.key, 'RETRY', `review stop ${n.code}`);
-  if (TRANSIENT_STOPS.has(n.code)) return { waiting: n.code };
-  if (n.stop_class === 'owner') return { waiting_owner: n.code }; // parked: recomputed every tick; dependents hold, others continue
-  return { blocked: await J.block(t.key, n.code ?? 'stopped', n.reason ?? 'stopped', { stop_class: n.stop_class ?? null }) };
+  // Every other stop is the engine's own state (owner, judgment, unknown, refused, no_progress): PARKED, not journal-Blocked.
+  // It is recomputed from the engine every tick (nothing to unblock by hand); the ticket holds its dependents, others continue.
+  return { parked: n.code ?? 'stopped', stop_class: n.stop_class ?? null };
 }
 const genSeq = (g) => Number(/^s(\d+)/.exec(String(g))?.[1] ?? -1);
 

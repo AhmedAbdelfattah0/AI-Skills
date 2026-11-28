@@ -172,14 +172,21 @@ export const opts = (dir) => ({ manifestPath: join(dir, 'manifest.json'), stateD
 export const journalFile = (dir) => join(dir, 'journal', WAVE_ID, 'journal.json');
 export const journal = (dir) => (existsSync(journalFile(dir)) ? JSON.parse(readFileSync(journalFile(dir), 'utf8')) : null);
 
-/** Hooks that SIGKILL (or hang) this process at the n-th hit of `boundary`. */
+/**
+ * Hooks that SIGKILL (or hang) this process at the n-th hit of `boundary`, counted ACROSS processes (the count persists in
+ * the world dir), so `<boundary>:<n>` names the n-th time the whole wave reaches that point, whichever tick reaches it.
+ */
 export function crashHooks(spec) {
   if (!spec) return undefined;
   const [at, mode] = spec.split(' ');
   const [name, n] = at.split(':');
-  let hits = 0;
+  const file = join(process.env.SUP_WORLD, `hits-${name}`);
   return { boundary: async (b) => {
-    if (b !== name || ++hits !== Number(n)) return;
+    if (b !== name) return;
+    const hits = (existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0) + 1;
+    writeFileSync(file, String(hits));
+    if (hits !== Number(n)) return;
+    writeFileSync(join(process.env.SUP_WORLD, 'killed'), `${name}:${n}`);
     if (mode === 'hang') { writeFileSync(join(process.env.SUP_WORLD, 'hung'), String(process.pid)); setInterval(() => {}, 1e6); await new Promise(() => {}); }
     process.kill(process.pid, 'SIGKILL');
   } };

@@ -16,6 +16,7 @@ import { withJournal, journalPaths, opId, assertNoAuthority, readJournal, MAX_PR
 import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { makeWorld, worldDeps, opts, effects, journal, readState, writeState, setClock, WAVE_ID } from './supervisor.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
+import { fixture } from './engine-test-fixture.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HELPER = join(HERE, 'supervisor.test-helper.mjs');
@@ -59,6 +60,7 @@ async function waitLive(dir) {
     await waitFor(() => existsSync(o.files.envelope) || !alive(o.pgid), `op ${o.op_id}`);
   }
 }
+const live = (o) => o.state !== 'recorded';
 const alive = (pgid) => { try { process.kill(-pgid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const child = (dir, cmd, spec) => spawnSync(process.execPath, [HELPER, cmd, dir, ...(spec ? [spec] : [])], { encoding: 'utf8', timeout: 60000, env: { ...process.env, SUP_WORLD: dir } });
 const happyKinds = ['drive', 'agent:primary:original', 'agent:second:original', 'agent:reconcile:original', 'gate review', 'gate ship-ready'];
@@ -109,9 +111,9 @@ test('supervisor source: no RUN-STATE writer, and only the allowed engine comman
   const src = readFileSync(join(HERE, 'supervisor.mjs'), 'utf8') + readFileSync(join(HERE, 'supervisor-journal.mjs'), 'utf8');
   for (const w of ['appendRunStateOnce', 'eventLine', 'runStateAppendOnly', 'workerRunStateAppend', 'appendFileSync']) assert.ok(!src.includes(w), `no RUN-STATE writer: ${w}`);
   assert.ok(!/spawnSync\(\s*'launchctl'|spawn\(\s*'launchctl'/.test(src), 'never runs launchctl');
-  assert.deepEqual(ENGINE_COMMANDS, ['drive', 'gate red', 'gate ship-ready', 'gate review', 'reconcile']);
+  assert.deepEqual(ENGINE_COMMANDS, ['drive', 'gate red', 'gate reassess', 'gate ship-ready', 'gate review', 'reconcile']);
   const t = { key: 'T1', worktree: '/w', run_id: 'r' };
-  for (const bad of ['init', 'mark', 'archive', 'adopt', 'rebind', 'clear-unit', 'resume', 'gate reassess', 'succeed']) assert.throws(() => engineArgv(bad, t), /command_refused/, bad);
+  for (const bad of ['init', 'mark', 'archive', 'adopt', 'rebind', 'clear-unit', 'resume', 'gate unit-review', 'gate prove', 'succeed']) assert.throws(() => engineArgv(bad, t), /command_refused/, bad);
   assert.deepEqual(engineArgv('drive', t).slice(2), ['drive', '--repo', '/w', '--ticket', 'T1', '--run-id', 'r']);
 });
 
@@ -145,7 +147,8 @@ test('routing: every review leg and the RCA run on modelMap[tier] of their route
   const dir = world(t, [{ key: 'T1', behaviour: { outcomes: { original: 'FAIL', confirmation: 'FAIL' }, rca: { hypothesis: 'h', evidence: ['e'], differs: 'd', path: 'succession' } } }]);
   await settleAll(dir);
   const agents = effects(dir).filter((e) => e.kind === 'agent');
-  assert.deepEqual(agents.map((a) => a.leg).sort(), ['primary', 'primary', 'rca', 'reconcile', 'reconcile', 'second', 'second']);
+  // original: primary, second, reconcile; confirmation: primary, second (no reconciliation); then one RCA
+  assert.deepEqual(agents.map((a) => a.leg).sort(), ['primary', 'primary', 'rca', 'reconcile', 'second', 'second']);
   for (const a of agents) {
     if (a.leg === 'second') assert.deepEqual([a.provider, a.args.slice(-2)], ['codex', ['codex-strong-x', '-']], 'second opinion: its own route, modelMap.strong');
     else { assert.equal(a.provider, 'claude'); assert.deepEqual(a.args.slice(-2), ['--model', 'claude-strong-x'], `${a.leg}: modelMap.strong of the approved config`); }
@@ -164,31 +167,46 @@ test('routing: every review leg and the RCA run on modelMap[tier] of their route
 // ------------------------------------------------------------------------------------------------- crash recovery
 
 const BOUNDARIES = ['after-tick-start', 'after-intent', 'after-receipt', 'after-pid', 'after-release', 'after-acted', 'after-gate'];
-test('kill -9 after each act: 0 duplicate effects, or the op is preserved ambiguous (never replayed)', { skip: SKIP, timeout: 600000 }, async (t) => {
+/** A wave whose run reaches every op kind: T1 drive -> review (FAIL) -> repair drive -> confirmation (FAIL) -> RCA -> succeed; T2 the PASS path to gate ship-ready. */
+const FULL = () => [{ key: 'T1', behaviour: { outcomes: { original: 'FAIL', confirmation: 'FAIL' }, rca: { hypothesis: 'h', evidence: ['e'], differs: 'd', path: 'succession' } } }, { key: 'T2' }];
+const tally = (dir) => { const m = {}; for (const e of effects(dir)) { const k = `${e.ticket}:${kindOf(e)}`; m[k] = (m[k] ?? 0) + 1; } return m; };
+test('kill -9 at every hit of every act boundary across a full wave: 0 duplicate effects, or the op is preserved ambiguous (never replayed)', { skip: SKIP, timeout: 1800000 }, async (t) => {
+  const base = world(t, FULL());
+  const B = await settleAll(base);
+  const baseline = tally(base);
+  assert.equal(B.blocked.T1.code, 'succession_unavailable');
+  assert.ok(B.ship_ready.T2);
+  const kinds = new Set(Object.values(B.ops).map((o) => o.op));
+  for (const k of ['drive', 'review.primary', 'review.second', 'review.reconcile', 'review', 'confirmation.primary', 'confirmation.second', 'confirmation', 'rca', 'succeed', 'gate.ship-ready'])
+    assert.ok(kinds.has(k), `the wave reaches op ${k}`);
+  const landed = {};
   for (const b of BOUNDARIES) {
-    for (const n of [1, 2, 3]) {
-      const dir = world(t, [{ key: 'T1' }]);
-      // drive the world to the n-th hit of boundary b, SIGKILLing the tick there (earlier ticks run whole)
+    for (let n = 1; ; n++) {
+      const dir = world(t, FULL());
       let killed = false;
-      for (let i = 0; i < 12 && !killed; i++) {
+      for (let i = 0; i < 30 && !killed; i++) {
         await waitLive(dir);
         const r = child(dir, 'tick', `${b}:${n} kill`);
         killed = r.signal === 'SIGKILL';
-        assert.ok(killed || r.status === 0, `${b}:${n} tick ${i}: ${r.stderr}`);
-        if (!killed) continue;
+        assert.ok(killed || r.status === 0, `${b}:${n} tick ${i}: ${r.status} ${r.stderr}`);
+        if (!killed && journal(dir) && (() => { const J = journal(dir); return J.ship_ready.T2 && J.blocked.T1 && !Object.values(J.ops).some(live); })()) break;
       }
+      if (!killed) { assert.ok(n > 1, `${b} is never reached`); landed[b] = n - 1; rmSync(dir, { recursive: true, force: true }); break; }
       const J = await settleAll(dir);
-      const byKind = {};
-      for (const e of effects(dir)) byKind[kindOf(e)] = (byKind[kindOf(e)] ?? 0) + 1;
-      const dup = Object.entries(byKind).filter(([, c]) => c > 1);
-      assert.deepEqual(dup, [], `${b}:${n}: duplicate effects ${JSON.stringify(byKind)}`);
-      if (!J.ship_ready.T1) {
-        // the only acceptable non-completion: an ambiguous op preserved and the ticket Blocked naming it
-        assert.equal(J.blocked.T1?.code, 'ambiguous_unresolved', `${b}:${n}: ${JSON.stringify(J.blocked)}`);
-        assert.equal(J.ops[J.blocked.T1.op_id].state, 'ambiguous');
+      const got = tally(dir);
+      for (const [k, c] of Object.entries(got)) assert.ok(c <= (baseline[k] ?? 0), `${b}:${n}: ${k} ran ${c} times, ${baseline[k] ?? 0} without a crash`);
+      for (const key of ['T1', 'T2']) {
+        const same = key === 'T2' ? Boolean(J.ship_ready.T2) : J.blocked.T1?.code === 'succession_unavailable';
+        if (same) continue;
+        assert.equal(J.blocked[key]?.code, 'ambiguous_unresolved', `${b}:${n} ${key}: ${JSON.stringify(J.blocked[key] ?? J.ship_ready[key])}`);
+        assert.equal(J.ops[J.blocked[key].op_id].state, 'ambiguous', 'the uncertain op is preserved, never replayed');
       }
+      killWorld(dir); rmSync(dir, { recursive: true, force: true });
     }
   }
+  // every boundary was killed at least once, at every one of its hits
+  for (const b of BOUNDARIES) assert.ok(landed[b] >= 1, `${b}: ${landed[b]}`);
+  t.diagnostic(`kills landed per boundary: ${JSON.stringify(landed)}`);
 });
 
 test('a review in flight at session loss is collected exactly once from its receipt (§14.4 #4)', { skip: SKIP }, async (t) => {
@@ -202,8 +220,11 @@ test('a review in flight at session loss is collected exactly once from its rece
   assert.ok(legs.every((o) => alive(o.pgid)), 'the legs outlive the tick that launched them');
   const mid = await tick(opts(dir), worldDeps(dir));
   assert.equal(mid.out.tickets.T1?.skipped, 'op_live', 'no new effect while the review is live');
-  const crashAtGate = child(dir, 'tick', 'after-gate:1 kill');
-  void crashAtGate;
+  // later sessions: the one that reaches the collect is killed right after `gate review` ran, before its record
+  let killed = false;
+  for (let i = 0; i < 10 && !killed; i++) { await waitLive(dir); killed = child(dir, 'tick', 'after-gate:1 kill').signal === 'SIGKILL'; }
+  assert.ok(killed, 'a session died between gate review and its record');
+  assert.equal(journal(dir).ops['rtest:T1:review:rx-1'].state, 'intent');
   const J = await settleAll(dir);
   assert.equal(count(dir, (e) => e.kind === 'gate review'), 1, 'gate review ran once');
   assert.equal(count(dir, (e) => e.kind === 'agent' && e.leg === 'primary'), 1);
@@ -227,8 +248,14 @@ test('owner stop on X while Y and Z continue; a Blocked ticket holds only its de
   assert.ok(J.ship_ready.Y && J.ship_ready.Z && J.ship_ready.E, JSON.stringify(J.ship_ready));
   assert.equal(J.blocked.X, undefined, 'an owner stop parks X (recomputed every tick), it is not a failure');
   assert.equal(count(dir, (e) => e.ticket === 'X'), 0);
-  assert.equal(J.blocked.B.code, 'node_failed');
-  assert.equal(count(dir, (e) => e.ticket === 'D'), 0, 'the dependent of a Blocked ticket never starts');
+  assert.equal(J.blocked.B, undefined, 'an engine judgment is parked (the engine owns it), not journal-Blocked');
+  assert.equal(count(dir, (e) => e.ticket === 'D'), 0, 'the dependent of a parked ticket never starts');
+  // a journal-Blocked ticket (the supervisor's own dead end) also holds only its dependents
+  const dir2 = world(t, [{ key: 'A', phase: 'review_owed', behaviour: { fail_primary: true } }, { key: 'C', deps: ['A'] }, { key: 'F' }]);
+  const J2 = await settleAll(dir2);
+  assert.equal(J2.blocked.A.code, 'review_leg_failed');
+  assert.equal(count(dir2, (e) => e.ticket === 'C'), 0);
+  assert.ok(J2.ship_ready.F);
 });
 
 test('authority: a terminal review needs an owner RETRY -> refused, Blocked; an RCA proposing SECURITY_WAIVER -> refused, Blocked; others continue', { skip: SKIP }, async (t) => {
@@ -293,7 +320,8 @@ test('a hung drive is killed at its persisted bound by the sweep; the next tick 
   assert.equal(J.ops[op.op_id].result.outcome, 'timed_out');
   await ticks(dir, 2);
   assert.equal(count(dir, (e) => e.kind === 'drive'), 1, 'no blind re-run: the same engine state is no progress');
-  assert.equal(journal(dir).blocked.T1.code, 'no_progress');
+  const last = await tick(opts(dir), worldDeps(dir));
+  assert.equal(last.out.tickets.T1.parked, 'no_progress', 'parked until the engine state moves');
 });
 
 test('the sweep runs and enforces while a tick hangs holding the journal lock; it kills the tick at its bound; ticks never overlap', { skip: SKIP }, async (t) => {
@@ -362,4 +390,36 @@ test('install/uninstall: print by default; --write touches only two LaunchAgents
   installPlan({ manifestPath: join(dir, 'manifest.json'), stateDir: join(dir, 'journal'), home, remove: true, write: true }, worldDeps(dir));
   assert.deepEqual(readdirSync(join(home, 'Library', 'LaunchAgents')), ['other.plist'], 'uninstall removes only its own two labels');
   assert.ok(plistXml({ waveId: 'W', job: 'tick', manifestPath: '/m', stateDir: '/s', home: '/h', workdir: '/w' }).includes('<string>/m</string>'));
+});
+
+// ------------------------------------------------------------------------------------------------- the real defaults
+
+test('real engine smoke: real next/readRun, state, readTicket, run dir and repo id; the drive output closes the --last loop to REVIEW', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { modelMap: { strong: 'claude-strong-x' }, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } } } });
+  const init = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const manifest = { schema: 'ship-ticket-wave-v1', wave_id: 'W-R', endpoint: 'SHIP_READY', heavy_slots: 1,
+    tickets: [{ key: 'T-1', plan: '.specs/plans/T-1.md', run_id: 'run-1', worktree: fx.repo, branch: 'main', deps: [], dep_mode: 'ship_ready', resources: [] }] };
+  const D = 'sha256:' + '1'.repeat(64);
+  const deps = { verifyWave: () => ({ ok: true, digest: D }), readManifest: () => ({ ok: true, manifest, digest: D, problems: [] }),
+    admitted: (argv) => ({ file: argv[0], args: argv.slice(1), shell: false }), // PR-2 seam re-pointed: the engine itself, no host-admit
+    env: fx.env, verifySubscription: () => true, secondOpinionRoute: () => ({ provider: 'codex', modelMap: { strong: 'codex-strong-x' } }),
+    agentSpec: () => ({ file: process.execPath, args: ['-e', ''], shell: false }) };
+  const o = { manifestPath: join(fx.root, 'W-R.wave.json'), stateDir: join(fx.root, 'journal') };
+  const J = () => JSON.parse(readFileSync(join(o.stateDir, 'W-R', 'journal.json'), 'utf8'));
+  const seq0 = JSON.parse(readFileSync(fx.stateFile(), 'utf8')).seq;
+  const t1 = await tick(o, deps);
+  assert.equal(t1.code, 0, JSON.stringify(t1.out));
+  const drive = Object.values(J().ops).find((x) => x.op === 'drive');
+  assert.ok(drive, `the real next named drive: ${JSON.stringify(t1.out.tickets)}`);
+  assert.equal(drive.gen, `s${seq0}`, 'the op id generation is the real engine seq');
+  await waitFor(() => existsSync(drive.files.envelope), 'the real drive finished');
+  const t2 = await tick(o, deps);
+  assert.equal(J().ops[drive.op_id].result.outcome, 'ran');
+  assert.ok(JSON.parse(readFileSync(fx.stateFile(), 'utf8')).seq > seq0, 'the real drive moved the engine seq');
+  assert.deepEqual(t2.out.tickets['T-1'].dispatched?.map((x) => x.op_id.split(':')[2]), ['review.primary', 'review.second'],
+    `the drive output was accepted as --last and the next step is the review: ${JSON.stringify(t2.out.tickets)}`);
+  for (const leg of Object.values(J().ops).filter((x) => x.op.startsWith('review.'))) await waitFor(() => existsSync(leg.files.envelope), leg.op_id);
+  await tick(o, deps);
+  assert.equal(J().blocked['T-1'].code, 'review_leg_unreadable', 'the stand-in reviewers wrote nothing: Blocked, never a gate call');
 });
