@@ -42,9 +42,9 @@ function declare(fx, checks, tools = {}) {
   writeFileSync(join(fx.repo, '.ship-ticket', 't0.json'), J({ checks }));
   git(fx.repo, 'add', '-A'); git(fx.repo, 'commit', '-q', '-m', 'declare early checks');
 }
-const ECHO_SCANNER = `import { readFileSync } from 'node:fs';
+const ECHO_SCANNER = `import { readFileSync, writeFileSync } from 'node:fs';
 const hit = /SECRET-[A-Za-z0-9]+/.exec(process.argv.slice(2).map(f => readFileSync(f, 'utf8')).join('\\n'));
-if (hit) { process.stdout.write('found ' + hit[0] + '\\n'); process.stderr.write('found ' + hit[0] + '\\n'); }
+if (hit) { process.stdout.write('found ' + hit[0] + '\\n'); process.stderr.write('found ' + hit[0] + '\\n'); writeFileSync('../scan-hit', 'echoed'); }
 process.exit(hit ? 1 : 0);
 `;
 
@@ -151,6 +151,9 @@ test('F4 an early check whose runner ends in quiescence_unknown leaves no scanne
   // The scanner runs and echoes the secret, but its group is never proven gone: quiescence_unknown.
   const r = await inProc(fx, 'prove', {}, { groupAlive: () => true });
   assert.equal(r.code, 'quiescence_unknown', J(r));
+  // Positive control (Opus MINOR-C): the scanner really ran on the secret and echoed it on stdout and stderr in THIS run
+  // (it leaves a marker outside the repository, never the secret itself), so "nowhere on disk" below is not vacuous.
+  assert.equal(readFileSync(join(fx.root, 'scan-hit'), 'utf8'), 'echoed');
   const S = fx.readState();
   assert.equal(S.early_checks.candidate_id, null, 'the earlier passing early checks are unbound');
   assert.equal(S.local_proof.candidate_id, null, 'the earlier passing proof is unbound');

@@ -406,7 +406,9 @@ Limits:
 - S5: every core version v (< 100) has an early-checks twin v + 100 (the same flags plus `earlyChecks`), derived from the
   core table, so it composes with any later core flag. `init` records it for a DAG with `config.earlyChecks`; an engine
   without S5 refuses such a run (`policy_version_unsupported`). The flag and `config.earlyChecks` must agree at every load
-  (`early_checks_state_missing` otherwise).
+  (`early_checks_state_missing` otherwise). The offset is a ceiling on the core table: building the table refuses
+  (`policy_table_ceiling`) a core row at or above 100, so a later doubling that grows the core past 99 rows must move the
+  offset first.
 - The resolved semantics (`E.policy`) are consumed by the test-kind activation (`testKinds`) and by
   the check that a run's §3a block format matches `securityObligations`. Tests cover recording,
   preservation and enforcement, including commands that refuse when the recorded version's

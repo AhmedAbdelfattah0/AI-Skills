@@ -256,7 +256,7 @@ async function reviewGate(E, input, candidate) {
  * otherwise it stays 'unknown' with a durable quiescence_unknown judgment and nothing is recorded.
  * The caller records LOCAL_PROOF only after re-verifying the binding and the candidate.
  */
-export async function runProof(E, { only = null } = {}) { // S5: `only` (prove's re-run set); per-entry deadlines with config.earlyChecks
+export async function runProof(E, { only = null, resolved = null } = {}) { // S5: `only` (prove's re-run set), `resolved` (the fingerprinted executables it runs); per-entry deadlines with config.earlyChecks
   const run = runnerDeps(E).spawnRunner;
   const commands = [], runs = [];
   for (const [name, c] of Object.entries(E.S.config.testCommands ?? {})) {
@@ -269,7 +269,7 @@ export async function runProof(E, { only = null } = {}) { // S5: `only` (prove's
     const args = c.evidence ? (c.args ?? []).filter(x => x !== '{files}').map(x => x.replace('{report}', REPORT_FD)) : c.args ?? [];
     let result;
     try {
-      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs, ...(c.evidence ? { report: true } : {}) });
+      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: resolved?.[name] ?? c.cmd, args }, timeoutMs, ...(c.evidence ? { report: true } : {}) });
       Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
       armAttempt(E.S, a, timeoutMs, E.ctx.deadlineClock); // S1: durable run only
       await E.commit();
@@ -364,7 +364,7 @@ async function shipReadyGate(E, input, candidate) {
   let v = gateShipReady({ state: S, current });
   if (!v.ok && v.reasons.every(r => r === 'missing_local_proof') && !proven(S, candidate)) {
     const inputsBefore = earlyChecksOn(S) ? proofInputs(E, candidate) : null; // S5
-    const { refusal, commands, spec_results } = await runProof(E);
+    const { refusal, commands, spec_results } = await runProof(E, { resolved: inputsBefore?.resolved });
     if (refusal) return refusal;
     // The proof ran repository commands, which can move config.base (an empty commit): forget the base
     // redChanges cached for the pre-proof derivation, so the post-proof control_pairs re-resolve it.

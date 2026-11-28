@@ -233,8 +233,12 @@ node scripts/run-engine.mjs gate prove --repo <repo> --ticket <key> --run-id <id
   as declared, 100 ms to 30 min) and with every `GIT_*` variable removed, as standalone T0 runs it. The record
   `early_checks` holds names, enums and numbers only. No copy of a check's output is ever written to disk, also when
   its runner is refused or interrupted: a secrets scanner echoes the secret. No declaration is `not_declared`, which
-  passes. A refused runner (`quiescence_unknown`) unbinds the earlier early-check and proof records and blocks later
-  work until the owner resolves it.
+  passes.
+- **Prove generations.** Each `gate prove` starts a generation and persists it as `running`, unbinding the earlier
+  early-check and proof records, BEFORE any command is released. Only a generation that completed successfully on the
+  current candidate makes REVIEW eligible. An interrupted generation (the engine killed, a crash) or a refused one
+  (`quiescence_unknown`, drift) stays not proven through resume and recovery, and per-entry reuse draws only on the proof
+  of a completed generation.
 - **The bounded proof** is the same `testCommands` run ship-ready performs, in declaration order. An entry may set its
   own deadline `timeoutMs` (1 s to 1 h; default `config.timeoutMs`). A timed-out entry is named
   (`proof_entry_timeout`), and the next `gate prove` re-runs the entries without a reusable pass and their dependency
@@ -242,8 +246,14 @@ node scripts/run-engine.mjs gate prove --repo <repo> --ticket <key> --run-id <id
   consumer and teardown of a resource any re-run entry declares. A consumer that passed against an earlier setup
   execution is therefore re-run with the new one, never reused. Under security policy 2 every entry re-runs, and prove
   (and REVIEW) also refuse `control_unproven` while an effective, unwaived pair spec is not `pass` (skipped, missing or
-  truncated report), as ship-ready does. A runner whose deadline kill fails is reported a survivor after a bounded
-  grace (never a lock held forever).
+  truncated report), as ship-ready does. A runner whose deadline kill fails is recorded `unknown` after a 30 s grace
+  (shown in-process and with a real surviving child: the engine releases its lock, drops its handles to the launcher
+  and its process exits; the survivor itself is not stopped, and later work waits on the `unknown` attempt).
+- **Executables.** Each entry's command is resolved once the way exec resolves it (a slash path or each PATH component
+  relative to the repository, the first regular file with the execute bit), that file is fingerprinted, and the engine
+  runs that resolved path. An unresolved command (missing, not executable, or Windows, where PATHEXT is not modelled)
+  is never reusable and its proof cannot bind a REVIEW. Not fingerprinted: a script's interpreter and files reached
+  through its arguments; the file can still change between the fingerprint and the exec.
 - **Reuse needs equal inputs.** A proof row is reused, at the next prove or at ship-ready, only while the candidate,
   the base commit, the environment identity and the entry's command identity are all unchanged. Anything else runs
   fresh. The environment identity is UNQUALIFIED: platform, architecture, Node version, PATH and each command's

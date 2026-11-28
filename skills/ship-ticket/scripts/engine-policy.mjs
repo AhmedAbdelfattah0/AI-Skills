@@ -54,8 +54,18 @@ const CORE_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ 
 export const EARLY_CHECKS_OFFSET = 100;
 /** The core table (every version without earlyChecks): what an engine before S5 supports. Exported for the resume regression. */
 export const PRE_EARLY_CHECKS_SEMANTICS = CORE_SEMANTICS;
-export const POLICY_SEMANTICS = Object.freeze({ ...CORE_SEMANTICS, ...Object.fromEntries(Object.entries(CORE_SEMANTICS)
-  .filter(([v]) => Number(v) < EARLY_CHECKS_OFFSET).map(([v, f]) => [Number(v) + EARLY_CHECKS_OFFSET, Object.freeze({ ...f, earlyChecks: true })])) });
+/**
+ * `core` plus the early-checks twin of each of its rows. Refuses (policy_table_ceiling), at module load, a core row at or above
+ * EARLY_CHECKS_OFFSET or one that already carries earlyChecks: a twin would silently overwrite it and change the meaning of
+ * existing runs. The offset is therefore a ceiling on the core table (24 rows today, 48 with S4): a later doubling flag that
+ * pushes the core to 100 rows must move the offset first.
+ */
+export function withEarlyChecksTwins(core) {
+  const bad = Object.entries(core).filter(([v, f]) => !(Number(v) < EARLY_CHECKS_OFFSET) || f.earlyChecks === true).map(([v]) => v);
+  if (bad.length) throw Object.assign(new Error(`policy_table_ceiling: core policy version(s) ${bad.join(', ')} reach EARLY_CHECKS_OFFSET ${EARLY_CHECKS_OFFSET} or already carry earlyChecks`), { code: 'policy_table_ceiling' });
+  return Object.freeze({ ...core, ...Object.fromEntries(Object.entries(core).map(([v, f]) => [Number(v) + EARLY_CHECKS_OFFSET, Object.freeze({ ...f, earlyChecks: true })])) });
+}
+export const POLICY_SEMANTICS = withEarlyChecksTwins(CORE_SEMANTICS);
 /** The early-checks twin of core `version` in `table`, or null when that engine has none (an engine without S5). */
 export const earlyChecksVersion = (version, table = POLICY_SEMANTICS) => {
   const w = Number.isInteger(version) && version < EARLY_CHECKS_OFFSET ? version + EARLY_CHECKS_OFFSET : null;

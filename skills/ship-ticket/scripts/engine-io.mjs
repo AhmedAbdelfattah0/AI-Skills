@@ -298,7 +298,13 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
         return s;
       })]);
       clearTimeout(timer);
-      if (status === null) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent: false, survivor: true };
+      if (status === null) {
+        // The launcher survives: drop every parent-side handle to it (its pipes and the child handle itself) so this engine
+        // process can exit once the caller has recorded the attempt durably `unknown`; the survivor is not signalled further.
+        for (const s of [child.stdout, child.stdin]) { try { s?.destroy(); } catch { /* gone */ } }
+        try { child.unref?.(); } catch { /* no handle */ }
+        return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent: false, survivor: true };
+      }
       await killing;
       let grace;
       const pipeClosed = await Promise.race([closed.then(() => true), new Promise(r => { grace = setTimeout(() => r(false), frameCloseMs); })]);
