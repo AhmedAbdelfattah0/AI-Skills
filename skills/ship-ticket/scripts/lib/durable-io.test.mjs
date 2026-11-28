@@ -85,7 +85,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { getEventListeners, once } from 'node:events';
 import { hostname, tmpdir } from 'node:os';
 import { fsyncSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync,
@@ -1019,6 +1019,199 @@ test('AC6 / Z S1b 6 processes x 15 increments lose no update under the lock; wit
   assert.deepEqual(locked.left, []);
   const bare = await contend(t, 'race');
   assert.equal(bare.n, 15, 'the negative control loses exactly the 75 interleaved updates');
+});
+
+// ---------------------------------------------------------------- N4: the lock is published complete or not at all
+
+/**
+ * N4 (owner decision D6). A contender that probes the lock path at the very moment it first exists must see a complete
+ * record. The child patches node:fs (syncBuiltinESMExports updates durable-io's named imports) so that every way the lock
+ * path can first appear runs the probe there: an exclusive create of the lock path is split into its open and its write
+ * with the probe between them (what writeFileSync(..., { flag: 'wx' }) does internally), and a link or rename onto the
+ * lock path probes right after it. The probe is a second acquireLock, which runs synchronously up to its refusal.
+ * Output: { a, probes, outcomes } (outcomes are the probes' results).
+ */
+const N4_WINDOW = `
+const [lib, quiesce, lockFile, scenario] = process.argv.slice(1);
+const { createRequire, syncBuiltinESMExports } = await import('node:module');
+const fs = createRequire(import.meta.url)('node:fs');
+const { acquireLock } = await import(lib);
+const { processInfo } = await import(quiesce);
+const EXITED = 2000000000;
+const info = (pid) => (pid === EXITED ? { alive: false, startTime: null } : processInfo(pid));
+if (scenario === 'stale') fs.writeFileSync(lockFile, JSON.stringify({ pid: EXITED, process_start_time: null, host: (await import('node:os')).hostname(), run_id: 'old', nonce: 'held' }));
+const real = { writeFileSync: fs.writeFileSync, linkSync: fs.linkSync, renameSync: fs.renameSync };
+let inProbe = false, probes = 0;
+const outcomes = [];
+const probe = () => {
+  if (inProbe) return;
+  inProbe = true; probes++;
+  try { outcomes.push(acquireLock({ lockFile, runId: 'B', processInfo: info }).then((h) => { h.release(); return 'won'; }, (e) => 'lost:' + e.code)); }
+  finally { inProbe = false; }
+};
+fs.writeFileSync = function (file, data, opts) {
+  if (!inProbe && file === lockFile && opts?.flag === 'wx') {
+    const fd = fs.openSync(file, 'wx', opts.mode ?? 0o666);
+    try { probe(); fs.writeSync(fd, data); } finally { fs.closeSync(fd); }
+    return;
+  }
+  return real.writeFileSync.apply(this, arguments);
+};
+fs.linkSync = function (from, to) { const r = real.linkSync.apply(this, arguments); if (to === lockFile) probe(); return r; };
+fs.renameSync = function (from, to) { const r = real.renameSync.apply(this, arguments); if (to === lockFile) probe(); return r; };
+syncBuiltinESMExports();
+let a;
+try { const h = await acquireLock({ lockFile, runId: 'A', processInfo: info }); a = 'won'; await h.release(); } catch (e) { a = 'lost:' + e.code; }
+Object.assign(fs, real); syncBuiltinESMExports();
+process.stdout.write(JSON.stringify({ a, probes, outcomes: await Promise.all(outcomes) }));
+`;
+
+for (const scenario of ['fresh', 'stale']) {
+  test(`N4 a contender probing the lock path the moment it appears sees a complete record (${scenario} lock), never lock_malformed`, (t) => {
+    const dir = scratch(t);
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', N4_WINDOW, new URL('./durable-io.mjs', import.meta.url).href,
+      new URL('../engine-quiesce.mjs', import.meta.url).href, join(dir, 'document.lock'), scenario], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.a, 'won', 'the creator holds the lock');
+    assert.ok(out.probes >= 1, `the probe ran at the moment the lock path appeared (${out.probes})`);
+    assert.deepEqual(out.outcomes, Array(out.probes).fill('lost:lock_held'), 'the contender saw the holder, not a partial record');
+    assert.deepEqual(readdirSync(dir), [], 'no lock, marker or temp file is left');
+  });
+}
+
+/** N4: the lock vanishes between a no-wait contender's refused create and its read (a release, or a recoverer's unlink). */
+const N4_VANISH = `
+const [lib, lockFile, times] = process.argv.slice(1);
+const { createRequire, syncBuiltinESMExports } = await import('node:module');
+const fs = createRequire(import.meta.url)('node:fs');
+const { hostname } = await import('node:os');
+const { acquireLock } = await import(lib);
+const put = () => fs.writeFileSync(lockFile, JSON.stringify({ pid: process.ppid, process_start_time: null, host: hostname(), run_id: 'h', nonce: 'held' }));
+put();
+const realRead = fs.readFileSync;
+let vanished = 0;
+fs.readFileSync = function (file) {
+  if (file === lockFile && vanished < Number(times)) {
+    vanished++; fs.unlinkSync(lockFile);
+    if (vanished < Number(times)) put(); // it reappears before the next create, which is refused again
+    throw Object.assign(new Error('ENOENT: injected vanish'), { code: 'ENOENT' });
+  }
+  return realRead.apply(this, arguments);
+};
+syncBuiltinESMExports();
+let out;
+try { const h = await acquireLock({ lockFile, runId: 'A' }); out = 'won'; await h.release(); } catch (e) { out = 'lost:' + e.code + (e.lockVanished ? ':vanished' : ''); }
+fs.readFileSync = realRead; syncBuiltinESMExports();
+process.stdout.write(JSON.stringify({ out, vanished }));
+`;
+for (const [times, expect] of [[1, 'won'], [5, 'lost:ENOENT:vanished']]) {
+  test(`N4 a lock that vanishes ${times}x between a no-wait refused create and its read ${expect === 'won' ? 'is created again at once' : 'is still reported after three creates'}`, (t) => {
+    const dir = scratch(t), lockFile = join(dir, 'document.lock');
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', N4_VANISH, new URL('./durable-io.mjs', import.meta.url).href, lockFile, String(times)], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    const got = JSON.parse(r.stdout);
+    assert.equal(got.out, expect);
+    assert.equal(got.vanished, expect === 'won' ? 1 : 3, 'the vanish was injected; bounded to three creates');
+    assert.deepEqual(readdirSync(dir).filter((e) => e.endsWith('.tmp')), [], 'no temp file is left');
+  });
+}
+
+test('N4 a genuinely unreadable lock is still lock_malformed at once without waitMs, and is left in place', async (t) => {
+  const dir = scratch(t), lockFile = join(dir, 'document.lock');
+  for (const held of ['', '{"pid":', 'garbage\n', record(0), record(-7), JSON.stringify({ pid: 1 })]) {
+    writeFileSync(lockFile, held);
+    const ft = fakeTime();
+    await assert.rejects(acquireLock(ctxIn(dir), { now: ft.now, sleep: ft.sleep }), { code: 'lock_malformed' }, JSON.stringify(held));
+    assert.deepEqual(ft.slept, []);
+    assert.equal(readFileSync(lockFile, 'utf8'), held);
+    assert.deepEqual(readdirSync(dir), ['document.lock'], 'no temp file is left');
+  }
+});
+
+test('N4 the published lock keeps the pre-N4 bytes: one JSON object in the frozen key order, one link, no temp sibling', async (t) => {
+  const dir = scratch(t);
+  const h = await must(acquireLock(ctxIn(dir)));
+  const raw = readFileSync(h.lockFile, 'utf8');
+  const rec = JSON.parse(raw);
+  assert.equal(JSON.stringify(rec), raw);
+  assert.deepEqual(Object.keys(rec), ['pid', 'process_start_time', 'host', 'run_id', 'nonce', ...('start_identity' in rec ? ['start_identity'] : [])]);
+  assert.equal(rec.pid, process.pid);
+  if (!WIN) assert.equal(statSync(h.lockFile).mode & 0o777, 0o600);
+  assert.equal(statSync(h.lockFile).nlink, 1, 'the temp link is gone');
+  assert.deepEqual(readdirSync(dir), ['document.lock']);
+  await h.release();
+});
+
+for (const code of ['ENOTSUP', 'EPERM', 'EXDEV', 'EIO']) {
+  test(`N4 when the lock cannot be hard-linked (${code}) the acquire falls back to the exclusive create and still succeeds once`, async (t) => {
+    const dir = scratch(t);
+    let calls = 0;
+    const noLink = () => { calls++; throw Object.assign(new Error(`${code}: injected`), { code }); };
+    const h = await must(acquireLock(ctxIn(dir), { [TEST_SEAM]: { link: noLink } }));
+    assert.equal(calls, 1, 'the lock publish tried the link, then fell back');
+    assert.equal(JSON.parse(readFileSync(h.lockFile, 'utf8')).pid, process.pid);
+    assert.deepEqual(readdirSync(dir), ['document.lock']);
+    await assert.rejects(acquireLock(ctxIn(dir), { [TEST_SEAM]: { link: noLink } }), { code: 'lock_held' }, 'the fallback is still exclusive');
+    await h.release();
+    assert.deepEqual(readdirSync(dir), []);
+  });
+}
+
+/**
+ * N4 stress (bounded): N4_ROUNDS rounds of 6 processes racing one acquire with no waitMs, alternating a fresh path and a
+ * stale lock (exited holder) that all six try to recover. Each round: ready barrier, go, every decision collected while the
+ * winner still holds, then done. Every round must have exactly one winner and five lock_held losers (never lock_malformed,
+ * never ENOENT from a recoverer's unlink-then-publish gap). The partial-write window is narrow
+ * (about 2 hits in 360 contenders measured on the pre-N4 code), so this run is a guard, not a reliable RED; the
+ * deterministic window test above is the RED.
+ */
+const N4_ROUNDS = 12;
+const N4_STRESS = `
+const [lib, quiesce, dir, id] = process.argv.slice(1);
+const { existsSync, writeFileSync } = await import('node:fs');
+const { join } = await import('node:path');
+const { acquireLock } = await import(lib);
+const { processInfo } = await import(quiesce);
+const info = (pid) => (pid === 2000000000 ? { alive: false, startTime: null } : processInfo(pid));
+const until = async (f) => { const end = Date.now() + 30000; while (!existsSync(join(dir, f))) { if (Date.now() > end) process.exit(3); await new Promise(r => setTimeout(r, 1)); } };
+writeFileSync(join(dir, 'ready-' + id), '');
+await until('go');
+let out, h;
+try { h = await acquireLock({ lockFile: join(dir, 'lock'), runId: 'n4', processInfo: info }); out = 'won'; } catch (e) { out = 'lost:' + e.code; }
+writeFileSync(join(dir, 'result-' + id), out);
+await until('done');
+await h?.release();
+`;
+
+test(`N4 stress: ${N4_ROUNDS} rounds of 6 processes racing one acquire, fresh and stale, each have exactly one winner and only lock_held losers`, { skip: WIN ? 'POSIX only here: process-spawn timing on Windows CI is unverified; the deterministic N4 window test runs there' : false, timeout: 240_000 }, async (t) => {
+  const lib = new URL('./durable-io.mjs', import.meta.url).href, quiesce = new URL('../engine-quiesce.mjs', import.meta.url).href;
+  const tally = {};
+  const ids = [0, 1, 2, 3, 4, 5];
+  for (let round = 0; round < N4_ROUNDS; round++) {
+    const dir = scratch(t);
+    if (round % 2) writeFileSync(join(dir, 'lock'), record(EXITED_PID));
+    const kids = ids.map((id) => spawn(process.execPath, ['--input-type=module', '-e', N4_STRESS, lib, quiesce, dir, String(id)], { stdio: ['ignore', 'ignore', 'inherit'] }));
+    const exits = kids.map((k) => new Promise((r) => k.once('exit', r)));
+    try {
+      const all = (p) => ids.every((id) => readdirSync(dir).includes(`${p}-${id}`));
+      const wait = async (p) => { const end = performance.now() + 30_000; while (!all(p)) { assert.ok(performance.now() < end, `round ${round}: not every ${p} in time`); await new Promise(r => setTimeout(r, 2)); } };
+      await wait('ready');
+      writeFileSync(join(dir, 'go'), '');
+      await wait('result');
+      const results = ids.map((id) => readFileSync(join(dir, `result-${id}`), 'utf8'));
+      writeFileSync(join(dir, 'done'), '');
+      for (const o of results) tally[o] = (tally[o] ?? 0) + 1;
+      const kind = round % 2 ? 'stale' : 'fresh';
+      assert.equal(results.filter((o) => o === 'won').length, 1, `round ${round} (${kind}): ${results.join(' ')}`);
+      assert.ok(results.every((o) => o === 'won' || o === 'lost:lock_held'), `round ${round} (${kind}): ${results.join(' ')}`);
+      assert.deepEqual(await Promise.all(exits), [0, 0, 0, 0, 0, 0]);
+      assert.deepEqual(readdirSync(dir).filter((e) => e.startsWith('lock')), [], `round ${round}: no lock, marker or temp file is left`);
+    } finally {
+      for (const k of kids) if (k.exitCode === null && k.signalCode === null) k.kill('SIGKILL');
+    }
+  }
+  t.diagnostic(JSON.stringify(tally));
 });
 
 test('zero unhandled rejections in this test process', () => {

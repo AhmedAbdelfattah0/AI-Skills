@@ -131,6 +131,8 @@ const RECOVER = 'stop every engine command for this ticket, confirm no engine pr
 const NO_LINK = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS', 'EMLINK']);
 /** How many stale-marker takeovers may nest (each needs a recoverer killed inside the previous takeover's window). */
 const MARKER_DEPTH = 3;
+/** N4: how many exclusive creates one attempt makes while the lock keeps vanishing between its create and its read. */
+const VANISH_TRIES = 3;
 
 /**
  * S1 (P1, N8): exclusive claim of the recovery marker `path` with record `rec` ({ pid, process_start_time, host, nonce,
@@ -187,7 +189,8 @@ function claimMarker(path, rec, info, host, depth = 0, link = linkSync) {
  *   await), `sleep`/`slept` (around each back-off sleep) and `commit` (immediately before the final
  *   cancellation check, which is the last thing before the one success return). A test aborts the signal from
  *   it, synchronously or after N microtasks, to reach every await and microtask boundary.
- * - `link(from, to)` (S1) replaces linkSync in the recovery marker publish (a filesystem without hard links).
+ * - `link(from, to)` (S1) replaces linkSync in the recovery marker publish and (N4) in the lock publish (a filesystem
+ *   without hard links).
  * - `readLock`/`unlinkLock` replace readFileSync/unlinkSync in the cancellation release only
  *   (fault injection for the leak report). The normal `handle.release()` and the stale-lock
  *   recovery never use them.
@@ -207,7 +210,7 @@ export const TEST_SEAM = Symbol('durable-io acquireLock test seam');
  * thrown as it arises (`signal` is still honoured). `now` (monotonic ms) and `sleep(ms, signal)`
  * are test seams, defaulting to performance.now and an abortable timer. With `waitMs` (finite, >= 0) a refused attempt is retried with back-off until the
  * deadline. Retried: `lock_held` (live holder, recovery in progress, lost race), `lock_malformed`
- * (the holder may be between its exclusive create and its write), `ENOENT` (the holder released
+ * (a pre-N4 writer, or the no-hard-link fallback, may be between its exclusive create and its write), `ENOENT` (the holder released
  * between our create and our read) and, on win32, `EPERM` (a lock still being deleted). At the
  * deadline `lock_held` and `ENOENT` become `lock_timeout`; `lock_malformed` and `EPERM` are
  * rethrown as they are. Any other error (`lock_foreign_host`, `not_a_repo`, EISDIR, ...) is thrown
@@ -273,9 +276,32 @@ export async function acquireLock(ctx, options = {}) {
   mine = { pid, process_start_time: started.process_start_time, host, run_id: ctx.runId, nonce: randomUUID(),
     ...(started.start_identity !== undefined ? { start_identity: started.start_identity } : {}) };
   mkdirSync(dirname(lockFile), { recursive: true });
+  const link = seam?.link ?? linkSync;
+  /**
+   * N4 (D6): the lock is published complete or not at all. The record goes to a private temp file beside the lock, which is
+   * then hard-linked to the lock path (link fails with EEXIST when the lock exists: the same exclusivity as O_EXCL), so a
+   * contender never reads a created-but-unwritten lock as `lock_malformed`. Same bytes and mode as the pre-N4 create. If
+   * the temp file cannot be written or the link fails for any reason but EEXIST (no hard links: exFAT, some SMB/volume
+   * mounts; or an error the pre-N4 create would surface itself), the pre-N4 exclusive create runs instead, so no acquire
+   * that succeeded before can fail now; only that fallback keeps the create-then-write window.
+   * The temp file is staged once per attempt and kept until the attempt ends (`unstage`), so a stale-lock recovery's
+   * unlink is followed directly by the link: the lock path is absent no longer than with the pre-N4 unlink-then-create.
+   */
+  const body = JSON.stringify(mine), tmp = `${lockFile}.${mine.nonce}.tmp`;
+  let staged; // undefined: not staged yet; true: tmp holds our record; false: it cannot be used (the fallback runs)
+  const unstage = () => { if (staged) try { unlinkSync(tmp); } catch { /* already gone */ } staged = undefined; };
   const create = () => {
-    try { writeFileSync(lockFile, JSON.stringify(mine), { flag: 'wx', mode: 0o600 }); }
-    catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+    if (staged === undefined) { try { writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 }); staged = true; } catch { staged = false; } }
+    let linked = false;
+    if (staged) {
+      try { link(tmp, lockFile); linked = true; } catch (e) { if (e.code === 'EEXIST') return false; } // EEXIST: the lock exists
+      try { unlinkSync(tmp); } catch { /* already gone */ }
+      staged = linked ? undefined : false;
+    }
+    if (!linked) {
+      try { writeFileSync(lockFile, body, { flag: 'wx', mode: 0o600 }); }
+      catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+    }
     owned = true;
     step('acquired');
     return true;
@@ -285,10 +311,16 @@ export async function acquireLock(ctx, options = {}) {
   } };
   /** One protocol attempt: true when we now hold the lock; a refusal throws. Its only await is the hook. */
   const attempt = async () => {
-    if (create()) return true;
     let raw;
-    // ENOENT here means the holder released between our create and this read (retryable when waiting).
-    try { raw = readFileSync(lockFile, 'utf8'); } catch (e) { if (e.code === 'ENOENT') e.lockVanished = true; throw e; }
+    // ENOENT here means the lock vanished between our create and this read: its holder released it, or a recoverer is between
+    // its unlink and its publish. N4: the exclusive create is tried again at once (bounded, VANISH_TRIES), so a contender
+    // takes a free lock or sees the new holder instead of failing on the gap; a lock that keeps vanishing is still reported
+    // (retryable when waiting).
+    for (let tries = 1; ; tries++) {
+      if (create()) return true;
+      try { raw = readFileSync(lockFile, 'utf8'); break; }
+      catch (e) { if (e.code !== 'ENOENT') throw e; if (tries >= VANISH_TRIES) { e.lockVanished = true; throw e; } }
+    }
     let held;
     try {
       held = JSON.parse(raw);
@@ -328,7 +360,8 @@ export async function acquireLock(ctx, options = {}) {
   for (let backoff = 20; ; backoff = Math.min(backoff * 2, 200)) {
     step('attempt');
     cancelFirst(); // before every attempt
-    try { await attempt(); break; } catch (e) {
+    try { await attempt(); unstage(); break; } catch (e) {
+      unstage(); // N4: the attempt's temp file never outlives it
       cancelFirst(); // decided before any classification of `e`
       if (!wait || !transient(e)) throw e;
       if (now() >= deadline) {
