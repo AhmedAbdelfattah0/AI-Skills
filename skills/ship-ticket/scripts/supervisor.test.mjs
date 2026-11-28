@@ -16,7 +16,7 @@ import { withJournal, journalPaths, opId, assertNoAuthority, readJournal, MAX_PR
 import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { makeWorld, worldDeps, opts, effects, journal, readState, writeState, setClock, WAVE_ID } from './supervisor.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
-import { fixture, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
+import { fixture, primaryReview, secondOpinion, withOrigin, passReview } from './engine-test-fixture.mjs';
 import { acquireLock } from './lib/durable-io.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -185,7 +185,7 @@ test('kill -9 at every hit of every act boundary across a full wave: 0 duplicate
   const base = world(t, FULL());
   const B = await settleAll(base);
   const baseline = tally(base);
-  assert.equal(B.blocked.T1.code, 'succession_unavailable');
+  assert.equal(B.blocked.T1.code, 'not_a_repo', 'PR-4b: the real succeed adapter runs the engine; this fake world has no engine run, so the engine refuses');
   assert.ok(B.ship_ready.T2);
   const kinds = new Set(Object.values(B.ops).map((o) => o.op));
   for (const k of ['drive', 'review.primary', 'review.second', 'review.reconcile', 'review', 'confirmation.primary', 'confirmation.second', 'confirmation', 'rca', 'succeed', 'gate.ship-ready'])
@@ -207,7 +207,7 @@ test('kill -9 at every hit of every act boundary across a full wave: 0 duplicate
       const got = tally(dir);
       for (const [k, c] of Object.entries(got)) assert.ok(c <= (baseline[k] ?? 0), `${b}:${n}: ${k} ran ${c} times, ${baseline[k] ?? 0} without a crash`);
       for (const key of ['T1', 'T2']) {
-        const same = key === 'T2' ? Boolean(J.ship_ready.T2) : J.blocked.T1?.code === 'succession_unavailable';
+        const same = key === 'T2' ? Boolean(J.ship_ready.T2) : J.blocked.T1?.code === 'not_a_repo';
         if (same) continue;
         assert.equal(J.blocked[key]?.code, 'ambiguous_unresolved', `${b}:${n} ${key}: ${JSON.stringify(J.blocked[key] ?? J.ship_ready[key])}`);
         assert.equal(J.ops[J.blocked[key].op_id].state, 'ambiguous', 'the uncertain op is preserved, never replayed');
@@ -287,14 +287,14 @@ test('authority: a terminal review needs an owner RETRY -> refused, Blocked; an 
   assert.ok(!JSON.stringify(J).match(/"event":"(START|DAG_BOUND|RETRY|UNIT_CLEAR|SECURITY_ADDENDUM|SECURITY_WAIVER|TEST_KIND_WAIVER)"/), 'no authority event in the journal');
 });
 
-test('two failed rounds -> RCA -> a different evidence-backed path (succession, PR-4b refused -> Blocked); no third review (§14.4 #9)', { skip: SKIP }, async (t) => {
+test('two failed rounds -> RCA -> a different evidence-backed path (succession; an engine refusal -> Blocked); no third review (§14.4 #9)', { skip: SKIP }, async (t) => {
   const different = { hypothesis: 'the fixture seeds stale data', evidence: ['log line 12'], differs: 'reseed the fixture instead of patching the parser', path: 'succession' };
   const dir = world(t, [{ key: 'T1', behaviour: { outcomes: { original: 'FAIL', confirmation: 'FAIL' }, rca: different } }, { key: 'T2' }]);
   const J = await settleAll(dir);
   assert.equal(failedRounds(readState(dir, 'T1')), 2);
   assert.equal(count(dir, (e) => e.ticket === 'T1' && e.kind === 'agent' && e.leg === 'primary'), 2, 'original + confirmation: no third review');
   assert.equal(count(dir, (e) => e.ticket === 'T1' && e.kind === 'agent' && e.leg === 'rca'), 1, 'one RCA');
-  assert.equal(J.blocked.T1.code, 'succession_unavailable');
+  assert.equal(J.blocked.T1.code, 'not_a_repo', 'the default adapter ran run-engine succeed, which refused (no engine run in this world)');
   assert.deepEqual(J.blocked.T1.rca, different, 'the RCA record (what differs and why) is attached');
   assert.ok(J.ship_ready.T2, 'independent ticket continued, no owner interruption');
   // with a succession executor (PR-4b) the different path proceeds; a same-approach RCA is Blocked instead
@@ -305,6 +305,34 @@ test('two failed rounds -> RCA -> a different evidence-backed path (succession, 
   assert.equal(J2.blocked.T1, undefined);
   const dir3 = world(t, [{ key: 'T1', behaviour: { outcomes: { original: 'FAIL', confirmation: 'FAIL' }, rca: { hypothesis: 'h', evidence: [], differs: 'retry the same patch', path: 'succession' } } }]);
   assert.equal((await settleAll(dir3)).blocked.T1.code, 'recovery_no_different_path');
+});
+
+test('PR-4b seam smoke (fake providers): after two failed rounds the RCA path calls the REAL run-engine succeed; the engine records one generation carrying the RCA', { skip: SKIP }, async (t) => {
+  // a real succession run: reviewed, then an in-scope correction in the work tree (what the RCA's different path changed)
+  const fx = fixture(t, { config: { width: 1, base: 'main', pinnedBase: { remote: 'origin' }, succession: { version: 1 }, redEnvironment: { setup: [] },
+    testCommands: { unit: { cmd: process.execPath, args: ['-e', ''] } } }, nodes: [{ id: 'a', writes: ['src/a.txt'] }], behaviour: { a: { write: { 'src/a.txt': 'a1' } } } });
+  withOrigin(fx).feature();
+  for (const [cmd, flags] of [['init', { dag: fx.dagFile }], ['drive', {}]]) { const r = fx.cli(cmd, flags); assert.equal(r.status, 0, r.stdout + r.stderr); }
+  const rv = fx.gate('review', passReview('rx1', fx.candidate()));
+  assert.equal(rv.status, 0, rv.stdout + rv.stderr);
+  writeFileSync(join(fx.repo, 'src', 'a.txt'), 'a2: the different path');
+  // the supervisor's world: the same ticket key and run id, its worktree the real engine repository
+  const rca = { hypothesis: 'the fixture seeds stale data', evidence: ['log line 12'], differs: 'reseed the fixture instead of patching the parser', path: 'succession' };
+  const fail = (kind) => ({ review_execution: 'rx1', kind, outcome: 'FAIL', fix_findings: ['f1'] });
+  const dir = world(t, [{ key: 'T-1', phase: 'terminal', chain: [fail('original'), { review_execution: 'rx1', kind: 'repair' }, fail('confirmation')], behaviour: { rca } }]);
+  const M = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
+  Object.assign(M.tickets[0], { worktree: fx.repo, run_id: 'run-1' });
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify(M));
+  const J = await settleAll(dir);
+  assert.equal(J.blocked['T-1'], undefined, JSON.stringify(J.blocked));
+  const op = Object.values(J.ops).find((o) => o.op === 'succeed');
+  assert.deepEqual([op.state, op.result.outcome, op.result.detail], ['recorded', 'succeeded', { generation: 1, kind: 'correction' }]);
+  const S = JSON.parse(readFileSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'runs', 'T-1', 'state.json'), 'utf8'));
+  assert.equal(S.succession.g, 1);
+  const gen = S.succession.generations[0];
+  assert.deepEqual([gen.kind, gen.review_required, gen.rca], ['correction', true, { differs: rca.differs, evidence: rca.evidence }]);
+  assert.deepEqual(gen.delta.candidate.map((d) => [d.path, d.change]), [['src/a.txt', 'content']]);
+  assert.equal(count(dir, (e) => e.leg === 'rca'), 1, 'one RCA');
 });
 
 test('never drive or repair while a review op of that ticket is live', { skip: SKIP }, async (t) => {

@@ -26,7 +26,8 @@
  *   dispatch review confirmation            -> primary + second-opinion legs, then the collect op (no reconciliation)
  *   stop owner_publish                      -> recorded ship-ready; merge per the persisted strategy (never merged here)
  *   stop after two failed review rounds     -> an RCA op (routed agent task) -> a different evidence-backed path ->
- *                                              `succeed` (PR-4b: not merged, refused -> ticket Blocked), else ticket Blocked
+ *                                              `succeed` (PR-4b: run-engine succeed --plan, then the record with the RCA;
+ *                                              a refusal -> ticket Blocked), else ticket Blocked
  *   any stop needing an authority event     -> refused (requestAuthority), the ticket alone is Blocked
  *   every other engine stop                 -> PARKED (recomputed every tick from the engine; never journal-Blocked)
  * Journal-Blocked (permanent for this wave) is reserved for the supervisor's own dead ends: an exhausted ambiguous op, a
@@ -51,11 +52,11 @@
  * through, a hold exits ADMISSION_HELD_EXIT 75; a permanent refusal exits 2 and reads as nothing_ran). Every heavy command goes
  * through `admittedCommand` only, so it is re-pointed in one place; exit ADMISSION_HELD_EXIT is read as "held, nothing ran".
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync, unlinkSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { isEntrypoint } from './harness.mjs';
 import { parseManifest, verifyWave, readTicket, evaluateReadiness, admissionOrder, mergeStrategyOf } from './wave.mjs';
@@ -126,8 +127,35 @@ export async function requestAuthority(J, key, event, why) {
   return { refused: true, needs: event };
 }
 
-/** PR-4b seam: `run-engine succeed` (successor generation) is not merged, so every succession is refused here. */
-export const succeedUnavailable = async () => { throw coded('succession_unavailable', 'run-engine succeed (PR-4b) is not merged: the recovery path cannot execute yet'); };
+/** The bound of each `run-engine succeed` call (it reads git and the remote, runs nothing heavy: never a launch op). */
+export const SUCCEED_BOUND_MS = 120 * 1000;
+/**
+ * PR-4b seam: the recovery path's successor generation, through the engine's own CLI (`run-engine succeed`; the engine is the
+ * one lifecycle owner of the transition). `--plan true` names the transition the work tree asks for (kind, changed paths);
+ * the record then carries the RCA { differs, evidence } (§7.1: what the different path changes, and the evidence). Any refusal
+ * (nothing changed, out of scope, an engine without succession, a run without config.succession) throws its engine code, so
+ * recover() Blocks the ticket alone. -> { generation, kind } on success.
+ */
+export async function succeedViaEngine(t, rca, { run = spawnSync, timeout = SUCCEED_BOUND_MS } = {}) {
+  const argv = [RUN_ENGINE, 'succeed', '--repo', t.worktree, '--ticket', t.key, '--run-id', t.run_id];
+  const call = (extra) => {
+    const r = run(process.execPath, [...argv, ...extra], { encoding: 'utf8', timeout, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 });
+    let out = null;
+    try { out = JSON.parse(r.stdout); } catch { /* not JSON */ }
+    if (r.status === 0 && out?.ok === true) return out;
+    throw coded(out?.code ?? (r.error?.code === 'ETIMEDOUT' ? 'succession_timeout' : 'succession_failed'), out?.reasons?.join('; ') ?? (String(r.stderr ?? '').trim() || `run-engine succeed exited ${r.status}`));
+  };
+  const plan = call(['--plan', 'true']).transition;
+  const record = { kind: plan.kind, reason: `RCA: ${String(rca.hypothesis ?? '').trim() || rca.differs}`, ...(plan.kind === 'base' ? {} : { paths: plan.paths }),
+    rca: { differs: rca.differs, evidence: rca.evidence } };
+  const dir = mkdtempSync(join(tmpdir(), 'ship-ticket-succeed-'));
+  try {
+    const file = join(dir, 'record.json');
+    writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
+    const out = call(['--input', file]);
+    return { generation: out.generation.g, kind: out.generation.kind };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
 
 const defaultDeps = () => ({
   verifyWave, readTicket,
@@ -144,7 +172,7 @@ const defaultDeps = () => ({
   armClock: undefined, // the real clock (arming only); tests pass a testClock()
   sweepClock: undefined, // resolveSweepClock: no clock while MEASUREMENT_QUALIFIED is false
   reconcile: (t) => runEngine(engineArgv('reconcile', t, ['--deadlines', 'true']), RECONCILE_BOUND_MS),
-  succeed: succeedUnavailable,
+  succeed: (t, rca) => succeedViaEngine(t, rca),
   // The second opinion routes through the approved DAG's modelMap like every task: its tier key `review_second`.
   secondOpinionRoute: (t, S) => (typeof S?.config?.modelMap?.review_second === 'string'
     ? { provider: S.config.provider, modelMap: { strong: S.config.modelMap.review_second }, billing: S.config.billing } : null),
