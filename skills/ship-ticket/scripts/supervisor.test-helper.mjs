@@ -113,14 +113,14 @@ process.stdin.on('end', () => {
 `;
 
 /** Create a world: tickets [{ key, deps?, phase?, behaviour? }]. Returns { dir, manifest, ticket(key) }. */
-export function makeWorld(dir, tickets, { merge_strategy } = {}) {
+export function makeWorld(dir, tickets, { merge_strategy, publication } = {}) {
   mkdirSync(join(dir, 'state'), { recursive: true });
   mkdirSync(join(dir, 'runs'), { recursive: true });
   writeFileSync(join(dir, 'fake-engine.cjs'), FAKE_ENGINE);
   writeFileSync(join(dir, 'fake-agent.cjs'), FAKE_AGENT);
   writeFileSync(join(dir, 'effects.jsonl'), '');
   writeFileSync(join(dir, 'clock'), '1000000000');
-  const manifest = { schema: 'ship-ticket-wave-v1', wave_id: WAVE_ID, endpoint: 'SHIP_READY', heavy_slots: 1, ...(merge_strategy ? { merge_strategy } : {}),
+  const manifest = { schema: 'ship-ticket-wave-v1', wave_id: WAVE_ID, endpoint: 'SHIP_READY', heavy_slots: 1, ...(merge_strategy ? { merge_strategy } : {}), ...(publication ? { publication } : {}),
     tickets: tickets.map((t) => ({ key: t.key, plan: `.specs/plans/${t.key}.md`, run_id: `run-${t.key}`, worktree: join(dir, 'wt', t.key), branch: `feat/${t.key}`, deps: t.deps ?? [], dep_mode: 'ship_ready', resources: [] })) };
   for (const t of manifest.tickets) mkdirSync(t.worktree, { recursive: true });
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
@@ -178,7 +178,8 @@ export function worldDeps(dir, over = {}) {
     sweepClock: worldClock(dir),
     reconcile: (t) => { appendFileSync(join(dir, 'effects.jsonl'), JSON.stringify({ kind: 'reconcile', ticket: t.key }) + '\n'); return { status: 0 }; },
     secondOpinionRoute: () => ({ provider: 'codex', modelMap: { strong: 'codex-strong-x' } }),
-    env: { ...process.env, SUP_WORLD: dir },
+    // PR-6a: a world with fake providers on PATH (publish-ops.test.mjs: a git shim and a fake gh in <world>/bin)
+    env: { ...process.env, SUP_WORLD: dir, ...(existsSync(join(dir, 'bin')) ? { PATH: `${join(dir, 'bin')}:${process.env.PATH}` } : {}) },
     ...over,
   };
 }

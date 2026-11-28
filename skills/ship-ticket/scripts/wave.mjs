@@ -14,6 +14,8 @@
  *                priority?:uint (higher first, default 0), owns?:[repo-relative path], owner_required?:boolean }] }
  * `release_mode` is RESERVED (addendum 2026-11-23e): absent means `manual`; only `manual` is accepted in v1.
  * PR-5 adds two optional keys: `merge_strategy` ('owner' | 'automatic', absent = owner) and `width_reason` (one line).
+ * PR-6a adds `publication` ('none' | 'pull_request', absent = none): whether the owner-approved wave authorizes the supervisor
+ * to push each SHIP_READY ticket's branch and open its PR (never merge). Absent keeps the PR-5 owner_publish handoff.
  * DIGEST = sha256 of the manifest FILE BYTES (LF only; CRLF refused). It holds no plan digest (that would be circular).
  * BINDING: each ticket plan's narrative (outside the RUN-STATE block) carries exactly one line `wave: <WAVE-ID> sha256:<digest>`;
  * the ticket's START already binds the narrative (brief.mjs planDigest/startCheck), so no new authority event or START field.
@@ -49,6 +51,13 @@ export const DEFAULT_RELEASE_MODE = 'manual';
  */
 export const MERGE_STRATEGIES = Object.freeze(['owner', 'automatic']);
 export const DEFAULT_MERGE_STRATEGY = 'owner';
+/**
+ * PR-6a (S7b publication, §7.2): the run-start publication authorization, digest-bound with the manifest and persisted in the
+ * supervisor's wave binding. Optional (absent = 'none'): every manifest approved before it keeps its bytes, digest and the
+ * owner_publish handoff. 'pull_request' authorizes push + PR creation for SHIP_READY tickets; it never authorizes a merge.
+ */
+export const PUBLICATIONS = Object.freeze(['none', 'pull_request']);
+export const DEFAULT_PUBLICATION = 'none';
 /** `width_reason` (optional): why the wave runs at its heavy_slots width; one line of at most 500 characters. */
 export const WIDTH_REASON_MAX = 500;
 export const DEP_MODES = Object.freeze(['ship_ready', 'merged']);
@@ -72,7 +81,7 @@ const TICKET_SCHEMA = { object: {
   priority: '?uint', owns: { arrayOf: 'string', optional: true }, owner_required: '?boolean' } };
 export const MANIFEST_SCHEMA = { object: {
   schema: { enum: [WAVE_SCHEMA] }, wave_id: 'string', endpoint: { enum: [ENDPOINT] }, release_mode: '?string',
-  heavy_slots: 'posint', merge_strategy: '?string', width_reason: '?string', tickets: { arrayOf: TICKET_SCHEMA } } };
+  heavy_slots: 'posint', merge_strategy: '?string', width_reason: '?string', publication: '?string', tickets: { arrayOf: TICKET_SCHEMA } } };
 
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const hasDots = (p) => p.split('/').some((s) => s === '' || s === '.' || s === '..');
@@ -90,6 +99,8 @@ const safeBranch = (b) => typeof b === 'string' && BRANCH.test(b) && !b.includes
 const safeReason = (r) => typeof r === 'string' && r.length > 0 && r.length <= WIDTH_REASON_MAX && !/[\r\n\0]/.test(r);
 /** The manifest's merge strategy (absent = owner). */
 export const mergeStrategyOf = (m) => m?.merge_strategy ?? DEFAULT_MERGE_STRATEGY;
+/** The manifest's publication authorization (absent = none). */
+export const publicationOf = (m) => m?.publication ?? DEFAULT_PUBLICATION;
 const safeResource = (r) => typeof r === 'string' && RESOURCE_PREFIXES.some((p) => r.startsWith(p) && /^[A-Za-z0-9._/-]{1,100}$/.test(r.slice(p.length)));
 
 // ---- manifest ---------------------------------------------------------------------------------------------------
@@ -122,6 +133,7 @@ export function validateManifest(m) {
   if (!SAFE_WAVE_ID.test(m.wave_id)) add('wave_id_invalid', 'wave_id must be a safe id');
   if (m.release_mode !== undefined && !RELEASE_MODES.includes(m.release_mode)) add('release_mode_unsupported', `release_mode ${JSON.stringify(m.release_mode)} is reserved; only ${RELEASE_MODES.join(', ')} is accepted in v1`);
   if (m.merge_strategy !== undefined && !MERGE_STRATEGIES.includes(m.merge_strategy)) add('wave_merge_strategy_invalid', `merge_strategy must be one of ${MERGE_STRATEGIES.join(', ')}`);
+  if (m.publication !== undefined && !PUBLICATIONS.includes(m.publication)) add('wave_publication_invalid', `publication must be one of ${PUBLICATIONS.join(', ')}`);
   if (m.width_reason !== undefined && !safeReason(m.width_reason)) add('wave_width_reason_invalid', `width_reason must be one line of 1..${WIDTH_REASON_MAX} characters`);
   if (m.heavy_slots > HEAVY_SLOTS_MAX) add('wave_heavy_slots_invalid', `heavy_slots must be 1..${HEAVY_SLOTS_MAX}`);
   if (m.tickets.length === 0) add('wave_empty', 'a wave needs at least one ticket');
@@ -155,7 +167,7 @@ export function validateManifest(m) {
 }
 export const MANIFEST_CODES = Object.freeze(['wave_manifest_crlf', 'wave_manifest_unreadable', 'wave_schema_invalid', 'wave_id_invalid', 'release_mode_unsupported', 'wave_heavy_slots_invalid',
   'wave_empty', 'wave_ticket_duplicate', 'wave_key_invalid', 'wave_run_id_invalid', 'wave_path_unsafe', 'wave_branch_invalid', 'wave_resource_invalid', 'wave_dep_duplicate',
-  'wave_cycle', 'wave_dep_unknown', 'wave_stack_unsupported', 'wave_merge_strategy_invalid', 'wave_width_reason_invalid']);
+  'wave_cycle', 'wave_dep_unknown', 'wave_stack_unsupported', 'wave_merge_strategy_invalid', 'wave_width_reason_invalid', 'wave_publication_invalid']);
 
 /** The first dependency cycle of `{id, deps}` nodes as an id path ending where it started, or null. Iterative; unknown deps are ignored. */
 export function findCycle(nodes) {

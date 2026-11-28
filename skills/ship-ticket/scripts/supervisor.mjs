@@ -24,7 +24,10 @@
  *   dispatch review original                -> three read-only launch ops (primary, second opinion, reconcile), then ONE
  *                                              collect op that records the assembled input with `gate review` once
  *   dispatch review confirmation            -> primary + second-opinion legs, then the collect op (no reconciliation)
- *   stop owner_publish                      -> recorded ship-ready; merge per the persisted strategy (never merged here)
+ *   stop owner_publish                      -> recorded ship-ready; merge per the persisted strategy (never merged here).
+ *                                              PR-6a: when the manifest authorizes `publication: pull_request`, first the
+ *                                              publication ops of publish-ops.mjs (adopt the SHIP commit, push it, open the
+ *                                              PR), each a journal op with its own classifier; then ship-ready as above
  *   stop after two failed review rounds     -> an RCA op (routed agent task) -> a different evidence-backed path ->
  *                                              `succeed` (PR-4b: not merged, refused -> ticket Blocked), else ticket Blocked
  *   any stop needing an authority event     -> refused (requestAuthority), the ticket alone is Blocked
@@ -58,7 +61,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { isEntrypoint } from './harness.mjs';
-import { parseManifest, verifyWave, readTicket, evaluateReadiness, admissionOrder, mergeStrategyOf } from './wave.mjs';
+import { parseManifest, verifyWave, readTicket, evaluateReadiness, admissionOrder, mergeStrategyOf, publicationOf } from './wave.mjs';
 import { readRun, nextStep } from './engine-accepted.mjs';
 import { prepareAgentTask, childEnv, verifySubscription, spawnSpec } from './carrier.mjs';
 import { startLauncher, RELEASE, groupAlive, commonGitDir, boundary } from './engine-io.mjs';
@@ -70,6 +73,7 @@ import { AUTHORITY_EVENTS } from './run-state.mjs';
 import { journalPaths, withJournal, readJournal, opId, repoId, coded, MAX_PROBES } from './supervisor-journal.mjs';
 import { GATE_FIELDS } from './engine-dag.mjs';
 import { ADMISSION_HELD_EXIT } from './host-admit.mjs';
+import { publishStep, settlePublish, publishIntent, publishCommand, localHead } from './publish-ops.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SUPERVISOR_SCHEMA = 'ship-ticket-supervisor-v1';
@@ -148,6 +152,8 @@ const defaultDeps = () => ({
   // The second opinion routes through the approved DAG's modelMap like every task: its tier key `review_second`.
   secondOpinionRoute: (t, S) => (typeof S?.config?.modelMap?.review_second === 'string'
     ? { provider: S.config.provider, modelMap: { strong: S.config.modelMap.review_second }, billing: S.config.billing } : null),
+  publishCommand, // PR-6a: the detached publication child (git/gh are light ops: not admitted)
+  localHead, // PR-6a: bounded local git reads of HEAD and the work tree (no network, no effect)
   hooks: undefined,
   env: process.env,
 });
@@ -178,7 +184,7 @@ function loadWave(manifestPath, deps) {
   if (!p.ok) return { ok: false, code: p.problems[0]?.code ?? 'wave_manifest_unreadable', problems: p.problems };
   if (p.digest !== v.digest) return { ok: false, code: 'wave_manifest_moved', problems: [] };
   const unbound = partial ? Object.fromEntries(Object.entries(v.tickets).filter(([, x]) => !x?.ok).map(([k, x]) => [k, x?.reason ?? 'unbound'])) : {};
-  return { ok: true, partial, unbound, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest) };
+  return { ok: true, partial, unbound, manifest: p.manifest, digest: p.digest, merge_strategy: mergeStrategyOf(p.manifest), publication: publicationOf(p.manifest) };
 }
 
 const live = (o) => o.state !== 'recorded';
@@ -196,7 +202,8 @@ function readText(file) { try { const b = readFileSync(file); return b.length > 
 /** The op's files in its ticket's run directory (deterministic from the op id). */
 function opFiles(dir, id) {
   const base = join(dir, id.replace(/:/g, '__'));
-  return { prompt: `${base}.prompt`, out: `${base}.out`, envelope: `${base}.envelope.json`, receipt: `${base}.receipt`, input: `${base}.input.json`, brief: `${base}.repair-brief.md` };
+  return { prompt: `${base}.prompt`, out: `${base}.out`, envelope: `${base}.envelope.json`, receipt: `${base}.receipt`, input: `${base}.input.json`, brief: `${base}.repair-brief.md`,
+    spec: `${base}.publish.json`, act: `${base}.act`, created: `${base}.created`, body: `${base}.body.md` };
 }
 
 /**
@@ -226,7 +233,7 @@ async function act(J, ctx, o) {
   mkdirSync(dirname(f.out), { recursive: true });
   for (const x of [f.out, f.envelope, f.receipt]) rmSync(x, { force: true }); // an earlier unreleased attempt's files: nothing ran
   let spec, env;
-  try { ({ spec, env } = o.spec_kind === 'agent' ? agentLaunch(ctx, o) : { spec: deps.admitted(o.argv), env: deps.env }); }
+  try { ({ spec, env } = o.spec_kind === 'agent' ? agentLaunch(ctx, o) : o.spec_kind === 'publish' ? { spec: deps.publishCommand(o.mode, f.spec), env: deps.env } : { spec: deps.admitted(o.argv), env: deps.env }); }
   catch (e) { return J.move(o.op_id, 'recorded', { result: { outcome: 'refused', code: e.code ?? 'refused', reason: e.message } }); }
   if (!existsSync(f.prompt)) writeFileSync(f.prompt, '', { mode: 0o600 });
   writeFileSync(f.receipt, String(o.attempt), { flag: 'wx', mode: 0o600 });
@@ -256,7 +263,7 @@ function agentLaunch(ctx, o) {
 }
 
 /** Intent (or the existing record) for a launch op, then act on it when it is at intent with no pid. */
-async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, input, collect }) {
+async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, input, collect, publish }) {
   const id = opId(ctx.repo(t), t.key, op, gen);
   let o = J.op(id);
   if (o && o.state !== 'intent') return { op_id: id, state: o.state, existing: true };
@@ -267,7 +274,8 @@ async function launch(J, ctx, t, { op, gen, argv, bound, prompt, route, nodeId, 
     if (input !== undefined) writeFileSync(files.input, JSON.stringify(input), { mode: 0o600 });
     o = await J.intent({ op_id: id, ticket: t.key, kind: 'launch', op, gen, cwd: t.worktree, bound_ms: bound, files,
       seq_at: seqOf(ctx.deps.readState(t)), ...(collect ? { collect } : {}),
-      ...(route ? { spec_kind: 'agent', route, node_id: nodeId } : { spec_kind: 'engine', argv: input !== undefined ? [...argv, '--input', files.input] : argv }) });
+      ...(publish ? publishIntent(files, publish)
+        : route ? { spec_kind: 'agent', route, node_id: nodeId } : { spec_kind: 'engine', argv: input !== undefined ? [...argv, '--input', files.input] : argv }) });
   }
   if (o.pid) return { op_id: id, state: o.state };
   o = await act(J, ctx, o);
@@ -306,6 +314,7 @@ function classify(ctx, o, env) {
 /** Settle one unsettled op (every tick, before any new effect). */
 async function settle(J, ctx, o) {
   const { deps } = ctx;
+  if (o.spec_kind === 'publish') return settlePublish(J, ctx, o, SUP); // PR-6a: its own classifier (act marker + direct-object probe)
   if (o.kind === 'call') { // an interrupted succession call: it may have taken effect, so it is never repeated
     if (o.state === 'intent') o = await J.move(o.op_id, 'ambiguous', { why: 'interrupted between the call and its record' });
     if ((o.probes ?? 0) >= MAX_PROBES) return o;
@@ -528,6 +537,7 @@ async function stepTicket(J, ctx, t) {
   // stop
   if (n.code === 'acceptance_unknown' && n.facts?.settle_with?.cmd) return engineRun(n.facts.settle_with.cmd, n.facts.settle_with.input);
   if (n.code === 'owner_publish') {
+    if (ctx.publication === 'pull_request') return publishStep(J, ctx, t, S, n, SUP); // PR-6a: push + PR (never a merge)
     J.doc.ship_ready[t.key] = { at_seq: seqOf(S), merge: ctx.strategy === 'owner' ? 'awaiting_owner_merge' : 'prevented: merge executor not implemented (PR-6b); awaiting owner merge' };
     await J.commit();
     return { ship_ready: J.doc.ship_ready[t.key] };
@@ -538,6 +548,8 @@ async function stepTicket(J, ctx, t) {
   return { parked: n.code ?? 'stopped', stop_class: n.stop_class ?? null };
 }
 const genSeq = (g) => Number(/^s(\d+)/.exec(String(g))?.[1] ?? -1);
+/** The launch protocol handed to the publication ops (publish-ops.mjs), so they reuse it instead of a second one. */
+const SUP = Object.freeze({ launch, launchGen, opFiles });
 
 // ---------------------------------------------------------------------------------------------------- tick
 
@@ -550,7 +562,7 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
   mkdirSync(paths.dir, { recursive: true });
   const byKey = new Map(w.manifest.tickets.map((t) => [t.key, t]));
   const repos = new Map();
-  const ctx = { deps, strategy: w.merge_strategy, ticket: (k) => byKey.get(k) ?? null,
+  const ctx = { deps, strategy: w.merge_strategy, publication: w.publication, ticket: (k) => byKey.get(k) ?? null,
     repo: (t) => { if (!repos.has(t.key)) repos.set(t.key, deps.repoOf(t)); return repos.get(t.key); } };
   try {
     return await withJournal(paths, w.manifest.wave_id, async (J) => {
@@ -560,10 +572,10 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
         J.doc.tick = null; await J.commit();
         return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_unapproved', unbound: w.unbound, reason: 'a wave starts only fully bound' } };
       }
-      if (!J.doc.binding) J.doc.binding = { manifest_digest: w.digest, merge_strategy: w.merge_strategy };
-      else if (J.doc.binding.manifest_digest !== w.digest || J.doc.binding.merge_strategy !== w.merge_strategy) {
+      if (!J.doc.binding) J.doc.binding = { manifest_digest: w.digest, merge_strategy: w.merge_strategy, publication: w.publication };
+      else if (J.doc.binding.manifest_digest !== w.digest || J.doc.binding.merge_strategy !== w.merge_strategy || (J.doc.binding.publication ?? 'none') !== w.publication) {
         J.doc.tick = null; await J.commit();
-        return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_plan_changed', reason: 'the manifest (or its merge strategy) changed since this wave started: a plan change is the owner\'s' } };
+        return { code: 2, out: { schema: SUPERVISOR_SCHEMA, outcome: 'refused', code: 'wave_plan_changed', reason: 'the manifest (or its merge strategy or publication) changed since this wave started: a plan change is the owner\'s' } };
       }
       await J.commit('after-tick-start');
       const out = { schema: SUPERVISOR_SCHEMA, outcome: 'ticked', wave_id: w.manifest.wave_id, merge_strategy: w.merge_strategy, settled: [], tickets: {} };
