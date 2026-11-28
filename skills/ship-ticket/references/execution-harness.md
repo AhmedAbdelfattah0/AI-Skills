@@ -348,10 +348,15 @@ already present when the sweep looks is settled by the frozen rule (recorded). E
 created decision file `attempts/<id>.decision`: the sweep claims `expired` before it signals, and a settler (the driver,
 `resume`, the sealed-runner owner) claims `accepted` before it records a result that is not provably on time; whoever creates
 it first decides for an UNSTAMPED result, so one published after the expiry claim is late, and one accepted first is never
-signalled. A result carrying a valid monotonic stamp is positioned by its stamp regardless of any decision (before the limit
-it is on time, otherwise late), and the sweep re-checks before each signal that no result is being published (envelope,
-its temp file or the sealed runner's pre-stamp `.result` marker). An empty or unreadable decision file is INDETERMINATE:
-neither side accepts or times out on it; the settler fails the node with `deadline_decision_indeterminate`. In a mixed
+signalled. A result carrying a valid monotonic stamp is positioned by its stamp regardless of any decision (at or before the
+limit it is on time, otherwise late; a stamp before the attempt's origin is invalid). The sweep acts only strictly past the
+limit, and stands down before claiming while a REGULAR result file exists (lstat only, never opened; a FIFO, symlink or
+directory is not trusted): the envelope (the result is published), or the worker's envelope temp file / the sealed runner's
+pre-stamp `.result` marker (being published), the latter only within `PUBLISH_GRACE_MS` (5 s) past the limit. A planted
+regular file can therefore delay the sweep's kill by at most that grace; the owner's timers kill independently while the
+driver lives. There is no post-claim check: a file that appears after the claim belongs to a late stamp. An empty or unreadable decision file is INDETERMINATE:
+it is never accepted; past the grace the sweep kills the group, and the settler fails the node with
+`deadline_decision_indeterminate` (usage recorded as unknown). In a mixed
 setup (the sweep opted in, the driver not), an unstamped late success is accepted when the settler claims first: lateness
 is not enforceable for unstamped results. `lib/deadline.mjs` `deadlineVerdict` is the one decision function. Without the opt-in and without any sweep record no decision file is
 written. The kill escalation grace (SIGTERM to SIGKILL) is measured on a monotonic clock, and

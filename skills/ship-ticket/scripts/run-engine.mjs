@@ -51,7 +51,7 @@ import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2:
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
-import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock, readDecision, claimDecision, resultStarted } from './lib/deadline.mjs';
+import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock, readDecision, claimDecision, resultFiles, PUBLISH_GRACE_MS } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
 
@@ -886,7 +886,8 @@ export async function reconcileDeadlines(ctx) {
       charged_ms: m.charged_ms, measurement, sweeper_pid: process.pid };
     appendSweep(P.attempts, { type: 'observe', ...base, identity, measured: m.measured, expired: m.expired, boot_ended: m.boot_ended, unmeasured: rec.unmeasured });
     if (m.boot_ended) { swept.push({ ...row, identity: 'gone_by_boot', action: 'settle', status: a.status, observation: rec }); continue; }
-    if (!m.measured || !m.expired) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
+    // round 4: a result is on time when its stamp <= the deadline (inclusive), so the sweep acts only STRICTLY past it
+    if (!m.measured || !m.expired || m.charged_ms <= a.deadline.limit_ms) { swept.push({ ...row, action: 'none', status: a.status }); continue; }
     // m7: the row is classified from the RE-CHECK made right before any receipt, never from the first read
     const now = groupIdentity(a, alive);
     const records = sweepRecords(P.attempts, a);
@@ -894,40 +895,48 @@ export async function reconcileDeadlines(ctx) {
     // m4: the kill of this expiry is complete when the group was seen gone or SIGKILL itself was delivered (a zombie leader of a
     // stopped driver stays "alive" after SIGKILL: waiting on it again would change nothing)
     const signalled = records.some(r => r.type === 'signalled' && (r.result === 'gone' || r.signals?.includes('SIGKILL')));
-    const finished = () => resultStarted(a, P.attempts); // round 3: the envelope, its temp file or the runner's pre-stamp marker
+    const files = resultFiles(a, P.attempts); // round 4: lstat only, regular files only; nothing is opened
+    const inGrace = m.charged_ms < a.deadline.limit_ms + PUBLISH_GRACE_MS;
     const prior = readDecision(P.attempts, a.attempt_id);
-    if (now === 'gone') {
-      // L1: a group already gone proves no timeout unless an earlier sweep claimed its expiry (its decision or receipt)
-      swept.push({ ...row, identity: 'gone', action: prior === 'expired' || receipted ? 'settle' : 'none', status: a.status, observation: rec });
-    } else if (now !== 'verified') {
-      swept.push({ ...row, identity: 'unknown', action: 'no_signal', status: a.status, observation: rec });
-    } else if (prior === 'indeterminate') {
-      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'decision_indeterminate', status: a.status, observation: rec });
-    } else if (prior === 'accepted') {
-      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
-    } else if (prior !== 'expired' && finished()) {
-      // M1: the launcher already wrote its result (a zombie or exiting leader is still "verified"): no claim, no signal; the
-      // owner's settlement decides it
-      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'envelope_present', status: a.status, observation: rec });
-    } else if (prior === 'expired' && signalled) {
-      // m4: this expiry was claimed and its kill completed: no new claim, receipt or grace wait; settlement only
-      swept.push({ ...row, identity: 'verified', action: 'settle', reason: 'already_signalled', status: a.status, observation: rec });
-    } else {
-      // round 2: ONE atomic arbitration: the expiry is CLAIMED (exclusive create of the decision file) before any signal; a
-      // settler that accepted the result first wins, and then nothing is signalled. A claim of an earlier sweep that died before
-      // completing its kill is honoured (no second claim).
+    const kill = async (reason) => {
+      // ONE atomic arbitration: the expiry is CLAIMED (exclusive create of the decision file) before any signal; a settler that
+      // accepted first wins and nothing is signalled. An earlier sweep's claim (it died before completing its kill) is honoured,
+      // and an indeterminate decision past the grace is killed without a claim (it can never be accepted). No post-claim
+      // result check: by the ordering of resultFiles, anything published after the claim carries a late stamp.
       await io.boundary(ctx.hooks, 'sweep-before-claim', { attempt_id: a.attempt_id });
-      const claim = prior === 'expired' ? { won: false, decision: 'expired' } : claimDecision(P.attempts, a.attempt_id, 'expired');
-      if (claim.decision !== 'expired') { swept.push({ ...row, identity: 'verified', action: 'none', reason: claim.decision === 'accepted' ? 'accepted' : 'decision_indeterminate', status: a.status, observation: rec }); continue; }
+      const claim = prior === 'expired' || prior === 'indeterminate' ? { decision: prior } : claimDecision(P.attempts, a.attempt_id, 'expired');
+      if (claim.decision === 'accepted') return swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
+      if (claim.decision === 'indeterminate' && inGrace) return swept.push({ ...row, identity: 'verified', action: 'none', reason: 'decision_indeterminate', status: a.status, observation: rec });
       if (!receipted) appendSweep(P.attempts, { type: 'signal', ...base, envelope_present: false });
       await io.boundary(ctx.hooks, 'sweep-after-claim', { attempt_id: a.attempt_id });
       const sent = [];
-      // round 3: before EACH signal: identity still verified AND no result being published (an on-time stamped result is never signalled)
-      const after = await io.killGroup(a.pgid, alive, { verify: () => !finished() && groupIdentity(a, alive) === 'verified', onSignal: (sig) => sent.push(sig) });
+      const after = await io.killGroup(a.pgid, alive, { verify: () => groupIdentity(a, alive) === 'verified', onSignal: (sig) => sent.push(sig) });
       // a kill is recorded only for signals really delivered (a refused verification records nothing; later sweeps may retry)
       if (sent.length) appendSweep(P.attempts, { type: 'signalled', ...base, signals: sent, result: after === false ? 'gone' : after === null ? 'unverified' : 'alive' });
-      swept.push({ ...row, identity: 'verified', action: sent.length ? 'killed' : 'claimed', status: a.status, observation: rec });
-    }
+      return swept.push({ ...row, identity: 'verified', action: sent.length ? 'killed' : 'claimed', ...(reason ? { reason } : {}), status: a.status, observation: rec });
+    };
+    if (now === 'gone') {
+      // L1: a group already gone proves no timeout unless an earlier sweep claimed its expiry (its decision or receipt)
+      swept.push({ ...row, identity: 'gone', action: prior === 'expired' || prior === 'indeterminate' || receipted ? 'settle' : 'none', status: a.status, observation: rec });
+    } else if (now !== 'verified') {
+      swept.push({ ...row, identity: 'unknown', action: 'no_signal', status: a.status, observation: rec });
+    } else if (prior === 'accepted') {
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
+    } else if (prior === 'indeterminate') {
+      // round 4 (C2): never accepted, never left running: past the grace the group is killed and the node fails indeterminate
+      if (inGrace) swept.push({ ...row, identity: 'verified', action: 'none', reason: 'decision_indeterminate', status: a.status, observation: rec });
+      else await kill('decision_indeterminate');
+    } else if (prior !== 'expired' && files.envelope) {
+      // M1: the launcher already published its result (a zombie or exiting leader is still "verified"): no claim, no signal;
+      // the owner's settlement decides it (its stamp, or the frozen rule)
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'envelope_present', status: a.status, observation: rec });
+    } else if (prior !== 'expired' && files.publishing && inGrace) {
+      // round 4: the pre-claim stand-down for a result being published is BOUNDED by PUBLISH_GRACE_MS
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'publishing', status: a.status, observation: rec });
+    } else if (prior === 'expired' && signalled) {
+      // m4: this expiry was claimed and its kill completed: no new claim, receipt or grace wait; settlement only
+      swept.push({ ...row, identity: 'verified', action: 'settle', reason: 'already_signalled', status: a.status, observation: rec });
+    } else await kill(files.publishing ? 'publish_grace_spent' : undefined);
   }
   const due = swept.filter(r => ['killed', 'claimed', 'settle', 'no_signal'].includes(r.action));
   let settlement = 'none';

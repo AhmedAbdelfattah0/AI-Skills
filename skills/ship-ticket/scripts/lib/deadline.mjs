@@ -33,7 +33,7 @@
  * - Unknown boot id (neither source readable): nothing is measured; the observation is recorded as unmeasured.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync, lstatSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -181,20 +181,34 @@ export const recordedCharge = (dir, a) => sweepRecords(dir, a).reduce((m, r) => 
 export function envelopePosition(env, rec) {
   if (typeof env?.mono_ns !== 'string' || !/^\d+$/.test(env.mono_ns) || typeof rec?.start_ns !== 'string') return null;
   const d = BigInt(env.mono_ns) - BigInt(rec.start_ns);
-  return Number((d > 0n ? d : 0n) / 1000000n);
+  if (d < 0n) return null; // round 4 (m12): a stamp before the attempt's own origin is invalid (treated as unstamped)
+  return Number(d / 1000000n);
 }
 
 /** The envelope file of attempt `a` in the attempts directory `dir` (a worker records it; a sealed runner's is by id). */
 export const envelopeFileOf = (a, dir) => a.envelope_file ?? join(dir, `${a.attempt_id}.envelope.json`);
 const readEnvelope = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
 /**
- * Round 3: whether attempt `a` has STARTED publishing its result: the envelope, its temp file (a worker launcher opens it
- * before it takes its stamp, then fsyncs and renames), or the sealed runner's pre-stamp `.result` marker. The sweep never
- * claims or signals such an attempt.
+ * Round 4: the publish grace. The sweep stands down (no claim, no signal) for an attempt whose result is being published
+ * (`resultFiles` .tmp/.result) only while its measured charge is below limit + PUBLISH_GRACE_MS; then it claims and kills
+ * regardless. A candidate able to plant a regular file there can therefore delay the sweep's kill by at most this grace (the
+ * owner's own timers kill independently of these files while the driver lives).
  */
-export function resultStarted(a, dir) {
+export const PUBLISH_GRACE_MS = 5000;
+
+/** lstat-only regular-file test: ENOENT or ANY non-regular entry (FIFO, symlink, directory, device) is false; never opened. */
+const regularFile = (p) => { try { return lstatSync(p).isFile(); } catch { return false; } };
+
+/**
+ * Round 4: which result files of attempt `a` exist as REGULAR files (lstat only; nothing is ever opened, so a planted FIFO or
+ * a symlink to a device can neither block nor be trusted): `envelope` (the published result), `publishing` (the worker's
+ * envelope temp file, opened BEFORE its stamp is taken, or the sealed runner's `.result` marker, created BEFORE its stamp).
+ * Ordering: any result stamped on time has one of these present before the sweep's past-limit check, so a file that appears
+ * after a claim belongs to a late stamp; no post-claim check is needed or made.
+ */
+export function resultFiles(a, dir) {
   const f = envelopeFileOf(a, dir);
-  return [f, f + '.tmp', f + '.result'].some(p => { try { readFileSync(p); return true; } catch (e) { return e.code !== 'ENOENT'; } });
+  return { envelope: regularFile(f), publishing: regularFile(f + '.tmp') || regularFile(f + '.result') };
 }
 
 // ---- PR-1b round 2: ONE atomic arbitration per attempt ---------------------------------------------------------------
@@ -248,7 +262,7 @@ export function claimDecision(dir, id, value) {
 
 /**
  * THE deadline decision, for every decider (worker settle(), the sealed runner owner gateRunner, the sweep), from persisted
- * facts: FIRST a valid monotonic stamp of the result (authoritative: before the limit 'ontime', else 'late'), else the decision
+ * facts: FIRST a valid monotonic stamp of the result (authoritative: at or before the limit 'ontime', else 'late'), else the decision
  * file for an UNSTAMPED result (who claimed first decides; 'indeterminate' when unreadable), else a legacy receipt's
  * envelope_present:false. `env` overrides the envelope read (a sealed runner's frame header, or null for
  * "no result"). Returns 'ontime' | 'late' | 'timed_out' | 'indeterminate' | 'unknown' ('unknown' = the FROZEN rule: the launcher's own timer;
@@ -263,7 +277,7 @@ export function deadlineVerdict(a, dir, { env } = {}) {
   // round 3: a VALID monotonic stamp is authoritative for its own result, whatever any decision file or receipt says: a
   // result can be stamped before the deadline and become visible (rename, frame + copies) just after it
   const pos = result && rec ? envelopePosition(result, rec) : null;
-  if (pos !== null && (decision !== null || receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified')) return pos >= rec.limit_ms ? 'late' : 'ontime';
+  if (pos !== null && (decision !== null || receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified')) return pos > rec.limit_ms ? 'late' : 'ontime'; // round 4: on time when stamp <= deadline (inclusive)
   if (decision === 'indeterminate') return 'indeterminate';
   // the decision file arbitrates UNSTAMPED results only
   if (decision === 'expired') return result ? 'late' : 'timed_out';
@@ -282,6 +296,6 @@ export function deadlineVerdict(a, dir, { env } = {}) {
 export function acceptClaimNeeded(a, dir, env) {
   if (!a?.deadline || !env) return false;
   const pos = envelopePosition(env, a.deadline);
-  if (pos !== null && pos < a.deadline.limit_ms) return false;
+  if (pos !== null && pos <= a.deadline.limit_ms) return false;
   return a.deadline.enforcement === OPT_IN || sweepRecords(dir, a).length > 0 || readDecision(dir, a.attempt_id) !== null;
 }

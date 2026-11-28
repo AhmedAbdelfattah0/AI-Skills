@@ -9,7 +9,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -643,28 +643,90 @@ test('round 3: an EMPTY decision file is INDETERMINATE: the settler neither acce
   assert.ok(codes(s).includes('deadline_decision_indeterminate'));
 });
 
-test('round 3 (SIMULATED pause after the claim): a result published before the signal is never signalled (envelope recheck before each signal)', { skip: SKIP }, async (t) => {
+test('round 4 (SIMULATED pause after the claim; INVERTED round-3 test): a temp file written AFTER the claim belongs to a late stamp: it vetoes nothing, the group is killed and the attempt ends timed_out', { skip: SKIP }, async (t) => {
   const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
   const { reconcileDeadlines } = await import('./run-engine.mjs');
   const p = pauseAt('sweep-after-claim');
   const sweeping = reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a), hooks: p.hooks }));
   await Promise.race([p.reached, sweeping]);
-  writeFileSync(a.envelope_file + '.tmp', ''); // the launcher has begun publishing (it opens its temp file before its stamp)
+  writeFileSync(a.envelope_file + '.tmp', '');
   p.release();
   const r = await sweeping;
-  assert.equal(r.swept[0].action, 'claimed', 'no signal was sent');
-  assert.ok(groupAlive(a.pgid), 'HAZARD: a launcher publishing its result was signalled');
-  assert.equal(sweepLines(fx).some(l => l.type === 'signalled'), false);
+  assert.equal(r.swept[0].action, 'killed');
+  assert.equal(groupAlive(a.pgid), false, 'a post-claim file did not veto the kill');
+  assert.equal(attemptOf(fx, a.attempt_id).status, 'timed_out');
 });
 
-test('round 3: a worker launcher that has opened its envelope temp file (before its stamp) is never claimed by the sweep', { skip: SKIP }, async (t) => {
+/** A test clock `ms` past the attempt's deadline. */
+const pastBy = async (a, ms) => (await import('./lib/deadline.mjs')).testClock({ bootId: a.deadline.boot_id, nowNs: () => BigInt(a.deadline.start_ns) + BigInt(a.deadline.limit_ms + ms) * 1000000n });
+
+for (const [name, plant, offset, expect] of [
+  ['a REGULAR worker temp file WITHIN the publish grace: stand down (no claim, no signal)', (f) => writeFileSync(f + '.tmp', ''), 1, 'publishing'],
+  ['a REGULAR worker temp file PAST the publish grace: claim and kill regardless', (f) => writeFileSync(f + '.tmp', ''), 6000, 'killed'],
+  ['a REGULAR runner .result marker PAST the publish grace: claim and kill', (f) => writeFileSync(f + '.result', ''), 6000, 'killed'],
+  ['a planted DIRECTORY at .result within the grace: not trusted, killed', (f) => mkdirSync(f + '.result'), 1, 'killed'],
+  ['a planted SYMLINK .tmp -> /dev/zero within the grace: not trusted, never opened, killed', (f) => symlinkSync('/dev/zero', f + '.tmp'), 1, 'killed'],
+  ['a planted DIRECTORY at the envelope name: not trusted as a published result, killed', (f) => mkdirSync(f), 1, 'killed'],
+]) {
+  test(`round 4 (planted file; SIMULATED clock) ${name}`, { skip: SKIP }, async (t) => {
+    const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+    plant(a.envelope_file);
+    const { reconcileDeadlines } = await import('./run-engine.mjs');
+    const r = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastBy(a, offset) }));
+    if (expect === 'publishing') { assert.equal(r.swept[0].reason, 'publishing'); assert.equal(decisionOf(fx, a), null); assert.ok(groupAlive(a.pgid)); }
+    else { assert.equal(r.swept[0].action, 'killed', JSON.stringify(r.swept)); assert.equal(groupAlive(a.pgid), false); }
+  });
+}
+
+test('round 4 (N2): a planted FIFO at the worker temp file never hangs the REAL sweep CLI (lstat only; a FIFO is not trusted): it kills within its timeout', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 1500 });
+  assert.equal(spawnSync('mkfifo', [a.envelope_file + '.tmp']).status, 0);
+  let out = null;
+  assert.ok(await waitUntil(() => {
+    const r = spawnSync(process.execPath, [ENGINE_CLI, 'reconcile', '--deadlines', 'true', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'],
+      { encoding: 'utf8', env: { ...fx.env, ...OPT_IN }, timeout: 15000 });
+    assert.notEqual(r.error?.code, 'ETIMEDOUT', 'HAZARD: a planted FIFO hung the sweep');
+    try { out = JSON.parse(r.stdout); } catch { out = null; }
+    return out?.swept?.[0]?.action === 'killed';
+  }, 30000), JSON.stringify(out));
+  assert.equal(groupAlive(a.pgid), false);
+});
+
+test('round 4 (C2 residual + m13): an EMPTY decision file with a hung group: within the grace no signal; past it the group is killed and the node fails deadline_decision_indeterminate with unknown usage (never accepted, never left running)', { skip: SKIP }, async (t) => {
   const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
-  writeFileSync(a.envelope_file + '.tmp', '');
+  writeFileSync(join(fx.attemptsDir(), `${a.attempt_id}.decision`), '');
   const { reconcileDeadlines } = await import('./run-engine.mjs');
-  const r = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a) }));
-  assert.equal(r.swept[0].reason, 'envelope_present');
-  assert.equal(decisionOf(fx, a), null);
+  const within = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastBy(a, 1) }));
+  assert.equal(within.swept[0].reason, 'decision_indeterminate');
   assert.ok(groupAlive(a.pgid));
+  const past = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastBy(a, 6000) }));
+  assert.equal(past.swept[0].action, 'killed');
+  assert.equal(groupAlive(a.pgid), false);
+  const s = fx.readState(), b = s.attempts.find(x => x.attempt_id === a.attempt_id);
+  assert.equal(s.nodes.a.state, 'failed');
+  assert.ok(codes(s).includes('deadline_decision_indeterminate'));
+  assert.equal(b.envelope, undefined);
+  assert.ok(s.usage.some(u => u.attempt_id === a.attempt_id && u.input_tokens === undefined), 'usage recorded as unknown');
+});
+
+test('round 4 (boundary, function level): on time when stamp <= deadline (inclusive) for the worker AND the runner shape; a stamp before the origin is invalid', async () => {
+  const { deadlineVerdict, appendSweep, claimDecision } = await import('./lib/deadline.mjs');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'verdict-'));
+  try {
+    const start = 10n ** 12n, at = (ms) => ({ exit_code: 0, mono_ns: String(start + BigInt(ms) * 1000000n) });
+    const worker = { attempt_id: 'w', pgid: 1, deadline: { start_ns: String(start), limit_ms: 100, enforcement: 'unqualified_opt_in' } };
+    assert.equal(deadlineVerdict(worker, dir, { env: at(100) }), 'ontime', 'stamp == deadline is on time');
+    assert.equal(deadlineVerdict(worker, dir, { env: at(101) }), 'late');
+    assert.equal(deadlineVerdict(worker, dir, { env: { exit_code: 0, mono_ns: '1' } }), 'unknown', 'a stamp before the origin is invalid (unstamped)');
+    appendSweep(dir, { type: 'signal', attempt_id: 'r', pgid: 2, leader_start: null, start_ns: String(start), limit_ms: 100, charged_ms: 101, envelope_present: false });
+    const runner = { attempt_id: 'r', pgid: 2 };
+    assert.equal(deadlineVerdict(runner, dir, { env: at(100) }), 'ontime', 'runner: stamp == deadline is on time');
+    assert.equal(deadlineVerdict(runner, dir, { env: at(101) }), 'late');
+    claimDecision(dir, 'r', 'expired');
+    assert.equal(deadlineVerdict(runner, dir, { env: at(100) }), 'ontime', 'a valid stamp stays authoritative over an expired claim');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('round 3: the stamped sealed launcher creates its pre-stamp `.result` marker before the frame (real runner)', { skip: SKIP }, async (t) => {

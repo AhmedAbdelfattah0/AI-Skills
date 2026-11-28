@@ -183,7 +183,9 @@ test('N2 90% consumed across repeated enforcer outages, restarts, a sleep and wa
   assert.deepEqual(readFileSync(stateOf(fx.repo)), before, 'below the deadline the sweep wrote nothing to the driver state');
   assert.equal(charged(), Math.round(LIMIT_MS * 0.9), 'consumed execution never disappears');
   await sweep(fx, clock.at(LIMIT_MS));
-  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the first observation at the deadline kills the group');
+  assert.ok(groupAlive(a.pgid), 'PR-1b round 4: a result stamped AT the deadline is on time (inclusive), so the sweep acts only strictly past it');
+  await sweep(fx, clock.at(LIMIT_MS + 1));
+  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 10000), 'the first observation past the deadline kills the group');
   assert.equal(attemptOf(fx.repo, a.attempt_id).status, 'timed_out');
 });
 
