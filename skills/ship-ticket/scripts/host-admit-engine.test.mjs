@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POSIX, fixture } from './engine-test-fixture.mjs';
 import { fakeHost } from './host-claims.test-helper.mjs';
+const WIN_UNSUPPORTED = process.platform === 'win32' ? 'host claims are POSIX-only: on win32 the claimer start identity is unrecordable, so the store holds every claim (held_claimer_identity, fail-closed); Windows is NOT SUPPORTED (execution-harness.md N7)' : false;
 
 const SKIP = POSIX ? false : 'POSIX process groups (Windows: host claims are unsupported, known limit D4)';
 const ENGINE_CLI = fileURLToPath(new URL('./run-engine.mjs', import.meta.url));
@@ -455,7 +456,7 @@ test('COMPOSE stage + earlyChecks + hostClaimRequired together record the combin
   assert.equal(d.status, 1); assert.match(d.stderr, /host_claim_required/);
 });
 
-test('SEAM (PR-5 supervisor x PR-2): a held `host-admit run` exits ADMISSION_HELD_EXIT (75), the one constant the supervisor reads; nothing runs', async (t) => {
+test('SEAM (PR-5 supervisor x PR-2): a held `host-admit run` exits ADMISSION_HELD_EXIT (75), the one constant the supervisor reads; nothing runs', { skip: WIN_UNSUPPORTED }, async (t) => {
   const HA = await admitCli();
   const SUP = await import('./supervisor.mjs');
   assert.equal(HA.ADMISSION_HELD_EXIT, 75);
@@ -470,4 +471,19 @@ test('SEAM (PR-5 supervisor x PR-2): a held `host-admit run` exits ADMISSION_HEL
     { platform: 'darwin', dir, snapshot: h.snapshot, now: h.now, log: () => {} });
   assert.equal(r.code, 75, JSON.stringify(r.line)); assert.equal(r.line.reason, 'held_heavy');
   assert.equal(existsSync(mark), false, 'nothing ran');
+});
+
+test('WIN32: `host-admit run` refuses cleanly on Windows (platform_unsupported, exit 2): no claim, nothing started (NOT SUPPORTED there)', async (t) => {
+  const { run } = await admitCli();
+  const dir = tmpStore(t), mark = join(dir, 'ran');
+  const cmd = ['--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(mark)}, 'x')`];
+  for (const cls of ['heavy', 'light']) {
+    const lines = [];
+    const r = await run(['run', '--class', cls, ...cmd], { platform: 'win32', dir, log: (l) => lines.push(l), snapshot: async () => { throw new Error('never sampled'); } });
+    assert.equal(r.code, 2, `${cls}: ${JSON.stringify(r.line)}`);
+    assert.equal(r.line.reason, 'platform_unsupported');
+    assert.equal(lines.length, 1);
+  }
+  assert.equal(existsSync(mark), false, 'nothing ran');
+  assert.deepEqual(claimIds(dir), [], 'no claim written');
 });

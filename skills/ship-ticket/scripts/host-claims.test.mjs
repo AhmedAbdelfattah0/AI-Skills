@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fakeHost } from './host-claims.test-helper.mjs';
+const WIN_UNSUPPORTED = process.platform === 'win32' ? 'host claims are POSIX-only: on win32 the claimer start identity is unrecordable, so the store holds every claim (held_claimer_identity, fail-closed); Windows is NOT SUPPORTED (execution-harness.md N7)' : false;
 
 const POSIX = process.platform !== 'win32';
 const SKIP = POSIX ? false : 'POSIX process groups (Windows quiescence is unknown, known limit D4)';
@@ -124,7 +125,7 @@ test('P2-3 dead claimer plus a live labelled container: kept and charged; reclai
   assert.deepEqual(claimIds(dir), ['next-3']);
 });
 
-test('P2-4 two spellings of one installation: an active reader blocks the writer (npm ci); an unrelated resource proceeds', async (t) => {
+test('P2-4 two spellings of one installation: an active reader blocks the writer (npm ci); an unrelated resource proceeds', { skip: WIN_UNSUPPORTED }, async (t) => {
   const dir = tmp(t), root = tmp(t);
   mkdirSync(join(root, 'real', 'node_modules'), { recursive: true });
   mkdirSync(join(root, 'other', 'node_modules'), { recursive: true });
@@ -266,7 +267,7 @@ test('F2 a claim reclaimed by another claimer before its owner releases it: the 
   assert.ok(rows.some(x => x.kind === 'peak' && x.op_id === 'quick' && x.peak_rss_mb === 7), 'the peak row is not lost');
 });
 
-test('F3 a holder of weight 2 is charged 2 and the next heavy is held_heavy (never invalid_args)', async (t) => {
+test('F3 a holder of weight 2 is charged 2 and the next heavy is held_heavy (never invalid_args)', { skip: WIN_UNSUPPORTED }, async (t) => {
   const dir = tmp(t);
   const { claim } = await store();
   const h = fakeHost({ pressure: 1 }); // healthy: two heavy slots
@@ -278,7 +279,7 @@ test('F3 a holder of weight 2 is charged 2 and the next heavy is held_heavy (nev
   assert.ok(next.reasons.includes('held_heavy') && !next.reasons.includes('invalid_args'), `${next.reasons}`);
 });
 
-test('F6 an unreadable holder is charged its resources too: it conflicts with every resource claim', async (t) => {
+test('F6 an unreadable holder is charged its resources too: it conflicts with every resource claim', { skip: WIN_UNSUPPORTED }, async (t) => {
   const dir = tmp(t);
   mkdirSync(join(dir, 'claims'), { recursive: true });
   writeFileSync(join(dir, 'claims', 'garbled.json'), '{ not json');
@@ -323,7 +324,7 @@ test('m2 a labelled claim whose group dies between the outside probe and the loc
 
 // ---- PR-2 (S2-min): RCA-S2-ROUND3 (d) bounded op ids, (e) record-version recheck, MINOR-2 identity, no batch rebind ----
 
-test('R3-d op ids built from long parts are bounded by a digest: always a safe id of at most 200 characters, distinct per input', async () => {
+test('R3-d op ids built from long parts are bounded by a digest: always a safe id of at most 200 characters, distinct per input', { skip: WIN_UNSUPPORTED }, async () => {
   const { boundedOpId, claim } = await store();
   const long = 'T'.repeat(128), run = 'r'.repeat(128);
   const a = boundedOpId([long, run, 'gate-ship-ready', 'x1']), b = boundedOpId([long, run, 'gate-ship-ready', 'x2']);

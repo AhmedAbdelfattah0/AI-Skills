@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, parseArgs } from './host-admit.mjs';
+const WIN_UNSUPPORTED = process.platform === 'win32' ? 'host claims are POSIX-only: on win32 the claimer start identity is unrecordable, so the store holds every claim (held_claimer_identity, fail-closed); Windows is NOT SUPPORTED (execution-harness.md N7)' : false;
 
 // Fake clock: each snapshot window is two samples 20 s apart; the next window starts where the previous ended.
 const mk = (o = {}) => {
@@ -42,25 +43,25 @@ test('healthy host: cold start needs two windows, then admits (exit 0, one objec
   assert.equal(r.code, 0); assert.equal(r.line.admit, true); assert.equal(r.line.reason, 'admitted');
   assert.equal(r.line.class, 'heavy'); assert.equal(m.calls(), 2); assert.equal(r.line.signals.heavy_slots, 2);
 });
-test('light class admits beside live heavy claims (occupancy from the store)', async () => {
+test('light class admits beside live heavy claims (occupancy from the store)', { skip: WIN_UNSUPPORTED }, async () => {
   const r = await go(['--class', 'light'], { snapshot: mk().snapshot, dir: await storeWith(2) });
   assert.equal(r.code, 0); assert.equal(r.line.occupancy, 2);
 });
-test('heavy slots: two live heavy claims in the store hold a third heavy (held_heavy), exit 1', async () => {
+test('heavy slots: two live heavy claims in the store hold a third heavy (held_heavy), exit 1', { skip: WIN_UNSUPPORTED }, async () => {
   const r = await go(['--class', 'heavy'], { snapshot: mk().snapshot, dir: await storeWith(2) });
   assert.equal(r.code, 1); assert.equal(r.line.admit, false); assert.ok(r.line.reasons.includes('held_heavy'));
 });
-test('one live heavy claim: a second heavy admits after the second window (headline never held_hysteresis)', async () => {
+test('one live heavy claim: a second heavy admits after the second window (headline never held_hysteresis)', { skip: WIN_UNSUPPORTED }, async () => {
   const m = mk();
   const r = await go(['--class', 'heavy'], { snapshot: m.snapshot, dir: await storeWith(1) });
   assert.equal(r.code, 0); assert.equal(r.line.reason, 'admitted'); assert.equal(m.calls(), 2); assert.equal(r.line.occupancy, 1);
 });
-test('two live heavy claims hold with held_heavy as the headline after both windows', async () => {
+test('two live heavy claims hold with held_heavy as the headline after both windows', { skip: WIN_UNSUPPORTED }, async () => {
   const m = mk();
   const r = await go(['--class', 'heavy'], { snapshot: m.snapshot, dir: await storeWith(2) });
   assert.equal(r.code, 1); assert.equal(r.line.reason, 'held_heavy'); assert.equal(m.calls(), 2);
 });
-test('S2 (RED on frozen): one live heavy claim at ONE heavy slot (pressure 2) holds a second heavy: occupancy is the store, not a caller default of 0', async () => {
+test('S2 (RED on frozen): one live heavy claim at ONE heavy slot (pressure 2) holds a second heavy: occupancy is the store, not a caller default of 0', { skip: WIN_UNSUPPORTED }, async () => {
   const dir = await storeWith(1);
   const r = await go(['--class', 'heavy'], { snapshot: mk({ latest: { pressure_level: 2 } }).snapshot, dir });
   assert.equal(r.code, 1); assert.equal(r.line.admit, false); assert.equal(r.line.reason, 'held_heavy');
