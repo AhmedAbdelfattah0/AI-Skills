@@ -83,7 +83,7 @@ test('S2 (RED on frozen): `run` claims before spawn, releases after the group is
   const m = mk();
   const held = await go(['run', '--class', 'heavy', '--op-id', 'suite-2', '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(mark)}, 'heavy')`],
     { dir: await storeWith(2), snapshot: m.snapshot, now: m.now, log: () => {} });
-  assert.equal(held.code, 1, 'a hold exits 1');
+  assert.equal(held.code, 75, 'a hold exits ADMISSION_HELD_EXIT (75), never 1 (which a command may exit itself)');
   assert.equal(held.line.reason, 'held_heavy');
   assert.equal(readFileSync(mark, 'utf8'), '1', 'and spawns nothing');
   assert.ok(existsSync(dir));
@@ -140,5 +140,5 @@ test('F11 (RED on frozen: the claiming `run` is absent there) two concurrent `ru
     go(['run', '--class', 'heavy', '--op-id', 'suite-a', ...cmd(marks[0])], { dir, snapshot: go1.snapshot, now: go1.now, log: () => {} }),
     go(['run', '--class', 'heavy', '--op-id', 'suite-b', ...cmd(marks[1])], { dir, snapshot: go2.snapshot, now: go2.now, log: () => {} })]);
   assert.equal(marks.filter(f => existsSync(f)).length, 1, `exactly one heavy command started (codes ${x.code}, ${y.code})`);
-  assert.deepEqual([x.code, y.code].sort(), [0, 1], 'one ran, one was held');
+  assert.deepEqual([x.code, y.code].sort((a, b) => a - b), [0, 75], 'one ran, one was held');
 });

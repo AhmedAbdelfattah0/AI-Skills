@@ -45,9 +45,9 @@ import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from
 import { archiveRoot, readArchive, windowRefusal, sourceRefusal, adoptable, applyAdoption, retireRefusal, retireLive, retireObserve as observeForRetire, archiveFinality, sourceState } from './engine-adopt.mjs';
 import { redChanges } from './engine-attempts.mjs';
 import { repoIdentityOn, earlyChecksOn, hostClaimRequiredOn } from './engine-dag.mjs';
-import { hostClaimVersion } from './engine-policy.mjs';
+import { repoIdentityVersion, earlyChecksVersion, stageVersion, hostClaimVersion } from './engine-policy.mjs';
+import { stageOn, parseStagePolicy, feasibility, initialStage, stageStateRefusal, stageBindingRefusal } from './stage-obligations.mjs';
 import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2: the CLI entry check only (main), never the library
-import { repoIdentityVersion, earlyChecksVersion } from './engine-policy.mjs';
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
@@ -188,6 +188,14 @@ function open(ctx, prefer) {
       // S5: the earlyChecks flag of the run's version and config.earlyChecks come together or not at all
       if ((E.policy.semantics.earlyChecks === true) !== earlyChecksOn(E.S))
         throw coded('early_checks_state_missing', `policy_version ${E.S.policy_version} and config.earlyChecks disagree: a partial early-checks run is never resumed`);
+      // PR-3: the stageObligations flag of the run's version, config.stagePolicy and S.stage come together or not at all, and the
+      // stage record is, on EVERY load, exactly the one its RETAINED approved line derives (never the caller's plan)
+      if (new Set([E.policy.semantics.stageObligations === true, stageOn(E.S.config), E.S.stage !== undefined]).size !== 1)
+        throw coded('stage_state_missing', `policy_version ${E.S.policy_version}, config.stagePolicy and the stage obligation state disagree: a partial stage record is never resumed`);
+      if (E.S.stage !== undefined) {
+        const why = stageStateRefusal(E.S);
+        if (why) throw coded('stage_state_invalid', `the stage obligation record does not match its retained approved stage policy: ${why}; it is never resumed`);
+      }
       // PR-2: the hostClaimRequired flag of the run's version and config.hostClaimRequired come together or not at all
       if ((E.policy.semantics.hostClaimRequired === true) !== hostClaimRequiredOn(E.S))
         throw coded('host_claims_state_missing', `policy_version ${E.S.policy_version} and config.hostClaimRequired disagree: a partial host-claim run is never resumed`);
@@ -268,6 +276,12 @@ function verifyBinding(E) {
     // Grandfathering is by the trusted START's approval time, never by a missing field (AIS-HARNESS-4 Wave B).
     else if (!securityOn(S) && !legacyApproval(approved.start)) out.push(judgment('security_policy_required', null,
       'the trusted START is not approved before the security policy cutoff, and the bound DAG has no config.securityPolicy 2'));
+    // PR-3: a separate check (it never shadows the chain above): the retained stage line is the approved narrative's
+    if (S.stage && approved.digest === S.plan_digest) {
+      const t = approved.text, b = t.indexOf(BEGIN), e = t.indexOf(END);
+      const why = stageBindingRefusal(S, b >= 0 && e > b ? t.slice(0, b) + t.slice(e) : t);
+      if (why) out.push(judgment('stage_policy_mismatch', null, why));
+    }
   } catch (e) {
     if (e.code === 'run_state_malformed') out.push(judgment(e.code, null, e.message));
     else if (e.code === 'approval_mismatch') out.push(judgment('approval_mismatch', null, 'plan narrative no longer matches the approved START'));
@@ -404,6 +418,19 @@ async function bindObligations(sp, cat, block, nodes, root) {
 }
 
 /**
+ * PR-3 (P6): the stage policy and plan feasibility of a config.stagePolicy run, run by BOTH preflight and init (so an
+ * unpreflighted infeasible plan is refused at init). Null for every other run (frozen semantics). The policy is the
+ * approved narrative's stage-policy-v1 line only.
+ */
+async function bindStage(ctx, config, nodes, narrative, text) {
+  if (!stageOn(config)) return null;
+  const policy = parseStagePolicy(narrative, { ticket: ctx.ticket });
+  const sp = config.securityPolicy === 2 ? await securityPlan() : null;
+  const f = feasibility({ policy, config, nodes, ticket: ctx.ticket, repoRoot: ctx.repoRoot, sp, block: sp ? sp.parsePlanSecurityBlock(text) : null, env: ctx.env });
+  return { policy, ...f };
+}
+
+/**
  * F12a plan-time preflight: the checks `init` runs on the plan and DAG (validateEngineDag, bindSecurity, and for a
  * format-3 block the obligation matrix and inventory completeness), callable BEFORE approval: no lock, no state, no
  * START and no write. It also refuses a node that reads what a transitive dependent writes (dag_read_write_dependency,
@@ -427,15 +454,24 @@ export async function preflight(ctx) {
   const block = sp.parsePlanSecurityBlock(text);
   const m = sp.obligationMatrix(sp.loadCatalog(catalogOptions(ctx)), block);
   if (!m.ok) throw coded(m.code, `the §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
+  const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
   return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
-    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix };
+    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix,
+    ...(stage ? { stage: { policy_digest: stage.policy.policy_digest, merge_stage: stage.policy.merge_stage, stages: stage.policy.stages,
+      obligations: stage.policy.deferred.map(d => d.row),
+      deferrals: stage.policy.deferred.map(d => ({ row: d.row, deferred_stage: d.stage, trigger: d.trigger ?? null, tracker_ref: d.tracker_ref ?? null })),
+      artifacts: stage.policy.artifacts, signal_prescan: stage.signal_prescan } } : {}) };
 }
 
 /**
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false, hostClaims = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false, identity = false, durable = false, early = false, twins = {}) {
+  // Merge of PR-2 and PR-3: the two later twin flags are NAMED options, never positional booleans, so they cannot be swapped.
+  if (twins === null || typeof twins !== 'object' || Object.keys(twins).some(k => k !== 'stage' && k !== 'hostClaims'))
+    throw coded('bad_context', 'newRunPolicy: the stage and host-claim twins are named options { stage, hostClaims }');
+  const { stage = false, hostClaims = false } = twins;
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
@@ -446,10 +482,13 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false, 
   // S1 (M1): a durable run records the durable row of its other flags (13-24); an engine without one cannot start it
   const recorded = durable ? durableVersion(flagged, engine.semantics) : flagged;
   if (recorded === null) throw coded('policy_version_unsupported', `no durable-run policy version for policy_version ${flagged}`);
+  // PR-3: config.stagePolicy records the stage twin (engine-policy.mjs STAGE_OBLIGATIONS_OFFSET), BEFORE the early-checks twin
+  const staged = stage ? stageVersion(recorded, engine.semantics) : recorded;
+  if (staged === null) throw coded('policy_version_unsupported', `no stage-obligation policy version for policy_version ${recorded}`);
   // S5: config.earlyChecks records the early-checks twin (engine-policy.mjs EARLY_CHECKS_OFFSET); an engine without one cannot start it
-  const final = early ? earlyChecksVersion(recorded, engine.semantics) : recorded;
-  if (final === null) throw coded('policy_version_unsupported', `no early-checks policy version for policy_version ${recorded}`);
-  // PR-2: config.hostClaimRequired records the host-claim twin (engine-policy.mjs HOST_CLAIM_OFFSET); an engine without one cannot start it
+  const final = early ? earlyChecksVersion(staged, engine.semantics) : staged;
+  if (final === null) throw coded('policy_version_unsupported', `no early-checks policy version for policy_version ${staged}`);
+  // PR-2: config.hostClaimRequired records the host-claim twin (engine-policy.mjs HOST_CLAIM_OFFSET), AFTER stage and early checks
   const claimed = hostClaims ? hostClaimVersion(final, engine.semantics) : final;
   if (claimed === null) throw coded('policy_version_unsupported', `no host-claim policy version for policy_version ${final}`);
   return { policy_version: runPolicy({ policy_version: claimed }, engine).version,
@@ -519,6 +558,7 @@ async function initLocked(ctx, placement) {
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
+    const stage = await bindStage(ctx, dag.config, dag.nodes, narrative, text);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
     // S-28a: trust on first use from ONE snapshot of the remote's URLs (engine-identity.mjs bindIdentity): remote_ambiguous, or
     // identity_unbound when it names no repository on github.com (nothing written); the pin is then read by that snapshot only
@@ -540,8 +580,9 @@ async function initLocked(ctx, placement) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag), hostClaimRequiredOn(dag)), ...(testKinds ? { test_kinds: testKinds } : {}),
-      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null, repoIdentityOn(dag), E.P.placement === 'durable', earlyChecksOn(dag),
+        { stage: stage !== null, hostClaims: hostClaimRequiredOn(dag) }), ...(testKinds ? { test_kinds: testKinds } : {}),
+      ...(E.P.placement === 'durable' ? { durable: { version: 1, worktree: worktreeTop(ctx.repoRoot) } } : {}), ...(stage ? { stage: initialStage(stage.policy) } : {}) };
     if (pin) {
       note(E.S, 'BASE_PINNED', { ...pin.base });
       E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
@@ -564,6 +605,7 @@ export async function status(ctx) {
   const out = view(E, drift(E, { mutate: false }));
   if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
   if (E.S.base) out.base = baseStatus(E); // S-12: advisory only (never a judgment), and only for a pinned run
+  if (E.S.stage) out.stage = { merge_stage: E.S.stage.merge_stage, obligations: E.S.stage.obligations }; // PR-3: open obligations survive every resume
   return out;
 }
 
@@ -896,7 +938,7 @@ export async function adopt(ctx) {
   }, { waitMs: ADOPT_LOCK_WAIT_MS });
 }
 
-const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'host_claims_state_missing', 'host_claim_required']);
+const GATE_REFUSALS = new Set(['worktree_mismatch', 'durable_state_missing', 'state_placement_ambiguous', 'lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing', 'identity_state_missing', 'early_checks_state_missing', 'stage_state_missing', 'stage_state_invalid', 'host_claims_state_missing', 'host_claim_required']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;

@@ -22,6 +22,7 @@ import { checkedIdentity, identityStage } from './engine-identity.mjs';
 import { repoIdentityOn } from './engine-dag.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
+import { shipStage, retainedStagePolicy } from './stage-obligations.mjs';
 import { earlyChecksOn } from './engine-dag.mjs';
 import { proveGate, proveRefusal, staleProofRefusal, proofInputs, sameInputs, proofExtras, entryTimeout } from './engine-prove.mjs'; // S5
 
@@ -429,12 +430,14 @@ async function shipReadyGate(E, input, candidate) {
     note(S, 'LOCAL_PROOF', { candidate_id: candidate, passed: commands.length > 0 && commands.every(c => c.result === 'pass') });
     v = gateShipReady({ state: E.S, current });
   }
+  // PR-3: a config.stagePolicy run binds (or re-binds, keyed by row) its open stage obligations to this candidate; SHIP_READY covers the merge stage only.
+  const stage = v.ok && S.stage ? shipStage(S, candidate, idShip?.base?.merge_base ?? S.base?.merge_base ?? null) : null;
   if (v.ok && S.ship_ready?.candidate_id !== candidate) {
     note(S, 'SHIP_READY', { candidate_id: candidate });
     S.ship_ready = { candidate_id: candidate, seq: S.seq, ...(idShip ? { base: idShip.base } : {}) };
-    S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
+    S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString(), ...(stage ?? {}) });
   } else if (v.ok && idShip) S.ship_ready.base = idShip.base; // S-28a: a RETRY re-freeze of the same candidate moves the base of record
-  return { judgment_point: false, ...v, ...(earlyChecksOn(S) ? { final_gates: 'required' } : {}), ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
+  return { judgment_point: false, ...v, ...(stage ? { stage } : {}), ...(earlyChecksOn(S) ? { final_gates: 'required' } : {}), ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
     matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
 
@@ -829,7 +832,8 @@ async function reassessGate(E, input, candidate) {
   // that surface; one that redefines an approved boundary id is refused bad_input; one outside the Design
   // Contract is a REAPPROVAL basis).
   const res = sec.sp.reassess({ plan, catalog: sec.catalog, inventory: { candidate_id: candidate, surfaces: input.surfaces ?? [] },
-    changed: { contract_paths: designContract(Object.values(S.nodes)), files: changedFiles(E, E.candidatePaths ?? []) },
+    // PR-3: a stage run's declared artifacts (exact .specs/ paths of the RETAINED approved line) are inside the Design Contract
+    changed: { contract_paths: [...designContract(Object.values(S.nodes)), ...(S.stage ? retainedStagePolicy(S).artifacts : [])], files: changedFiles(E, E.candidatePaths ?? []) },
     classifications: input.classifications ?? [], addenda: sec.events.addenda.map(a => ({ pairs: a.pairs.map(pairKey) })) });
   if (!res.ok) {
     if (res.code === 'classification_missing') return gateNo('reassess_unclassified', res.reasons, { unclassified: res.unclassified ?? [], signals: res.signals ?? [] });

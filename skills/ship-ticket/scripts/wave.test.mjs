@@ -66,6 +66,18 @@ const S = {
     assert.deepEqual(codesOf(manifest(undefined, { release_mode: 5 }), m), ['wave_schema_invalid']);
     assert.deepEqual(codesOf(manifest(undefined, { release_mode: null }), m), ['wave_schema_invalid']);
   },
+  merge_strategy_and_width_reason(m) {
+    // PR-5 (S7a): both optional, so every existing manifest (and its approved digest) stays valid; absent strategy = owner
+    assert.deepEqual(codesOf(manifest(undefined, { merge_strategy: 'owner' }), m), []);
+    assert.deepEqual(codesOf(manifest(undefined, { merge_strategy: 'automatic' }), m), []);
+    for (const bad of ['auto', 'Owner', '', 'manual', 'merge']) assert.deepEqual(codesOf(manifest(undefined, { merge_strategy: bad }), m), ['wave_merge_strategy_invalid'], bad);
+    assert.deepEqual(codesOf(manifest(undefined, { merge_strategy: 1 }), m), ['wave_schema_invalid']);
+    assert.deepEqual(codesOf(manifest(undefined, { heavy_slots: 2, width_reason: 'two independent heavy suites; host measured quiet' }), m), []);
+    for (const bad of ['', 'a\nb', 'a\rb', 'x'.repeat(501)]) assert.deepEqual(codesOf(manifest(undefined, { width_reason: bad }), m), ['wave_width_reason_invalid'], JSON.stringify(bad));
+    assert.deepEqual(codesOf(manifest(undefined, { width_reason: 3 }), m), ['wave_schema_invalid']);
+    assert.equal(m.mergeStrategyOf(manifest()), 'owner');
+    assert.equal(m.mergeStrategyOf(manifest(undefined, { merge_strategy: 'automatic' })), 'automatic');
+  },
   unsafe_paths_and_closed_schema(m) {
     const bad = (over, code = 'wave_path_unsafe') => assert.deepEqual(codesOf(manifest([tk('T1', over)]), m), [code], JSON.stringify(over));
     for (const plan of ['../x.md', '/etc/x.md', '.specs/../x.md', '.specs\\x.md', 'a\0.md', '.specs/plans/x.txt', '-x.md', 'a//b.md', '']) bad({ plan });
@@ -362,6 +374,8 @@ const MUTANTS = [
   ['owner-gate-ignored', 'else if (n.owner_required && !n.owner_approved)', 'else if (false)', ['owner_required_never_auto_ready']],
   ['release-mode-automated-accepted', "export const RELEASE_MODES = Object.freeze(['manual']);", "export const RELEASE_MODES = Object.freeze(['manual', 'automated']);", ['release_mode_enum']],
   ['release-mode-never-checked', 'if (m.release_mode !== undefined && !RELEASE_MODES.includes(m.release_mode))', 'if (false)', ['release_mode_enum']],
+  ['merge-strategy-unchecked', "if (m.merge_strategy !== undefined && !MERGE_STRATEGIES.includes(m.merge_strategy))", 'if (false)', ['merge_strategy_and_width_reason']],
+  ['width-reason-unchecked', "if (m.width_reason !== undefined && !safeReason(m.width_reason))", 'if (false)', ['merge_strategy_and_width_reason']],
   ['dag-cycle-unchecked', 'if (cycle) add(', 'if (false) add(', ['dag_cycle_refused']],
   ['dep-subset-unchecked', "else if (!keys.has(d)) add('wave_dep_unknown'", "else if (false) add('wave_dep_unknown'", ['dep_outside_wave_and_duplicates']],
   ['stack-unchecked', "if (prior !== undefined) add('wave_stack_unsupported'", "if (false) add('wave_stack_unsupported'", ['shared_branch_or_worktree_is_a_stack']],

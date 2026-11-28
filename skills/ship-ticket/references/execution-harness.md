@@ -126,7 +126,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   refused). `--class heavy|light` alone is an ADVISORY check that takes no claim and prints ONE JSON line
   `{admit, reason, reasons, class, occupancy, unknown, claimed, signals}`. `run [--class heavy|light [--weight N]]
   [--op-id <id>] [--resource <path>:R|W]... [--container-owner <o> --container-run <r>] -- <command>` is the
-  claiming path, run for HEAVY work: it claims before the command starts (exit 1 on a hold, nothing started), binds
+  claiming path, run for HEAVY work: it claims before the command starts (exit 75 on a hold, nothing started), binds
   the claim to the command's process group before the launcher's release byte, mirrors the command's exit code, and
   releases the claim only once the group is gone, no container with the given labels remains and, for an engine
   run, every attempt in the run's existing attempt records is settled or its detached group gone; otherwise the
@@ -138,7 +138,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   unflagged run too: a wrapped drive needs a weight of at most 2 (the host maximum), else it is refused with
   `weight_exceeds_host_capacity` (an unset `config.width` means `min(3, cpu_count)`, so set `config.width` 1 or 2).
   Width 1 is the default for flagged runs: a weight-2 drive is admitted only while the host is healthy (2 heavy slots)
-  and no other heavy claim is held; there is no queue, so on a busy host it waits (exit 1) until both hold.
+  and no other heavy claim is held; there is no queue, so on a busy host it waits (exit 75) until both hold.
   A run-bound claim is judged on the state of ITS run, keyed on the run id and the run's creation time it recorded,
   never on the state file path alone (successive runs of a ticket share it): the live state if it is that run, else that
   run's archived final state after `archive --retire` (its retire record and state digest must match). Another run's state
@@ -146,7 +146,8 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   explicit `config.width` required; the drive weight must fit the host maximum of 2 heavy slots) records a
   host-claim policy version (`engine-policy.mjs` `HOST_CLAIM_OFFSET`), and the run-engine CLI entry refuses its heavy
   commands with `host_claim_required` unless they run inside an active claim of sufficient weight bound to that run.
-  Exit codes: 0 admit, 1 hold, 2 usage error, unsupported platform, a weight above the host maximum
+  Exit codes: 0 admit (the advisory check) or the mirrored command exit (`run`), 1 hold (advisory) or 75 hold (`run`,
+  never confused with a command exit 1), 2 usage error, unsupported platform, a weight above the host maximum
   (`weight_exceeds_host_capacity`) or an internal failure (`reason:"error"`). Non-macOS prints
   `admit:false`, `reason:platform_unsupported`: that is NOT an allow; the orchestrator falls back to the
   manual rule (check memory pressure and load itself, run one heavy job at a time). A hold means reduce
@@ -205,6 +206,10 @@ What it enforces:
   review round being repaired). It may declare `redSpecs` (repo-relative spec
   paths); then `redEvidence` must be an absolute path to a non-empty file with
   the failing-run output, written by the orchestrator, or dispatch is refused.
+  The supervisor's read-only review legs and RCA (`scripts/supervisor.mjs`, not
+  installed or activated) are not writers: `prepareAgentTask` routes them through
+  the same tier-to-`modelMap` code (REVIEW is always `strong`), forces the codex
+  `read-only` sandbox and the claude `dontAsk` mode, and accepts no ownership.
 - **Plan roots are orchestrator-owned.** A change under `.specs`/`.spec` during a
   run is RUN-STATE bookkeeping: it is reported in `orchestrator_paths_changed`
   and is not a `writes_outside_ownership` violation.
@@ -327,6 +332,37 @@ times are read time-zone and locale independently. Each launched attempt of a du
 have not all passed), so `reconcile --deadlines` measures nothing and sends no signal, and the launcher's in-process timers
 remain the only enforcer. The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`.
 
+**Stage obligations** (PR-3, S4-min: `config.stagePolicy: { version: 1 }`, opt-in, UNQUALIFIED; `scripts/stage-obligations.mjs`).
+The stage policy is ONE visible `stage-policy-v1: <json>` line of the approved narrative (never inside an HTML comment or
+a code fence, under either lexing order): the stages that exist in the run, the merge stage, the verification rows it
+declares with their stages (not cross-checked against the 3b table), each deferral (row, stage, environment, subject,
+required evidence, trigger or tracker) and the exact `.specs/` `artifacts` the run writes. `preflight` and `init` both
+refuse an infeasible plan: a row whose stage neither exists nor is deferred (`stage_unavailable`); a deferral of an existing
+stage, of the merge stage, of another stage than its row's, of a section 3a pair or of a check this run executes
+(`stage_deferral_invalid`: a current-stage control is never deferred); a deferral with no trigger and no tracker
+(`obligation_trigger_missing`); a design-parity artifact of a `ui` run not declared in `artifacts`
+(`required_artifact_outside_contract`); a run with no test command at all (`proof_runner_missing`: the local proof at
+SHIP_READY needs at least one, with or without RED specs); a RED-bearing node with no legal `gate red` invocation under
+the engine's own RED contract (`redRunner` + `pinnedSpecs`): named pins need ONE formatted, non-evidence, executable test
+command naming all of them verbatim as arguments, while each plain-path pin needs some such command naming it
+(`red_runner_missing`: a necessary condition only, with no selector parser, so a directory, glob or option reach is
+refused as unproven; naming is not execution, and an entry that names the spec but runs something else fails closed at
+`gate red`); a test command that is not executable (`runner_not_executable`); and a file-shaped planned write that raises a
+surface signal no surface lists (`surface_inventory_incomplete`, the existing path pre-scan, any block format). Each deferral
+is an OPEN obligation in the run state, keyed by row. SHIP_READY covers the merge stage only: its event carries
+`verified_through` and `obligations_open`, and it binds each obligation to the candidate and base (re-binding it, with a
+lineage entry, on a later candidate). The Factory never marks an obligation verified: there is no verify command and no
+evidence record; the obligation is closed outside the Factory by the follow-up ticket its tracker or trigger names, through
+that ticket's own acceptance (CI, exact-head review, merge). The approved line is retained in the run state; on every load the
+stage record must equal the one that retained line derives, with every status `open` (`stage_state_invalid`), and owner
+commands check the retained line against the approved narrative (`stage_policy_mismatch`); a foreign-worktree command never
+reads its caller's plan. This is a shape check under the same-user bound, not authentication of `state.json`. Declared
+`artifacts` extend the Design Contract that `gate reassess` matches. Limits: stage availability is plan-asserted (W8b: a
+plan that omits a stage that exists can defer that stage's row; only the owner's approval of the visible line controls it);
+a new-route signal raised by a client call such as `this.api.get(` stays unclassified (the ticket is Blocked, as before);
+recording an obligation does not enforce deployment. Section 3b status rules and the SHIP waiver wording in
+[ship.md](ship.md) are unchanged.
+
 **DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields
 are refused, never dropped.
 
@@ -347,7 +383,7 @@ are refused, never dropped.
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
   node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)),
   `durableRun` (S1: absent or `{ version: 1 }` is the default durable run; `false` is the escape hatch to the legacy
-  per-worktree placement, see Files). Billing is
+  per-worktree placement, see Files), `stagePolicy` (PR-3: exactly `{ version: 1 }`, opt-in; see Stage obligations). Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
   `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
   `allowApiBilling` exists only for a library caller the user authorized.
@@ -426,6 +462,10 @@ Limits:
   file is the trust anchor, and any process of the user can rewrite it.
 - S1: versions 13-24 are 1-12 plus `durableRun` (every new run; the escape hatch records 1-12). A run's `durableRun` flag,
   its `S.durable` record and its placement must agree at every load (`durable_state_missing` otherwise).
+- PR-3: versions 25-48 are 1-24 plus `stageObligations` (core rows derived from 1-24, so S5's twins 125-148 follow).
+  Composition order: every core flag, then the stage twin (+24), then the early-checks twin (+100). `init` records it for a
+  DAG with `config.stagePolicy`; an engine without PR-3 refuses such a run (`policy_version_unsupported`). The flag,
+  `config.stagePolicy` and `S.stage` must agree at every load (`stage_state_missing` otherwise).
 - S5: every core version v (< 100) has an early-checks twin v + 100 (the same flags plus `earlyChecks`), derived from the
   core table, so it composes with any later core flag. `init` records it for a DAG with `config.earlyChecks`; an engine
   without S5 refuses such a run (`policy_version_unsupported`). The flag and `config.earlyChecks` must agree at every load

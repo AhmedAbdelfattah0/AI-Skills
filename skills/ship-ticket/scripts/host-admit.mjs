@@ -8,7 +8,7 @@
  *     Non-macOS is NOT an allow: it prints admit:false, reason platform_unsupported (use the manual rule).
  *   node scripts/host-admit.mjs run [--class heavy|light [--weight N]] [--op-id <id>] [--resource <path|name>:R|W]...
  *                              [--container-owner <o> --container-run <r>] -- <command> [args...]
- *     The CLAIMING path: claims BEFORE spawn (exit 1 on a hold, nothing spawned), starts the command through the launcher in
+ *     The CLAIMING path: claims BEFORE spawn (exit 75 on a hold, nothing spawned), starts the command through the launcher in
  *     its own process group, binds the claim to that pgid BEFORE the release byte, waits, and releases the claim once the
  *     group is gone (and no container with the given labels remains, and, for an engine run, every attempt in the run's
  *     existing attempt records is settled or its detached group gone), persisting the post-admission peak. A release the
@@ -33,6 +33,11 @@ import { launcherArgs, RELEASE_BYTE } from './launcher.mjs';
 import { leaderStart } from './engine-quiesce.mjs';
 
 const USAGE = 'Usage: host-admit.mjs --class heavy|light | host-admit.mjs run [--class heavy|light [--weight N]] [--op-id <id>] [--resource <path|name>:R|W]... [--container-owner <o> --container-run <r>] -- <command> [args...]';
+/**
+ * The exit status of a `run` whose claim was HELD (nothing was started): 75 (EX_TEMPFAIL), never 1, so a hold is not
+ * confused with a command that itself exited 1 (the exit is mirrored). The supervisor (supervisor.mjs) reads this constant.
+ */
+export const ADMISSION_HELD_EXIT = 75;
 const RUNNING_REMOVED = 'occupancy comes from the claim store (host-claims.mjs); --running was removed';
 
 /** Check-mode arguments: exactly `--class heavy|light`. `--running` is refused (`removed: true`). */
@@ -120,7 +125,7 @@ async function runClaimed(argv, deps, platform, usage) {
     conflicts: c.conflicts, unknown: c.unknown, blocked: c.blocked ? { raised: c.blocked.raised, op_ids: c.blocked.op_ids } : null, claimed: c.admit,
     run_state: spec?.runState ?? null };
   log(head);
-  if (!c.admit) return { line: head, code: 1 };
+  if (!c.admit) return { line: head, code: ADMISSION_HELD_EXIT };
   const childEnv = { ...env, [CLAIM_OP_ENV]: opId, [STORE_ENV]: dir };
   const child = (deps.spawn ?? spawn)(process.execPath, launcherArgs({ file: a.command[0], args: a.command.slice(1), shell: false }),
     { detached: true, stdio: deps.stdio ?? ['pipe', 'inherit', 'inherit'], env: childEnv });

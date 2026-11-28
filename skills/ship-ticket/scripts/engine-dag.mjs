@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks',
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase', 'repoIdentity', 'durableRun', 'earlyChecks', 'stagePolicy',
   'hostClaimRequired'];
 
 /**
@@ -292,6 +292,9 @@ export function validateEngineDag(doc, { ticket } = {}) {
   if (c.durableRun !== undefined && c.durableRun !== false && !(isObj(c.durableRun) && Object.keys(c.durableRun).join() === 'version' && c.durableRun.version === 1))
     bad('config.durableRun must be false (the legacy per-worktree placement) or exactly { version: 1 }');
   validateEarlyChecks(c, bad);
+  // PR-3 (STAB S4-min, P6, opt-in, UNQUALIFIED): stage obligations + plan feasibility; the policy itself is the approved
+  // narrative's stage-policy-v1 line (stage-obligations.mjs). An engine without PR-3 refuses the field (unknown config).
+  if (c.stagePolicy !== undefined && !(isObj(c.stagePolicy) && Object.keys(c.stagePolicy).join() === 'version' && c.stagePolicy.version === 1)) bad('config.stagePolicy must be exactly { version: 1 }');
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
@@ -484,7 +487,8 @@ const surfaceShape = (s) => isObj(s) && Object.keys(s).length === 4 && ['boundar
   && typeof s.boundary_id === 'string' && BOUNDARY_ID.test(s.boundary_id) && pairRoundTrips(s.boundary_id, 'VAPT-API-01')
   && nonEmptyString(s.kind) && nonEmptyString(s.path) && Array.isArray(s.principals) && s.principals.length > 0 && s.principals.every(nonEmptyString);
 
-const GATE_FIELDS = {
+/** The accepted input fields of each gate (exported for the supervisor, which passes only these to gate review). */
+export const GATE_FIELDS = {
   red: ['node', 'command', 'specs', 'addendum'],
   reassess: ['classifications', 'surfaces'],
   review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file',

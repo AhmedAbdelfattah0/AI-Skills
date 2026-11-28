@@ -427,3 +427,47 @@ test('R4 end to end: run A finishes, its wrapper\'s claim is left, archive --ret
   assert.deepEqual(Object.values(fx.readState().nodes).map(n => n.state), ['done', 'done']);
   assert.ok(rows(dir).some(x => x.kind === 'reclaimed' && x.op_id === 'drv-a'), 'A\'s claim was reclaimed by proof from A\'s archive');
 });
+
+// ------------------------------------------------------------------ merge of PR-2 with PR-3 (stage +24) and S5 (early +100)
+
+test('COMPOSE stage + earlyChecks + hostClaimRequired together record the combined version (stage, then early, then host); each single twin keeps its own flag; an engine without the host twin refuses it', { skip: SKIP }, async (t) => {
+  const POL = await import('./engine-policy.mjs');
+  const STAGE = { merge_stage: 'merge', stages: ['local', 'merge'], rows: [{ id: 'R1', check: 'unit + negative spec', stage: 'local' }], deferred: [] };
+  const fx = fixture(t, { commit: true, narrativeExtra: 'stage-policy-v1: ' + JSON.stringify(STAGE) + '\n\n',
+    config: { width: 1, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } }, stagePolicy: { version: 1 }, earlyChecks: { version: 1 }, ...REQUIRED } });
+  const init = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const v = fx.readState().policy_version;
+  assert.equal(v, POL.hostClaimVersion(POL.earlyChecksVersion(POL.stageVersion(13))), 'durable 13 -> stage 37 -> early 137 -> host 337');
+  assert.equal(v, 337);
+  assert.deepEqual({ ...POL.POLICY_SEMANTICS[v] }, { durableRun: true, stageObligations: true, earlyChecks: true, hostClaimRequired: true });
+  // each single-flag twin of the durable base resolves to exactly its own capability flag
+  assert.deepEqual({ ...POL.POLICY_SEMANTICS[POL.stageVersion(13)] }, { durableRun: true, stageObligations: true });
+  assert.deepEqual({ ...POL.POLICY_SEMANTICS[POL.earlyChecksVersion(13)] }, { durableRun: true, earlyChecks: true });
+  assert.deepEqual({ ...POL.POLICY_SEMANTICS[POL.hostClaimVersion(13)] }, { durableRun: true, hostClaimRequired: true });
+  // an engine whose table lacks the host-claim twins (stage + early only) refuses the combined run
+  const noHost = { current: 1, semantics: POL.withEarlyChecksTwins(POL.PRE_EARLY_CHECKS_SEMANTICS) };
+  assert.throws(() => POL.runPolicy({ policy_version: v }, noHost), (e) => e.code === 'policy_version_unsupported');
+  const { status } = await import('./run-engine.mjs');
+  await assert.rejects(status(fx.ctx({ policy: noHost })), { code: 'policy_version_unsupported' });
+  // and the combined run's heavy commands still need a claim
+  const d = fx.cli('drive');
+  assert.equal(d.status, 1); assert.match(d.stderr, /host_claim_required/);
+});
+
+test('SEAM (PR-5 supervisor x PR-2): a held `host-admit run` exits ADMISSION_HELD_EXIT (75), the one constant the supervisor reads; nothing runs', async (t) => {
+  const HA = await admitCli();
+  const SUP = await import('./supervisor.mjs');
+  assert.equal(HA.ADMISSION_HELD_EXIT, 75);
+  assert.equal(SUP.ADMISSION_HELD_EXIT, HA.ADMISSION_HELD_EXIT, 'one source of truth');
+  const spec = SUP.admittedCommand(['/x/node', '/x/run-engine.mjs', 'drive']);
+  assert.deepEqual(spec.args.slice(0, 3), [SUP.HOST_ADMIT, 'run', '--'], 'the supervisor wraps engine commands in host-admit run');
+  const dir = tmpStore(t), mark = join(dir, 'ran');
+  const { claim } = await store();
+  for (const id of ['h1', 'h2']) { const h = fakeHost({ pressure: 1 }); assert.equal((await claim({ dir, opId: id, cls: 'heavy', snapshot: h.snapshot, now: h.now })).admit, true); }
+  const h = fakeHost({ pressure: 1 });
+  const r = await HA.run(['run', '--class', 'heavy', '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(mark)}, 'x')`],
+    { platform: 'darwin', dir, snapshot: h.snapshot, now: h.now, log: () => {} });
+  assert.equal(r.code, 75, JSON.stringify(r.line)); assert.equal(r.line.reason, 'held_heavy');
+  assert.equal(existsSync(mark), false, 'nothing ran');
+});

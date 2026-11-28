@@ -94,6 +94,7 @@ jobs:
           skills/ship-ticket/scripts/usage.test.mjs
           skills/ship-ticket/scripts/gate.test.mjs
           skills/ship-ticket/scripts/lib/durable-io.test.mjs
+          skills/ship-ticket/scripts/lib/deadline-g0.test.mjs
           skills/ship-ticket/scripts/run-engine.test.mjs
           skills/ship-ticket/scripts/run-engine-repair.test.mjs
           skills/ship-ticket/scripts/run-engine-review3.test.mjs
@@ -121,6 +122,7 @@ jobs:
           skills/ship-ticket/scripts/eval-cycles.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/engine-accepted.test.mjs
+          skills/ship-ticket/scripts/supervisor.test.mjs
           skills/ship-ticket/scripts/engine-dag.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
           skills/ship-ticket/scripts/brief-start-check.test.mjs
@@ -161,6 +163,8 @@ jobs:
           skills/ship-ticket/scripts/run-engine-prove.test.mjs
           skills/ship-ticket/scripts/run-engine-prove-r1.test.mjs
           skills/ship-ticket/scripts/run-engine-prove-r2.test.mjs
+          skills/ship-ticket/scripts/stage-obligations.test.mjs
+          skills/ship-ticket/scripts/tap-parser-v2.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
   # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
