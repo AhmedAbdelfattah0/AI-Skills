@@ -234,7 +234,8 @@ export async function publishStep(J, ctx, t, S, n, sup) {
   if (!prior) {
     if (g.spent) return spent(g, 'push');
     const h = head();
-    if (!h.ok || h.head !== commit || !h.on_branch || h.delta.length)
+    if (!h.ok) return { parked: 'publish_head_unreadable', reason: h.reason };
+    if (h.head !== commit || !h.on_branch || h.delta.length)
       return { blocked: await J.block(t.key, 'publish_head_moved', `the adopted commit ${commit} is no longer the clean HEAD of ${target.branch}: the reviewed candidate cannot be bound to the push`) };
     const spec = { op: 'push', worktree: t.worktree, remote: target.remote, identity: target.identity, branch: target.branch, oid: commit, candidate: pre.candidate, ship_ready_seq: pre.ship_ready_seq };
     return { publishing: await sup.launch(J, ctx, t, { op: 'push', gen: g.gen, bound: PUBLISH_BOUND_MS, publish: { mode: 'run', spec } }) };
@@ -315,7 +316,7 @@ async function reprobe(J, ctx, o, sup) {
   const gen = `${o.gen}.p${(o.probes ?? 0) + 1}`;
   const p = J.op(opId(ctx.repo(t), t.key, `${o.op}.probe`, gen));
   if (!p) {
-    await sup.launch(J, ctx, t, { op: `${o.op}.probe`, gen, bound: PUBLISH_BOUND_MS, publish: { mode: 'probe', spec: readJson(o.files.spec), probe_of: o.op_id } });
+    await sup.launch(J, ctx, t, { op: `${o.op}.probe`, gen, bound: PUBLISH_BOUND_MS, publish: { mode: 'probe', spec: o.publish_spec, probe_of: o.op_id } });
     return J.op(o.op_id);
   }
   if (p.state !== 'recorded') return o;
@@ -337,8 +338,9 @@ export function publishIntent(files, publish) {
   const spec = publish.probe_of ? publish.spec : { ...publish.spec, act_file: files.act, created_file: files.created,
     ...(publish.body !== undefined ? { body_file: files.body } : {}) };
   if (publish.body !== undefined) writeFileSync(files.body, publish.body, { mode: 0o600 });
-  writeFileSync(files.spec, JSON.stringify(spec), { mode: 0o600 });
-  return { spec_kind: 'publish', mode: publish.mode, ...(publish.probe_of ? { probe_of: publish.probe_of } : {}) };
+  writeFileSync(files.spec, JSON.stringify(spec), { mode: 0o600 }); // the child's copy; the journal record below is the identity of record
+  // the FULL identity is in the intent record itself (repo, remote, ref, OID, base, title, candidate), committed before the act
+  return { spec_kind: 'publish', mode: publish.mode, publish_spec: spec, ...(publish.probe_of ? { probe_of: publish.probe_of } : {}) };
 }
 
 /** The launch spec of a publication child (no host admission: git/gh are light ops). */

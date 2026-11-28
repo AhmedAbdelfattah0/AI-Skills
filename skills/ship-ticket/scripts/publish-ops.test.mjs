@@ -16,14 +16,15 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tick } from './supervisor.mjs';
 import { MAX_PROBES } from './supervisor-journal.mjs';
-import { parseLsRemote, matchPrs, publishPreconditions, publishTitle, statusPaths } from './publish-ops.mjs';
+import { parseLsRemote, matchPrs, publishPreconditions, publishTarget, publishTitle, statusPaths } from './publish-ops.mjs';
+import { pinBaseRecord } from './engine-base-read.mjs';
 import { makeWorld, worldDeps, opts, effects, journal, readState, writeState } from './supervisor.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HELPER = join(HERE, 'supervisor.test-helper.mjs');
 const SKIP = process.platform === 'win32' ? 'process groups, the durable launcher and the shell shims are POSIX here' : false;
-const REAL_GIT = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim() || '/usr/bin/git';
+const REAL_GIT = (SKIP ? '' : spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout?.trim()) || '/usr/bin/git';
 const X = 'a'.repeat(64);
 const IDENTITY = 'github.com/acme/widget';
 const URL = 'https://github.com/acme/widget.git';
@@ -242,6 +243,34 @@ test('Owner Merge + publication: adopt the SHIP commit, push it once (non-force)
   const ops = Object.values(J.ops);
   assert.deepEqual(ops.map((o) => o.op).sort(), ['commit', 'pr', 'push']);
   assert.ok(ops.every((o) => o.op_id.endsWith(`:c${X}`)), 'every op id is fixed by the candidate');
+  // the FULL target identity is in the journal intent record itself (not only in a sidecar file)
+  const byOp = Object.fromEntries(ops.map((o) => [o.op, o]));
+  assert.deepEqual([byOp.commit.commit, byOp.commit.parent, byOp.commit.candidate], [w.commit, w.base, X]);
+  const ps = byOp.push.publish_spec, rs = byOp.pr.publish_spec;
+  assert.deepEqual([ps.remote, ps.identity, ps.branch, ps.oid, ps.candidate, ps.ship_ready_seq], ['origin', IDENTITY, 'feat/T1', w.commit, X, 8]);
+  assert.deepEqual([rs.owner, rs.repo, rs.branch, rs.base, rs.oid, rs.title, rs.identity], ['acme', 'widget', 'feat/T1', 'main', w.commit, 'T1: Widget: add a', IDENTITY]);
+});
+
+test('reachability: a ticket the ENGINE reports ship_ready (SHIP_READY in RUN-STATE) is still published; without publication it is not stepped', { skip: SKIP }, async (t) => {
+  const engineShipReady = { readTicket: () => ({ state: 'ship_ready', reason: 'ship_ready' }) };
+  const w = pubWorld(t);
+  const J = await settleAll(w.dir, engineShipReady);
+  assert.equal(J.ship_ready.T1.publication.pr.number, 100);
+  assert.equal(pushes(w.dir).length, 1);
+  const b = pubWorld(t, { publication: null });
+  const Jb = await settleAll(b.dir, engineShipReady);
+  assert.equal(Jb.ship_ready.T1, undefined, 'PR-5 behaviour unchanged: an engine-ship_ready ticket is not stepped');
+  assert.equal(effects(b.dir).length, 0);
+});
+
+test('the REAL pinned-base record (pinBaseRecord: remote NAME, lower-cased github identity) is a publication target', { skip: SKIP }, (t) => {
+  const w = pubWorld(t);
+  sh(w.wt, 'fetch', '-q', 'origin');
+  sh(w.wt, 'branch', '--set-upstream-to=origin/main');
+  const pin = pinBaseRecord(w.wt, { pinnedBase: { remote: 'origin' }, base: 'main' });
+  assert.deepEqual([pin.base.remote, pin.base.identity, pin.base.ref, pin.base.merge_base], ['origin', IDENTITY, 'main', w.base]);
+  const T = publishTarget({ base: { ...pin.base, pinned_at_seq: 1 }, ship_ready: { candidate_id: X, seq: 8, base: pin.base } }, { branch: 'feat/T1' });
+  assert.deepEqual([T.ok, T.remote, T.identity, T.owner, T.repo, T.base, T.merge_base], [true, 'origin', IDENTITY, 'acme', 'widget', 'main', w.base]);
 });
 
 test('Automatic Merge + publication: published, the merge is prevented (PR-6b); publication absent: the PR-5 handoff, zero git/gh effects', { skip: SKIP }, async (t) => {

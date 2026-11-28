@@ -243,7 +243,8 @@ async function act(J, ctx, o) {
     files: { promptFile: f.prompt, outFile: f.out, envelopeFile: f.envelope, attemptId } });
   child.on('error', () => {});
   child.stdin?.on('error', () => {});
-  if (!child.pid) return J.move(o.op_id, 'recorded', { result: { outcome: 'spawn_failed' } });
+  // a publication child that never spawned ran nothing: retryable (bounded) through publishStep's preconditions (PR-6a)
+  if (!child.pid) return J.move(o.op_id, 'recorded', { result: o.spec_kind === 'publish' ? { outcome: 'nothing_ran', cause: 'spawn_failed' } : { outcome: 'spawn_failed' } });
   const pgid = process.platform === 'win32' ? null : child.pid;
   await J.update(o.op_id, { pid: child.pid, pgid, leader_start: leaderStart(pgid), attempt_id: attemptId,
     deadline: armRecord(o.bound_ms, deps.armClock ?? undefined) }, 'after-pid');
@@ -593,7 +594,12 @@ export async function tick({ manifestPath, stateDir = DEFAULT_STATE_DIR() }, dep
       });
       const { decisions, ready } = evaluateReadiness(nodes);
       out.decisions = Object.fromEntries(Object.entries(decisions).map(([k, d]) => [k, d.state]));
-      for (const key of admissionOrder(nodes, ready)) {
+      // PR-6a: a ticket the ENGINE already reports ship_ready (its SHIP_READY reached the plan's RUN-STATE, so readiness counts
+      // it as done for its dependents) is still stepped for publication when the wave authorizes it, until the journal records
+      // it ship-ready (published) or Blocked. Without publication this pass is empty: the PR-5 behaviour is unchanged.
+      const publishable = ctx.publication === 'pull_request'
+        ? nodes.filter((x) => x.state === 'ship_ready' && !J.doc.ship_ready[x.id] && !J.doc.blocked[x.id]).map((x) => x.id) : [];
+      for (const key of [...admissionOrder(nodes, ready), ...publishable]) {
         try { out.tickets[key] = await stepTicket(J, ctx, byKey.get(key)); }
         catch (e) { out.tickets[key] = { blocked: await J.block(key, e.code ?? 'supervisor_error', e.message) }; }
       }
