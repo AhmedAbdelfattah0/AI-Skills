@@ -360,8 +360,8 @@ reads its caller's plan. This is a shape check under the same-user bound, not au
 `artifacts` extend the Design Contract that `gate reassess` matches. Limits: stage availability is plan-asserted (W8b: a
 plan that omits a stage that exists can defer that stage's row; only the owner's approval of the visible line controls it);
 a new-route signal raised by a client call such as `this.api.get(` stays unclassified (the ticket is Blocked, as before);
-recording an obligation does not enforce deployment. Section 3b status rules and the SHIP waiver wording in
-[ship.md](ship.md) are unchanged.
+recording an obligation does not enforce deployment. Section 3b status rules are unchanged; [ship.md](ship.md) names the open
+obligation as the route for a deferred future-stage row and keeps the waiver route for every other row.
 
 **DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields
 are refused, never dropped.
@@ -805,6 +805,9 @@ not list goes to the OWNER (fail closed).
 | `budget_stop` | Owner | the approved budget is spent |
 | unit codes `unit_review_terminal`, `parent_ceiling`, `unit_check_failed`, `unit_invalidation_storm` | Owner | units are opt-in; a unit's RETRY and its clear (`UNIT_CLEAR`) stay with the owner ([units.md](units.md)) |
 | any security refusal or waiver ([security-risk.md](security-risk.md)) | Owner | security exceptions are never Factory-owned |
+| `host_claims_state_missing` | Owner | a load invariant: the run's host-claim flag and its config disagree (state integrity) |
+
+Not judgment points: `host_claim_required` is a gate-shaped refusal (`judgment_point: false`): run the command inside a claim (`host-admit.mjs run`). A host hold (`host-admit run` exit 75, reasons `held_*`) is retried by the supervisor, and only that ticket is Blocked (`retries_exhausted`) once the retries are spent. A holder in an unknown state raises the one host-scoped `blocked.json` (`host_claim_unknown`); light work continues.
 
 **`mark`** accepts only `failed->pending` (counts as a retry, capped at 1) and
 `pending->cancelled`, with a reason. It cannot mark nodes done, create gate

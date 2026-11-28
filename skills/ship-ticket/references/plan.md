@@ -415,7 +415,10 @@ release, an applicable security row whose status is anything other than
 `verified` or `not applicable` (`planned`, `partially verified`, `unverified`, `failed`) is
 a security exception: it blocks SHIP (**WAIT_FOR_USER**) unless the owner
 explicitly accepts it for this candidate, recorded as the `SECURITY_WAIVER`
-record [ship.md](ship.md) defines for 3b rows (`boundary: "plan-3b"`). Record
+record [ship.md](ship.md) defines for 3b rows (`boundary: "plan-3b"`). A row
+deferred to a later stage in an approved `stage-policy-v1` line on a
+`config.stagePolicy` run is an open obligation instead ([ship.md](ship.md)); a
+current-stage row is never deferred. Record
 only the external checks the change touches. This is orchestrator-enforced; no
 gate reads 3b yet.
 

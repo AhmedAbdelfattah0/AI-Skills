@@ -786,7 +786,8 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   Design Contract expansion, or changed scope;
 - **security or assurance exceptions:** an explicit [NN] waiver, an applicable
   security check in plan section 3b whose status is anything other than
-  `verified` or `not applicable` at release, no safe local environment for
+  `verified` or `not applicable` at release (a future-stage row deferred as an
+  open obligation excepted, [references/ship.md](references/ship.md)), no safe local environment for
   required attacks, enforceable primary-review deadlines missing without an
   explicit advisory-only exception, a fallback to the manual flow after plan
   approval on an ELEVATED or security-sensitive run, a degraded harness at SHIP on an ELEVATED or
