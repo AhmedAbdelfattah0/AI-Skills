@@ -51,7 +51,7 @@ import { heavyCommand, checkHostClaim } from './engine-host-claim.mjs'; // PR-2:
 import { identityStateHolds, bindIdentity } from './engine-identity.mjs';
 import { enginePaths, durablePaths, legacyStatesAnywhere } from './lib/run-placement.mjs';
 import { samePath } from './lib/run-log-paths.mjs';
-import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock } from './lib/deadline.mjs';
+import { observe, MEASUREMENT_QUALIFIED, resolveSweepClock, appendSweep, recordedCharge, signalReceipt, sweepRecords, deadlineVerdict, envelopeFileOf, isTestClock, readDecision, claimDecision } from './lib/deadline.mjs';
 import { groupIdentity, retire } from './engine-quiesce.mjs';
 import { settle } from './engine-attempts.mjs';
 
@@ -890,30 +890,43 @@ export async function reconcileDeadlines(ctx) {
     // m7: the row is classified from the RE-CHECK made right before any receipt, never from the first read
     const now = groupIdentity(a, alive);
     const records = sweepRecords(P.attempts, a);
-    const receipted = records.some(r => r.type === 'signal'), signalled = records.some(r => r.type === 'signalled');
+    const receipted = records.some(r => r.type === 'signal');
+    // m4: the kill of this expiry is complete when the group was seen gone or SIGKILL itself was delivered (a zombie leader of a
+    // stopped driver stays "alive" after SIGKILL: waiting on it again would change nothing)
+    const signalled = records.some(r => r.type === 'signalled' && (r.result === 'gone' || r.signals?.includes('SIGKILL')));
     const finished = () => existsSync(envelopeFileOf(a, P.attempts));
+    const prior = readDecision(P.attempts, a.attempt_id);
     if (now === 'gone') {
-      // L1: a group already gone proves no timeout unless an earlier sweep saw it overrun alive (its receipt)
-      swept.push({ ...row, identity: 'gone', action: receipted ? 'settle' : 'none', status: a.status, observation: rec });
+      // L1: a group already gone proves no timeout unless an earlier sweep claimed its expiry (its decision or receipt)
+      swept.push({ ...row, identity: 'gone', action: prior === 'expired' || receipted ? 'settle' : 'none', status: a.status, observation: rec });
     } else if (now !== 'verified') {
       swept.push({ ...row, identity: 'unknown', action: 'no_signal', status: a.status, observation: rec });
-    } else if (finished()) {
-      // M1: the launcher already wrote its result (a zombie or exiting leader is still "verified"): no receipt, no signal; the
-      // owner's settlement decides it (deadlineVerdict: positioned when stamped, else the frozen rule)
+    } else if (prior === 'accepted') {
+      swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec });
+    } else if (prior !== 'expired' && finished()) {
+      // M1: the launcher already wrote its result (a zombie or exiting leader is still "verified"): no claim, no signal; the
+      // owner's settlement decides it
       swept.push({ ...row, identity: 'verified', action: 'none', reason: 'envelope_present', status: a.status, observation: rec });
-    } else if (receipted && signalled) {
-      // m4: this expiry was already receipted and its kill completed: no new receipt, no new grace wait; settlement only
+    } else if (prior === 'expired' && signalled) {
+      // m4: this expiry was claimed and its kill completed: no new claim, receipt or grace wait; settlement only
       swept.push({ ...row, identity: 'verified', action: 'settle', reason: 'already_signalled', status: a.status, observation: rec });
     } else {
-      // the receipt (fsynced) records that the envelope was ABSENT at or after the limit; a receipt without a completed kill
-      // (a sweep that died between them) is honoured without a new receipt
+      // round 2: ONE atomic arbitration: the expiry is CLAIMED (exclusive create of the decision file) before any signal; a
+      // settler that accepted the result first wins, and then nothing is signalled. A claim of an earlier sweep that died before
+      // completing its kill is honoured (no second claim).
+      await io.boundary(ctx.hooks, 'sweep-before-claim', { attempt_id: a.attempt_id });
+      const claim = prior === 'expired' ? { won: false, decision: 'expired' } : claimDecision(P.attempts, a.attempt_id, 'expired');
+      if (claim.decision !== 'expired') { swept.push({ ...row, identity: 'verified', action: 'none', reason: 'accepted', status: a.status, observation: rec }); continue; }
       if (!receipted) appendSweep(P.attempts, { type: 'signal', ...base, envelope_present: false });
-      const after = await io.killGroup(a.pgid, alive, { verify: () => !finished() && groupIdentity(a, alive) === 'verified' });
-      appendSweep(P.attempts, { type: 'signalled', ...base, result: after === false ? 'gone' : after === null ? 'unverified' : 'alive' });
-      swept.push({ ...row, identity: 'verified', action: 'killed', status: a.status, observation: rec });
+      await io.boundary(ctx.hooks, 'sweep-after-claim', { attempt_id: a.attempt_id });
+      const sent = [];
+      const after = await io.killGroup(a.pgid, alive, { verify: () => groupIdentity(a, alive) === 'verified', onSignal: (sig) => sent.push(sig) });
+      // a kill is recorded only for signals really delivered (a refused verification records nothing; later sweeps may retry)
+      if (sent.length) appendSweep(P.attempts, { type: 'signalled', ...base, signals: sent, result: after === false ? 'gone' : after === null ? 'unverified' : 'alive' });
+      swept.push({ ...row, identity: 'verified', action: sent.length ? 'killed' : 'claimed', status: a.status, observation: rec });
     }
   }
-  const due = swept.filter(r => ['killed', 'settle', 'no_signal'].includes(r.action));
+  const due = swept.filter(r => ['killed', 'claimed', 'settle', 'no_signal'].includes(r.action));
   let settlement = 'none';
   if (due.length) {
     try { await settleSwept(ctx, due); settlement = 'settled'; } catch (e) { if (e.code !== 'lock_held') throw e; settlement = 'deferred'; }
@@ -956,9 +969,9 @@ async function settleSwept(ctx, rows) {
         unknown(a, `deadline of ${a.attempt_id} expired (${row.charged_ms}/${a.deadline.limit_ms} ms) but its process group ${a.pgid ?? a.pid} has no verified identity: not signalled, its capacity stays charged`);
       } else {
         const receipt = signalReceipt(E.P.attempts, a);
-        if (!receipt) { row.settled_by = 'none'; continue; }
+        if (!receipt && readDecision(E.P.attempts, a.attempt_id) !== 'expired') { row.settled_by = 'none'; continue; }
         if (runner(a)) {
-          if (await retire(E.S, a, E.alive, 'timed_out')) a.deadline.timed_out = { charged_ms: receipt.charged_ms, signalled: true };
+          if (await retire(E.S, a, E.alive, 'timed_out')) a.deadline.timed_out = { charged_ms: receipt?.charged_ms ?? row.charged_ms ?? null, signalled: true };
           else unknown(a, `cannot prove ${a.kind} runner group ${a.pgid} has exited after its deadline`);
         } else if (E.foreign && io.readJson(a.envelope_file) && !['late', 'timed_out'].includes(deadlineVerdict(a, E.P.attempts))) {
           row.settled_by = 'owner'; continue; // a result positioned before the limit is recorded by the owner, never against the caller's tree

@@ -14,7 +14,7 @@ import { prepareDispatch, childEnv, spawnSpec, workerRunStateAppend } from './ca
 import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
-import { armAttempt, signalReceipt, deadlineVerdict, envelopePosition, enforcementOptIn } from './lib/deadline.mjs';
+import { armAttempt, signalReceipt, deadlineVerdict, envelopePosition, enforcementOptIn, readDecision, claimDecision, acceptClaimNeeded } from './lib/deadline.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
@@ -211,8 +211,9 @@ const unquiet = (S, a, item) => {
  * (or never released) -> re-queued.
  *
  * PR-1b: a worker's deadline outcome, for every settler (the launcher, resume/reconcile, the sweep's locked settlement), is
- * lib/deadline.mjs deadlineVerdict(), computed from the persisted facts RE-READ after the liveness wait and the retirement
- * (a receipt the sweep appended meanwhile counts), never the settling process's own clock or opt-in: 'late' keeps the
+ * lib/deadline.mjs deadlineVerdict(), computed from the persisted facts after the liveness wait and the retirement, never the
+ * settling process's own clock or opt-in; a result that is not provably on time is recorded only after this settler wins the
+ * attempt's exclusive decision (`accepted`; an earlier `expired` claim of the sweep makes it late): 'late' keeps the
  * envelope as `late_envelope` evidence and ends `timed_out` (the timeout wins, FU-2); 'timed_out' (a receipt, no envelope)
  * ends `timed_out`; 'ontime' records the envelope even when a timer fired after it; 'unknown' is the frozen rule (the
  * launcher's timer; an envelope is recorded; this includes an unstamped envelope the sweep found already present).
@@ -230,7 +231,7 @@ export async function settle(E, a, { timedOut = false, wait = 0, owned = false, 
     return;
   }
   // a receipt only decides the liveness gate below ('live' is not returned for a receipted attempt); the outcome is decided later
-  if (S.durable && a.deadline && signalReceipt(E.P.attempts, a)) timedOut = true;
+  if (S.durable && a.deadline && (readDecision(E.P.attempts, a.attempt_id) === 'expired' || signalReceipt(E.P.attempts, a))) timedOut = true;
   // FU-1: after a reboot (bootEnded) the pgid number may name an unrelated live group: no liveness wait, no 'live'.
   if (!env && !bootEnded) {
     let alive = E.alive(a.pgid);
@@ -242,7 +243,14 @@ export async function settle(E, a, { timedOut = false, wait = 0, owned = false, 
   if (!(await retire(S, a, E.alive, 'exited', how))) return unquiet(S, a, item);
   // the decision: the evidence is read again NOW (after the wait and the retirement), never taken from the snapshot above
   env = io.readJson(a.envelope_file) ?? env;
-  const verdict = S.durable && a.deadline ? deadlineVerdict(a, E.P.attempts, { env }) : 'unknown';
+  let verdict = S.durable && a.deadline ? deadlineVerdict(a, E.P.attempts, { env }) : 'unknown';
+  // round 2: a result that is not provably on time is recorded only after this settler WINS the attempt's decision
+  // (`accepted`, exclusive create); an `expired` claim made first by the sweep makes it late. Decided by the claim, not a re-read.
+  if (env && verdict !== 'late' && S.durable && acceptClaimNeeded(a, E.P.attempts, env)) {
+    await io.boundary(E.ctx.hooks, 'settle-before-accept', { attempt_id: a.attempt_id });
+    verdict = claimDecision(E.P.attempts, a.attempt_id, 'accepted').decision === 'expired' ? 'late' : 'ontime';
+    await io.boundary(E.ctx.hooks, 'settle-after-accept', { attempt_id: a.attempt_id, verdict });
+  }
   const receipt = verdict === 'late' || verdict === 'timed_out' ? signalReceipt(E.P.attempts, a) : null;
   if (verdict === 'late') { a.late_envelope = { file: a.envelope_file, exit_code: env.exit_code ?? null, position_ms: envelopePosition(env, a.deadline) }; env = null; }
   if (verdict === 'late' || verdict === 'timed_out') timedOut = true;

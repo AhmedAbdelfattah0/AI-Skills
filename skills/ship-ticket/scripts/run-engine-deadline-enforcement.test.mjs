@@ -450,10 +450,135 @@ test('m4: an attempt that already has a receipt for this expiry is not re-receip
   await sweepUntil(fx, a.attempt_id, 'killed');
   const receipts = () => sweepLines(fx).filter(l => l.type === 'signal').length;
   assert.equal(receipts(), 1);
-  const t0 = performance.now();
+  const kills = () => sweepLines(fx).filter(l => l.type === 'signalled').length;
+  const before = kills();
   const again = sweepCli(fx, OPT_IN);
   assert.equal(again.status, 0);
   assert.equal(receipts(), 1, 'no second receipt');
-  assert.ok(performance.now() - t0 < 2500, 'no second kill grace on the zombie');
+  assert.notEqual(again.out.swept[0].action, 'killed', 'no second kill of the zombie');
+  assert.equal(kills(), before, 'no further signal delivered');
 });
 
+
+// ---------------------------------------------------------------- review round 2: ONE atomic arbitration per attempt (decision file)
+// Interleavings are forced with SIMULATED pause hooks (ctx.hooks.boundary) inside one test process; the worker group, the
+// envelope files and the decision file are real.
+
+/** A pause point: `hook` pauses the named boundary until `release()`; `reached` resolves when it is hit. */
+function pauseAt(name) {
+  let release, reached;
+  const gate = new Promise(r => { release = r; }), hit = new Promise(r => { reached = r; });
+  return { reached: hit, release: () => release(), hooks: { boundary: async (n) => { if (n === name) { reached(); await gate; } } } };
+}
+const decisionOf = (fx, a) => { try { return readFileSync(join(fx.attemptsDir(), `${a.attempt_id}.decision`), 'utf8'); } catch { return null; } };
+const pastDeadline = async (a) => (await import('./lib/deadline.mjs')).testClock({ bootId: a.deadline.boot_id, nowNs: () => BigInt(a.deadline.start_ns) + BigInt(a.deadline.limit_ms + 1) * 1000000n });
+/** The worker "finishes late": its group ends and an UNSTAMPED success envelope appears (a driver without the opt-in). */
+async function finishLate(fx, a) {
+  killQuietly(a.pgid);
+  assert.ok(await waitUntil(() => !groupAlive(a.pgid), 5000));
+  writeFileSync(a.out_file, okOut);
+  writeFileSync(a.envelope_file, JSON.stringify({ exit_code: 0, stdout_file: a.out_file }));
+}
+
+test('round 2 (SIMULATED pause: sweep after its envelope check, before its claim; Codex interleaving): the worker publishes late, the driver ACCEPTS first: done, and the sweep then never claims or signals', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  const { reconcileDeadlines, resume } = await import('./run-engine.mjs');
+  const p = pauseAt('sweep-before-claim');
+  const sweeping = reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a), hooks: p.hooks }));
+  await Promise.race([p.reached, sweeping]);
+  await finishLate(fx, a);
+  await resume(fx.ctx());
+  assert.equal(decisionOf(fx, a), 'accepted', 'the settler claimed the decision first');
+  p.release();
+  const r = await sweeping;
+  assert.equal(r.swept[0].action, 'none');
+  assert.equal(fx.readState().nodes.a.state, 'done');
+  assert.equal(sweepLines(fx).some(l => l.type === 'signal'), false, 'no receipt, no signal after the driver accepted');
+});
+
+test('round 2 (SIMULATED pause: sweep after its claim, before its signal): a result published after the claim is late by construction: timed_out, late envelope kept; no completed kill is recorded when no signal was sent', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  const { reconcileDeadlines, resume } = await import('./run-engine.mjs');
+  const p = pauseAt('sweep-after-claim');
+  const sweeping = reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a), hooks: p.hooks }));
+  await Promise.race([p.reached, sweeping]);
+  assert.equal(decisionOf(fx, a), 'expired');
+  await finishLate(fx, a);
+  await resume(fx.ctx());
+  p.release();
+  const r = await sweeping;
+  assert.equal(r.swept[0].action, 'claimed', 'the group was already gone: nothing signalled');
+  const b = attemptOf(fx, a.attempt_id);
+  assert.equal(b.status, 'timed_out');
+  assert.equal(b.late_envelope?.exit_code, 0);
+  assert.equal(fx.readState().nodes.a.state, 'failed');
+  assert.equal(sweepLines(fx).some(l => l.type === 'signalled'), false, 'Codex MINOR: a kill that sent nothing is not recorded as completed');
+});
+
+for (const [order, expect] of [['sweep claims first', 'timed_out'], ['settle accepts first', 'done']]) {
+  test(`round 2 (SIMULATED pauses: sweep before its claim AND settle before its accept, then ${order}): exactly one outcome, the first claimant's`, { skip: SKIP }, async (t) => {
+    const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+    const { reconcileDeadlines, resume } = await import('./run-engine.mjs');
+    const ps = pauseAt('sweep-before-claim');
+    const sweeping = reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a), hooks: ps.hooks }));
+    await Promise.race([ps.reached, sweeping]);
+    await finishLate(fx, a);
+    const pa = pauseAt(order === 'sweep claims first' ? 'settle-before-accept' : 'settle-after-accept');
+    const settling = resume(fx.ctx({ hooks: pa.hooks }));
+    await Promise.race([pa.reached, settling]);
+    if (order === 'settle accepts first') assert.equal(decisionOf(fx, a), 'accepted');
+    ps.release();
+    await sweeping;
+    pa.release();
+    await settling;
+    const b = attemptOf(fx, a.attempt_id), node = fx.readState().nodes.a;
+    assert.equal(decisionOf(fx, a), expect === 'timed_out' ? 'expired' : 'accepted');
+    if (expect === 'timed_out') { assert.equal(b.status, 'timed_out', 'HAZARD: a late success was accepted after the expiry claim'); assert.equal(node.state, 'failed'); }
+    else { assert.equal(node.state, 'done', 'HAZARD: an accepted result was turned into a timeout'); assert.equal(b.status, 'exited'); }
+  });
+}
+
+test('round 2 (SIMULATED pause): two concurrent sweeps make ONE claim and one receipt; the attempt ends timed_out once', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  const { reconcileDeadlines } = await import('./run-engine.mjs');
+  const p = pauseAt('sweep-after-claim');
+  const first = reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a), hooks: p.hooks }));
+  await Promise.race([p.reached, first]);
+  const second = await reconcileDeadlines(fx.ctx({ deadlineClock: await pastDeadline(a) }));
+  assert.equal(second.swept[0].action, 'killed', 'the second sweep honours the existing claim (no second claim) and kills');
+  p.release();
+  await first;
+  assert.equal(decisionOf(fx, a), 'expired');
+  assert.equal(sweepLines(fx).filter(l => l.type === 'signal').length, 1, 'one receipt');
+  const b = attemptOf(fx, a.attempt_id);
+  assert.equal(b.status, 'timed_out');
+  assert.equal(fx.runs('a').length, 1);
+});
+
+test('round 2: claimDecision is exclusive across REAL processes: of 6 racing claimants (expired vs accepted) exactly one wins and all read its decision', async (t) => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'decision-race-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const mod = fileURLToPath(new URL('./lib/deadline.mjs', import.meta.url));
+  const go = join(dir, 'go');
+  const kids = Array.from({ length: 6 }, (_, i) => spawn(process.execPath, ['--input-type=module', '-e',
+    `import { claimDecision } from ${JSON.stringify(mod)}; import { existsSync } from 'node:fs';
+     while (!existsSync(${JSON.stringify(go)})) await new Promise(r => setTimeout(r, 1));
+     process.stdout.write(JSON.stringify(claimDecision(${JSON.stringify(dir)}, 'att-x', ${JSON.stringify(i % 2 ? 'accepted' : 'expired')})));`], { stdio: ['ignore', 'pipe', 'inherit'] }));
+  const outs = kids.map(k => new Promise(r => { let s = ''; k.stdout.on('data', d => { s += d; }); k.on('exit', () => r(JSON.parse(s))); }));
+  writeFileSync(go, '');
+  const res = await Promise.all(outs);
+  assert.equal(res.filter(r => r.won).length, 1, 'exactly one claimant wins');
+  const winner = res.find(r => r.won).decision;
+  assert.ok(res.every(r => r.decision === winner), 'every claimant reads the winner\'s decision');
+  assert.equal(readFileSync(join(dir, 'att-x.decision'), 'utf8'), winner);
+});
+
+test('round 2 default path: without the opt-in and without a sweep, settling a late unstamped envelope writes NO decision file (frozen, recorded)', { skip: SKIP }, async (t) => {
+  const { fx, a } = await orphanedHang(t, { timeoutMs: 600000 });
+  await finishLate(fx, a);
+  cli(fx, 'resume');
+  assert.equal(fx.readState().nodes.a.state, 'done');
+  assert.equal(decisionOf(fx, a), null);
+});

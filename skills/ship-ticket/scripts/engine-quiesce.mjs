@@ -114,14 +114,15 @@ export const KILL_GRACE_MS = 3000;
  * during the wait can neither delay the SIGKILL (backward step) nor cut the grace short (forward step). Once the group is
  * seen gone it is never signalled again (from then on its pgid number may be reused). `verify` (a non-launcher enforcer:
  * the deadline sweep) is re-checked immediately before EACH signal (SIGTERM and SIGKILL): when it is not true nothing more
- * is sent, and the result is false (gone) or null (alive but no longer verified: unknown, nothing proven).
+ * is sent, and the result is false (gone) or null (alive but no longer verified: unknown, nothing proven). `onSignal(sig)` is
+ * called for each signal actually delivered (the sweep records a completed kill only then).
  */
-export async function killGroup(pgid, isAlive, { verify, now = () => performance.now(), graceMs = KILL_GRACE_MS } = {}) {
+export async function killGroup(pgid, isAlive, { verify, onSignal, now = () => performance.now(), graceMs = KILL_GRACE_MS } = {}) {
   for (const sig of ['SIGTERM', 'SIGKILL']) {
     const before = isAlive(pgid);
     if (before !== true) return before;
     if (verify && verify() !== true) return isAlive(pgid) === false ? false : null;
-    try { process.kill(-pgid, sig); } catch { /* gone */ }
+    try { process.kill(-pgid, sig); onSignal?.(sig); } catch { /* gone */ }
     const until = now() + graceMs;
     let state = isAlive(pgid);
     while (state === true && now() < until) { await delay(50); state = isAlive(pgid); }

@@ -33,7 +33,8 @@
  * - Unknown boot id (neither source readable): nothing is measured; the observation is recorded as unmeasured.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 export const DEADLINE_SCHEMA = 'ship-ticket-deadline-v0';
@@ -187,31 +188,83 @@ export function envelopePosition(env, rec) {
 export const envelopeFileOf = (a, dir) => a.envelope_file ?? join(dir, `${a.attempt_id}.envelope.json`);
 const readEnvelope = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
 
+// ---- PR-1b round 2: ONE atomic arbitration per attempt ---------------------------------------------------------------
+
 /**
- * PR-1b round 1: THE deadline decision, for every decider (worker settle(), the sealed runner owner gateRunner, the sweep),
- * from the persisted facts READ AT DECISION TIME (call it again after any wait or retirement, never decide from an earlier
- * snapshot): the sweep's signal receipt (sweepRecords), the envelope (its existence and its monotonic stamp, if stamped)
- * and the opt-in recorded on the attempt's deadline. `env` overrides the envelope read (a sealed runner's decoded frame
- * header, or null for "no result"); otherwise envelopeFileOf(a, dir) is read now. Returns:
- * - 'ontime'    a stamped result positioned before the limit (accepted even when a timer fired after it);
- * - 'late'      a result that must not be accepted: stamped at or past the limit (enforced attempt), or unstamped while a
- *               receipt recorded the envelope ABSENT (`envelope_present: false`) after the limit, so it provably came later;
- * - 'timed_out' no result, and a receipt proves the deadline expired while the group was verified alive;
- * - 'unknown'   nothing persisted decides it: the FROZEN rule applies (the launcher's own timer; a result is accepted).
- *   By design this includes an UNSTAMPED result already present when the sweep looked (mixed opt-in: the driver ran
- *   without it): the sweep then writes no receipt, and the result is accepted, as without the opt-in.
- * The deadline origin and limit come from the attempt (`a.deadline`) or, for a sealed runner whose owner does not hold it,
- * from the receipt itself.
+ * The per-attempt DECISION file `attempts/<id>.decision`: created EXCLUSIVELY, once, with `expired` (the sweep, before it
+ * signals) or `accepted` (a settler, before it records a result that is not provably on time). Whoever creates it first
+ * decides; it is never rewritten. Published like the N4 recovery marker: a complete fsynced temp file hard-linked into
+ * place (link fails EEXIST when it exists), with an exclusive create (`wx`) fallback where the filesystem has no hard links.
+ * No lock, no wait, no re-read window: an envelope published after an `expired` claim is late by construction, and a
+ * result accepted first stops the sweep from ever signalling.
+ */
+export const decisionFile = (dir, id) => join(dir, `${id}.decision`);
+const DECISIONS = new Set(['expired', 'accepted']);
+const LINKLESS = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS', 'EMLINK']);
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** The decision of attempt `id` in `dir`: 'expired', 'accepted' or null (none). A `wx`-fallback file seen mid-write is re-read. */
+export function readDecision(dir, id) {
+  for (let i = 0; i < 50; i++) {
+    let v;
+    try { v = readFileSync(decisionFile(dir, id), 'utf8').trim(); } catch { return null; }
+    if (DECISIONS.has(v)) return v;
+    if (v !== '') return null;
+    pause(2);
+  }
+  return null;
+}
+
+/** Claim the decision `value` for attempt `id`: { won, decision } (decision: the one that holds, ours or the earlier one). */
+export function claimDecision(dir, id, value) {
+  if (!DECISIONS.has(value)) throw new Error(`claimDecision: ${value}`);
+  const file = decisionFile(dir, id), tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  let won = false;
+  try {
+    const fd = openSync(tmp, 'wx', 0o600);
+    try { writeSync(fd, value); fsyncSync(fd); } finally { closeSync(fd); }
+    try { linkSync(tmp, file); won = true; } catch (e) {
+      if (e.code === 'EEXIST') { /* someone decided first */ } else if (LINKLESS.has(e.code)) {
+        try { writeFileSync(file, value, { flag: 'wx', mode: 0o600 }); won = true; } catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+      } else throw e;
+    }
+  } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
+  return { won, decision: won ? value : readDecision(dir, id) };
+}
+
+/**
+ * THE deadline decision, for every decider (worker settle(), the sealed runner owner gateRunner, the sweep), from persisted
+ * facts: FIRST the decision file (who claimed first decides), else the result's monotonic stamp (an enforced attempt), else a
+ * legacy receipt's envelope_present:false. `env` overrides the envelope read (a sealed runner's frame header, or null for
+ * "no result"). Returns 'ontime' | 'late' | 'timed_out' | 'unknown' ('unknown' = the FROZEN rule: the launcher's own timer;
+ * a result is recorded). A settler about to record a result that is not provably on time claims `accepted` first
+ * (acceptClaimNeeded / claimDecision) and decides from what the claim returns, never from a snapshot.
  */
 export function deadlineVerdict(a, dir, { env } = {}) {
+  const result = env !== undefined ? env : readEnvelope(envelopeFileOf(a, dir));
+  const decision = readDecision(dir, a.attempt_id);
+  if (decision === 'expired') return result ? 'late' : 'timed_out';
   const receipt = signalReceipt(dir, a);
+  if (decision === 'accepted') return result ? 'ontime' : receipt ? 'timed_out' : 'unknown';
   const rec = a.deadline ?? (receipt ? { start_ns: receipt.start_ns, limit_ms: receipt.limit_ms } : null);
   if (!rec) return 'unknown';
-  const result = env !== undefined ? env : readEnvelope(envelopeFileOf(a, dir));
   if (result) {
     const pos = envelopePosition(result, rec);
     if (pos !== null) return !(receipt || rec.enforcement === OPT_IN || rec.measurement === 'qualified') ? 'unknown' : pos >= rec.limit_ms ? 'late' : 'ontime';
     return receipt?.envelope_present === false ? 'late' : 'unknown';
   }
   return receipt ? 'timed_out' : 'unknown';
+}
+
+/**
+ * Whether a settler must claim `accepted` before recording result `env` of attempt `a`: the result is not stamped on time,
+ * and a sweep may be arbitrating it: the attempt was armed under the opt-in, or any sweep record or decision exists for it.
+ * Read AFTER the result was seen, so a sweep that had not yet observed the attempt will find the result before it could claim
+ * (it observes, then checks the envelope, then claims). Without the opt-in and without a sweep, nothing is written (frozen).
+ */
+export function acceptClaimNeeded(a, dir, env) {
+  if (!a?.deadline || !env) return false;
+  const pos = envelopePosition(env, a.deadline);
+  if (pos !== null && pos < a.deadline.limit_ms) return false;
+  return a.deadline.enforcement === OPT_IN || sweepRecords(dir, a).length > 0 || readDecision(dir, a.attempt_id) !== null;
 }

@@ -15,7 +15,7 @@ import { launcherArgs, RELEASE_BYTE, SEALED_SCHEMA, STDOUT_CAP } from './launche
 import { sha, coded } from './engine-dag.mjs';
 import { END, parseRunState, malformedReason, eventLine } from './run-state.mjs';
 import { killGroup, quiesce, processInfo } from './engine-quiesce.mjs';
-import { deadlineVerdict, enforcementOptIn } from './lib/deadline.mjs';
+import { deadlineVerdict, enforcementOptIn, claimDecision, readDecision, sweepRecords } from './lib/deadline.mjs';
 
 export { sha, killGroup, quiesce, processInfo };
 // The lock protocol and the atomic state write live in lib/durable-io.mjs (S-30a); re-exported unchanged.
@@ -323,6 +323,9 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
       const verdict = pgid ? deadlineVerdict({ attempt_id: id, pgid }, dir, { env: agrees ? h : null }) : 'unknown';
       const overdue = verdict === 'late' || verdict === 'timed_out';
       if (overdue) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
+      // round 2: a successful agreeing result a sweep may be arbitrating is accepted only after winning the decision (`accepted`)
+      if (agrees && pgid && (sweepRecords(dir, { attempt_id: id, pgid }).length || readDecision(dir, id) !== null)
+        && claimDecision(dir, id, 'accepted').decision === 'expired') return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent };
       if (!agrees) {
         if (timedOut) return { exitCode: null, stdout: '', stderr: '', timedOut, quiescent };
         const why = frame.reason ?? `launcher exit ${status.signal ?? status.code} disagrees with the frame's exit_code ${h.exit_code}`;
