@@ -16,7 +16,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { POSIX, fixture, passReview, runStateEvents } from './engine-test-fixture.mjs';
@@ -39,7 +39,9 @@ const SCANNER = `import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const a = process.argv.slice(2);
 const text = a[0] === '--range' ? execFileSync('git', ['log', '-p', a[1] + '..HEAD'], { encoding: 'utf8' }) : a.map(f => readFileSync(f, 'utf8')).join('\\n');
-process.exit(/SECRET-[A-Za-z0-9]+/.test(text) ? 1 : 0);
+const hit = /SECRET-[A-Za-z0-9]+/.exec(text);
+if (hit) { process.stdout.write('found ' + hit[0] + '\\n'); process.stderr.write('found ' + hit[0] + '\\n'); }
+process.exit(hit ? 1 : 0);
 `;
 
 /** Commit the repository's T0 declaration and scanner at the base (the trusted place the engine reads it from). */
@@ -62,6 +64,8 @@ test('E1 [342] the declared working-tree secrets check fails `gate prove` before
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   const cand = fx.candidate();
+  const direct = spawnSync(process.execPath, ['tools/scan.mjs', 'src/a.txt'], { cwd: fx.repo, encoding: 'utf8' });
+  assert.deepEqual([direct.status, direct.stdout], [1, 'found SECRET-abc123\n'], 'control: the fixture scanner itself detects and echoes the secret');
   const p = fx.gate('prove', {});
   refused(p, 'early_check_failed');
   assert.match(p.out.reasons.join(' '), /secrets/, 'the failing check is named');
@@ -71,7 +75,11 @@ test('E1 [342] the declared working-tree secrets check fails `gate prove` before
   assert.deepEqual(S.early_checks.checks.map(c => [c.name, c.result]), [['secrets', 'fail']]);
   const att = S.attempts.find(x => x.attempt_id === S.early_checks.checks[0].attempt_id);
   assert.deepEqual([att?.kind, att?.node, att?.status, att?.envelope?.exitCode], ['proof', 'early-check:secrets', 'exited', 1], 'the scanner really ran and found it');
-  assert.ok(!J(S).includes('SECRET-abc123'), 'scanner output (which echoes a secret) is never recorded');
+  // The scanner echoes the secret on stdout and stderr: nothing the engine keeps (state, logs, attempts/ outputs and envelopes) holds it.
+  const kept = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap(d => d.isDirectory() ? kept(join(dir, d.name)) : [join(dir, d.name)]);
+  const files = kept(join(fx.repo, '.git', 'ai-skills'));
+  assert.ok(files.some(f => f.endsWith('.envelope.json')), 'the attempt files were looked at');
+  assert.deepEqual(files.filter(f => readFileSync(f, 'utf8').includes('SECRET-abc123')), [], 'scanner output (which echoes a secret) is never kept');
   // REVIEW is refused: no review record, no freeze.
   refused(fx.gate('review', passReview('rx-1', cand)), 'prove_required');
   assert.deepEqual(fx.readState().review_chain, []);
@@ -167,7 +175,7 @@ test('E4 a hung entry is killed at its own deadline and named; the next prove re
   const holder = fixture(t, { commit: true, config: { ...EARLY, testCommands: {} } });
   const release = join(holder.root, 'release');
   const hang = `require('fs').existsSync(${J(release)}) || setInterval(() => {}, 1000)`;
-  const fx = fixture(t, { commit: true, config: { ...EARLY, timeoutMs: 60000, testCommands: {
+  const fx = fixture(t, { commit: true, config: { ...EARLY, timeoutMs: 120000, testCommands: {
     lint: entry(holder.root, 'lint'),
     seed: entry(holder.root, 'seed', '', { resource: 'db', role: 'setup' }),
     slow: entry(holder.root, 'slow', hang, { timeoutMs: 1500, resource: 'db', role: 'consumer', after: ['seed'] }),
@@ -179,7 +187,7 @@ test('E4 a hung entry is killed at its own deadline and named; the next prove re
   const took = Date.now() - started;
   refused(p, 'proof_entry_timeout');
   assert.match(p.out.reasons.join(' '), /slow/, 'the timed-out entry is named');
-  assert.ok(took < 45000, `killed at its own 1.5 s deadline, not the run-wide 60 s (${took} ms)`);
+  assert.ok(took < 45000, `killed at its own 1.5 s deadline, not the run-wide 120 s (${took} ms)`);
   const lp = fx.readState().local_proof;
   const row = (n) => lp.commands.find(c => c.name === n);
   assert.deepEqual([row('slow').timed_out, row('slow').timeout_ms, row('slow').result], [true, 1500, 'fail']);

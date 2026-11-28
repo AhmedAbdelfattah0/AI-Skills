@@ -40,6 +40,8 @@ const SHORT_TIMEOUT_ALLOWED = [
   ['run-engine-unit-review.test.mjs', "const dagOf = (nodes, config = {}) => ({ schema: 'ship-ticket-engine-dag-v1', config: { provider: 'claude', timeoutMs: 1000, testCommands: { ok: PASS }, ...config },", 1, 'validated only, never driven'],
   ['run-engine-unit-review.test.mjs', "writeFileSync(f, J({ phase: 'REPAIR', provider: 'claude', nodeId: `repair-${rx}`, workdir: fx.repo, ownership: { writes: [rx === 'urx-1' ? 'src/a.txt' : 'src/b.txt'] }, timeoutMs: 10000,", 1, 'carrier inspect input: validated, nothing is dispatched'],
   ['run-engine-units.test.mjs', "config: { provider: 'claude', timeoutMs: 1000, testCommands: { ok: PASS }, ...config },", 1, 'dagOf: validated only, never driven'],
+  ['run-engine-prove.test.mjs', "slow: entry(holder.root, 'slow', hang, { timeoutMs: 1500, resource: 'db', role: 'consumer', after: ['seed'] }),", 1, 'S5 per-entry deadline of the one hanging proof entry only; the run-wide bound stays 120 s'],
+  ['run-engine-prove.test.mjs', "const withField = fixture(t, { commit: true, config: { testCommands: { unit: { cmd: process.execPath, args: ['-e', ''], timeoutMs: 5000 } } } });", 1, 'init is refused (dag_invalid), never driven'],
   ['run-engine.test.mjs', "const fx = fixture(t, { config: { timeoutMs: HANG_TIMEOUT_MS }, behaviour: { a: { hang: true } } });", 2, "hang-only: AC1 and AC4, the run's one worker hangs on every attempt"],
   ['run-engine.test.mjs', "const base = { schema: 'ship-ticket-engine-dag-v1', config: { provider: 'claude', timeoutMs: 1000 }, nodes: [{ id: 'a', promptFile: 'p.txt' }] };", 1, 'validated only, never driven'],
 ];
