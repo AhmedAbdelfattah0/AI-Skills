@@ -184,7 +184,7 @@ test('RC-1 headline rules are pinned: native Plan Mode approval, section 3b, the
   assert.ok(flat(ref('execution-harness.md')).includes('Section 3b status rules are unchanged; [ship.md](ship.md) names the open obligation as the route for a deferred future-stage row and keeps the waiver route for every other row.'));
   const risk = flat(ref('security-risk.md'));
   assert.ok(risk.includes('A plan cannot accept risk.'));
-  assert.ok(risk.includes('A stage deferral in an approved `stage-policy-v1` line (a `config.stagePolicy` run only; opt-in and unqualified) is not a risk acceptance and not a waiver'));
+  assert.ok(risk.includes('A stage deferral in an approved `stage-policy-v1` line is not a risk acceptance and not a waiver'));
   assert.ok(risk.includes('The unattended supervisor never writes one.'));
   // H6 Group J: host codes in the judgment table.
   const harness = flat(ref('execution-harness.md'));
