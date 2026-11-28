@@ -181,7 +181,7 @@ async function reviewGate(E, input, candidate) {
   const S = E.S;
   const units = unitsRefusal(E);
   if (units) return units;
-  const unproved = earlyChecksOn(S) ? proveRefusal(E, candidate) : null; // S5: no review before a passing pre-review prove
+  const unproved = earlyChecksOn(S) ? await proveRefusal(E, candidate, proveHooks) : null; // S5: no review before a passing pre-review prove
   if (unproved) return unproved;
   if (unitExecution(S, input.review_execution)) return gateNo('chain_broken', [`review_execution ${input.review_execution} belongs to a unit review chain`]);
   const originals = S.review_chain.filter(r => r.kind === 'original');
@@ -865,4 +865,11 @@ export function securityJudgments(S) {
   return out;
 }
 
-export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate, reassess: reassessGate, prove: proveGate };
+/** S5: what engine-prove.mjs needs from this module, passed in (no import cycle): the proof runner and ship-ready's control-pair predicate. */
+const proveHooks = { runProof, unprovenControls: async (E, candidate) => {
+  const sec = await securityContext(E, candidate);
+  if (!sec.catalog.ok) return ['(catalog unavailable)'];
+  return controlPairs(E, sec, candidate).filter(p => !p.proven).map(p => `${p.boundary}:${p.control}`);
+} };
+
+export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate, reassess: reassessGate, prove: (E, input, candidate) => proveGate(E, input, candidate, proveHooks) };

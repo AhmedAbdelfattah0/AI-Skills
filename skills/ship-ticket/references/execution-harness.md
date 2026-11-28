@@ -403,6 +403,10 @@ Limits:
   file is the trust anchor, and any process of the user can rewrite it.
 - S1: versions 13-24 are 1-12 plus `durableRun` (every new run; the escape hatch records 1-12). A run's `durableRun` flag,
   its `S.durable` record and its placement must agree at every load (`durable_state_missing` otherwise).
+- S5: every core version v (< 100) has an early-checks twin v + 100 (the same flags plus `earlyChecks`), derived from the
+  core table, so it composes with any later core flag. `init` records it for a DAG with `config.earlyChecks`; an engine
+  without S5 refuses such a run (`policy_version_unsupported`). The flag and `config.earlyChecks` must agree at every load
+  (`early_checks_state_missing` otherwise).
 - The resolved semantics (`E.policy`) are consumed by the test-kind activation (`testKinds`) and by
   the check that a run's §3a block format matches `securityObligations`. Tests cover recording,
   preservation and enforcement, including commands that refuse when the recorded version's

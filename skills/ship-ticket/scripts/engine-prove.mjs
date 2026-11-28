@@ -24,7 +24,7 @@
  * (path, size, mtime, and sha256 up to 8 MiB). Not covered: scripts or configs a command reads through its arguments, other
  * environment variables, services, container images, network state, Windows PATHEXT resolution.
  */
-import { statSync, readFileSync, rmSync } from 'node:fs';
+import { statSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -35,7 +35,15 @@ import { LIVE, retire, leaderStart } from './engine-quiesce.mjs';
 import { armAttempt } from './lib/deadline.mjs';
 import * as io from './engine-io.mjs';
 import { runnerDeps, truncation } from './engine-units.mjs';
-import { gateNo, runProof, proven } from './engine-gates.mjs';
+// No import of engine-gates.mjs (no cycle): it passes runProof and its control-pair predicate in as `hooks`.
+
+const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
+const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.local_proof.commands.length > 0
+  && S.local_proof.commands.every(c => c.result === 'pass');
+/** T0's own timeout domain (fast-checks.mjs validateDeclaration: 100 ms .. 30 min), kept as declared: never lengthened. */
+const t0Timeout = (ms) => Math.min(1800000, Math.max(100, ms));
+/** The runner environment of an early check: every inherited GIT_* variable removed, as standalone T0 runs it (fast-checks.mjs cleanEnv). */
+const earlyEnv = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k.toUpperCase().startsWith('GIT_')));
 
 const J = JSON.stringify;
 
@@ -53,7 +61,9 @@ async function runEarlyAttempt(E, node, command, timeoutMs) {
   await E.commit();
   let result;
   try {
-    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command, timeoutMs });
+    // forensic: false -> the launcher never writes the `.out` copy (a secrets scanner echoes the secret), so no refusal,
+    // crash or interruption can leave scanner output on disk; the decision reads only the in-memory frame.
+    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command, timeoutMs, forensic: false, env: earlyEnv(E.ctx.env ?? process.env) });
     Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
     armAttempt(E.S, a, timeoutMs, E.ctx.deadlineClock); // S1: durable run only
     await E.commit();
@@ -69,6 +79,14 @@ async function runEarlyAttempt(E, node, command, timeoutMs) {
   }
   a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut, ...truncation(result) };
   return { a, result };
+}
+
+/** A refusal while prove ran: no earlier passing early-check or proof record may stay bound to the candidate (MINOR-5). */
+function unbindAll(E, code) {
+  const S = E.S;
+  if (S.early_checks) S.early_checks = { ...S.early_checks, candidate_id: null, result: 'fail', code, dropped: [code] };
+  if (S.local_proof) S.local_proof = { ...S.local_proof, candidate_id: null, dropped: [code] };
+  note(S, 'PROVE_INVALIDATED', { code });
 }
 
 /** After repository commands ran: the approval binding and the tree must still hold (ship-ready's same two checks). */
@@ -124,8 +142,11 @@ export const proofExtras = (commands, inputs, reused = new Set()) => ({ inputs, 
   { result: c.result, timed_out: c.timed_out === true, command_digest: inputs.commands[c.name], ...(c.attempt_id ? { attempt_id: c.attempt_id } : {}), ...(reused.has(c.name) ? { reused: true } : {}) }])) });
 
 /**
- * The entries a prove must run now (a Set, in no particular order; runProof keeps the declaration order): every entry without a
- * reusable earlier pass under equal inputs, its declared `after` ancestors (its setup), and the teardowns of their resources.
+ * The entries a prove must run now (a Set; runProof keeps the declaration order). Seeds: every entry without a reusable earlier
+ * pass under equal inputs. Closure, to a fixed point, so no verdict is assembled from incompatible executions:
+ *   - an entry's declared `after` ancestors run with it (its setup);
+ *   - an entry that declares `after` on a running entry runs again (its earlier result saw the earlier execution);
+ *   - when any entry of a declared resource runs, every setup, consumer and teardown of that resource runs (shared state).
  * Under security policy 2 every entry runs (spec_results are computed over every run together).
  */
 function rerunSet(S, inputs) {
@@ -133,9 +154,13 @@ function rerunSet(S, inputs) {
   const reusable = (n) => !securityOn(S) && prior?.candidate_id === inputs.candidate_id && sameRunContext(prior.inputs, inputs)
     && prior.inputs.commands?.[n] === inputs.commands[n] && prior.entries?.[n]?.result === 'pass' && prior.commands?.some(c => c.name === n && c.result === 'pass');
   const run = new Set(names.filter(n => !reusable(n)));
-  for (const n of [...run]) for (const a of entryAncestors(cmds, n)) run.add(a);
-  const touched = new Set([...run].map(n => cmds[n].resource).filter(r => r !== undefined));
-  for (const n of names) if (cmds[n].role === 'teardown' && touched.has(cmds[n].resource)) run.add(n);
+  for (let size = -1; size !== run.size;) {
+    size = run.size;
+    for (const n of [...run]) for (const a of entryAncestors(cmds, n)) run.add(a);
+    for (const n of names) if ((cmds[n].after ?? []).some(a => run.has(a))) run.add(n);
+    const touched = new Set([...run].map(n => cmds[n].resource).filter(r => r !== undefined));
+    for (const n of names) if (cmds[n].resource !== undefined && touched.has(cmds[n].resource)) run.add(n);
+  }
   return run;
 }
 
@@ -161,11 +186,10 @@ async function runEarlyChecks(E, candidate) {
     const checks = [];
     for (const c of prep.decl.checks) {
       const inv = checkInvocation(prep.repoReal, c, prep);
-      const row = { name: c.name, kind: c.kind, files: inv.files, timeout_ms: clampTimeout(c.timeout_ms) };
+      const row = { name: c.name, kind: c.kind, files: inv.files, timeout_ms: t0Timeout(c.timeout_ms) };
       if (inv.skip) { checks.push({ ...row, result: inv.skip === 'skipped' ? 'skipped' : 'fail', ...(inv.skip === 'skipped' ? {} : { code: inv.skip }) }); continue; }
       const ran = await runEarlyAttempt(E, `early-check:${c.name}`, { cmd: inv.cmd, args: inv.args }, row.timeout_ms);
       if (ran.refusal) return ran;
-      rmSync(join(E.P.attempts, `${ran.a.attempt_id}.out`), { force: true }); // scanner output can echo a secret: never kept
       checks.push({ ...row, result: ran.result.exitCode === 0 && !ran.result.timedOut ? 'pass' : 'fail', exit_code: ran.result.exitCode ?? null,
         timed_out: ran.result.timedOut === true, attempt_id: ran.a.attempt_id });
     }
@@ -187,16 +211,16 @@ const earlyReasons = (ec) => (ec.checks.length ? ec.checks.filter(c => c.result 
  * current candidate, before REVIEW. Records S.early_checks and S.local_proof (bound to the candidate only after the binding, the
  * tree and the inputs are re-verified, as ship-ready does). ok only when both pass.
  */
-export async function proveGate(E, input, candidate) {
+export async function proveGate(E, input, candidate, hooks) {
   const S = E.S;
   if (S.attempts.some(a => LIVE.includes(a.status))) return gateNo('prove_unquiet', ['another attempt is live: prove runs only while nothing runs beside it']);
   const before = proofInputs(E, candidate);
   const early = await runEarlyChecks(E, candidate);
-  if (early.refusal) return early.refusal;
+  if (early.refusal) { unbindAll(E, early.refusal.code); await E.commit(); return early.refusal; }
   const prior = S.local_proof;
   const run = rerunSet(S, before);
-  const ran = await runProof(E, { only: run });
-  if (ran.refusal) return ran.refusal;
+  const ran = await hooks.runProof(E, { only: run });
+  if (ran.refusal) { unbindAll(E, ran.refusal.code); await E.commit(); return ran.refusal; }
   E.baseCommit = undefined; // the commands may have moved config.base: nothing cached survives them
   const byName = new Map(ran.commands.map(c => [c.name, c]));
   const reused = new Set(Object.keys(S.config.testCommands ?? {}).filter(n => !run.has(n)));
@@ -214,20 +238,26 @@ export async function proveGate(E, input, candidate) {
   for (const c of timedOut) reasons.push(`proof entry ${c.name} timed out at its ${c.timeout_ms} ms deadline: the next prove re-runs only it and its declared setup`);
   for (const c of commands.filter(x => x.result !== 'pass' && x.timed_out !== true)) reasons.push(`proof entry ${c.name} failed (exit ${c.exit_code})`);
   if (!commands.length) reasons.push('the DAG declares no testCommands entry: nothing proves the candidate');
+  // Security policy 2: the same predicate ship-ready applies (control_unproven): every effective, unwaived pair spec must be
+  // 'pass' in this proof with its RED still binding; a skipped, missing or truncated spec result is not a pass.
+  const unproven = securityOn(S) ? await hooks.unprovenControls(E, candidate) : [];
+  for (const p of unproven) reasons.push(`control ${p} is not proven by this proof (its spec is not 'pass', or its RED no longer binds)`);
   const summary = { early_checks: { result: ec.result, code: ec.code, scope: ec.scope, checks: ec.checks.map(c => ({ name: c.name, result: c.result })) },
     proof: { ran: [...run].sort(), reused: [...reused].sort(), commands: commands.map(c => ({ name: c.name, result: c.result, ...(c.timed_out ? { timed_out: true } : {}) })) } };
   if (!reasons.length) return { ok: true, code: 'proved', judgment_point: false, reasons: [], ...summary };
-  const code = !EARLY_OK.includes(ec.result) ? 'early_check_failed' : timedOut.length ? 'proof_entry_timeout' : 'proof_failed';
+  const code = !EARLY_OK.includes(ec.result) ? 'early_check_failed' : timedOut.length ? 'proof_entry_timeout'
+    : commands.length && commands.every(c => c.result === 'pass') && unproven.length ? 'control_unproven' : 'proof_failed';
   return { ...gateNo(code, reasons), ...summary };
 }
 
 /** Review (original or confirmation): refused unless a prove of this candidate passed and its inputs still hold. Null when it did. */
-export function proveRefusal(E, candidate) {
+export async function proveRefusal(E, candidate, hooks) {
   const S = E.S, ec = S.early_checks, why = [];
   if (ec?.candidate_id !== candidate) why.push(`no early checks of candidate ${candidate} (run gate prove)`);
   else if (!EARLY_OK.includes(ec.result)) why.push(...earlyReasons(ec));
   if (!proven(S, candidate)) why.push(`no passing proof of candidate ${candidate} (run gate prove)`);
   else if (!sameInputs(S.local_proof.inputs, proofInputs(E, candidate))) why.push('the proof inputs (base, environment or a command identity) changed since prove: run gate prove again');
+  else if (securityOn(S)) for (const p of await hooks.unprovenControls(E, candidate)) why.push(`control ${p} is not proven by the prove of this candidate`);
   return why.length ? gateNo('prove_required', [`config.earlyChecks: REVIEW needs a passing pre-review prove of this candidate: ${why.join('; ')}`]) : null;
 }
 

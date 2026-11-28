@@ -191,6 +191,8 @@ export const RUNNER_REFUSALS = new Set(['runner_output_tampered', 'runner_surviv
 const FRAME_CAP = 2 * STDOUT_CAP + 1024 * 1024;
 /** How long the result pipe may stay open after the launcher exited (it closes it right after the frame). */
 export const FRAME_CLOSE_MS = 5000;
+/** S5: how long a launcher may take to exit after its deadline's kill before the attempt is reported a survivor (not quiescent). */
+export const KILL_GRACE_MS = 30000;
 
 /**
  * Decode the sealed launcher's result: exactly one frame (SEALED_SCHEMA header line, then
@@ -252,15 +254,17 @@ export function decodeSealedFrame(buf, attemptId) {
  * platform rejects `channel_unsupported` before anything starts): the result then carries
  * `report` (bytes) and `report_eof: true`.
  */
-export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnFn, frameCloseMs = FRAME_CLOSE_MS }) {
-  return async ({ attempt_id: id, command, timeoutMs, report = false }) => {
+export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnFn, frameCloseMs = FRAME_CLOSE_MS, killGraceMs = KILL_GRACE_MS }) {
+  // S5: `forensic: false` writes no `.out` copy at all (an early check's stdout can echo a secret); `env` replaces the runner
+  // environment for this one attempt (early checks run with every GIT_* variable removed, as standalone T0 does).
+  return async ({ attempt_id: id, command, timeoutMs, report = false, forensic = true, env: runEnv = env }) => {
     if (typeof report !== 'boolean') throw coded('bad_input', `report must be true or false, not ${JSON.stringify(report)}`);
     if (report === true && platform !== 'darwin') {
       throw coded('channel_unsupported', `the runner report channel (/dev/fd/3) is unsupported on ${platform} (Linux: /dev/fd/N on a socketpair is ENXIO; win32: no /dev/fd)`);
     }
     mkdirSync(dir, { recursive: true });
-    const outFile = join(dir, id + '.out'), envelopeFile = join(dir, id + '.envelope.json');
-    const child = startLauncher({ spawnFn, spec: toSpec(command.cmd, command.args ?? []), cwd: repoRoot, env, platform,
+    const outFile = forensic ? join(dir, id + '.out') : null, envelopeFile = join(dir, id + '.envelope.json');
+    const child = startLauncher({ spawnFn, spec: toSpec(command.cmd, command.args ?? []), cwd: repoRoot, env: runEnv, platform,
       files: { outFile, envelopeFile, attemptId: id }, sealed: { report: report === true } });
     const chunks = [];
     let got = 0;
@@ -277,12 +281,24 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
     const pgid = platform === 'win32' ? null : child.pid;
     let timedOut = false, killing = null;
     const done = (async () => {
+      let expired;
+      const deadline = new Promise(r => { expired = r; });
       const timer = setTimeout(() => {
         timedOut = true;
         killing = platform === 'win32' ? spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 30000 }) : killGroup(pgid, alive);
+        expired();
       }, timeoutMs);
-      const status = await exited;
+      // S5: after the deadline's kill the launcher gets killGraceMs to exit; a kill that fails (an unkillable group) ends the
+      // wait with an explicit survivor result (never quiescent), so the caller records 'unknown' instead of holding the lock forever.
+      const status = await Promise.race([exited, deadline.then(async () => {
+        await killing;
+        let g;
+        const s = await Promise.race([exited, new Promise(r => { g = setTimeout(() => r(null), killGraceMs); })]);
+        clearTimeout(g);
+        return s;
+      })]);
       clearTimeout(timer);
+      if (status === null) return { exitCode: null, stdout: '', stderr: '', timedOut: true, quiescent: false, survivor: true };
       await killing;
       let grace;
       const pipeClosed = await Promise.race([closed.then(() => true), new Promise(r => { grace = setTimeout(() => r(false), frameCloseMs); })]);

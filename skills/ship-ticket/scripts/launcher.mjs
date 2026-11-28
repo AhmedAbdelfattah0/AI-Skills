@@ -196,9 +196,9 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
       report: spec.report === true, report_len: report.length, report_truncated: rsize > ${STDOUT_CAP}, report_bytes: rsize, report_eof: repEof };
     try { writeAll(1, Buffer.concat([Buffer.from(JSON.stringify(head) + '\\n'), stdout, report])); } catch {}
     try { fs.closeSync(1); } catch {}
-    forensic(spec.outFile, stdout);
+    if (spec.outFile) forensic(spec.outFile, stdout); // S5: null for an early check (its stdout can echo a secret): never written
     forensic(spec.envelopeFile, Buffer.from(JSON.stringify({ schema: 'ship-ticket-engine-envelope-v1', attempt_id: spec.attemptId,
-      exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString(),
+      exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile || null, ended_at: new Date().toISOString(),
       peak_rss_mb: sm.n ? Math.round(sm.rss / 1024 * 10) / 10 : 'unknown', peak_cpu_pct: sm.n ? Math.round(sm.cpu * 10) / 10 : 'unknown', resource_samples: sm.n,
       ...(size > ${STDOUT_CAP} ? { truncated: true, stdout_bytes: size } : {}) })));
     process.exit(code === 0 ? 0 : 1);

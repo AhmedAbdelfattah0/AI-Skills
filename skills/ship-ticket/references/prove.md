@@ -229,18 +229,29 @@ node scripts/run-engine.mjs gate prove --repo <repo> --ticket <key> --run-id <id
 ```
 
 - **Early checks** are the T0 declaration above (`.ship-ticket/t0.json`, read from the merge base, the same scan set
-  and argv), run by the engine itself, each check under the engine's runner protocol with its own `timeout_ms`. The
-  record `early_checks` holds names, enums and numbers only; a check's output file is deleted once its process group
-  is proven gone. No declaration is `not_declared`, which passes.
+  and argv), run by the engine itself, each check under the engine's runner protocol with its own `timeout_ms` (kept
+  as declared, 100 ms to 30 min) and with every `GIT_*` variable removed, as standalone T0 runs it. The record
+  `early_checks` holds names, enums and numbers only. No copy of a check's output is ever written to disk, also when
+  its runner is refused or interrupted: a secrets scanner echoes the secret. No declaration is `not_declared`, which
+  passes. A refused runner (`quiescence_unknown`) unbinds the earlier early-check and proof records and blocks later
+  work until the owner resolves it.
 - **The bounded proof** is the same `testCommands` run ship-ready performs, in declaration order. An entry may set its
   own deadline `timeoutMs` (1 s to 1 h; default `config.timeoutMs`). A timed-out entry is named
-  (`proof_entry_timeout`), and the next `gate prove` re-runs only the entries without a reusable pass, plus their
-  declared setups and the teardowns of their resources. Under security policy 2 every entry re-runs.
+  (`proof_entry_timeout`), and the next `gate prove` re-runs the entries without a reusable pass and their dependency
+  closure: their declared `after` setups, every entry that declares `after` on a re-run entry, and every setup,
+  consumer and teardown of a resource any re-run entry declares. A consumer that passed against an earlier setup
+  execution is therefore re-run with the new one, never reused. Under security policy 2 every entry re-runs, and prove
+  (and REVIEW) also refuse `control_unproven` while an effective, unwaived pair spec is not `pass` (skipped, missing or
+  truncated report), as ship-ready does. A runner whose deadline kill fails is reported a survivor after a bounded
+  grace (never a lock held forever).
 - **Reuse needs equal inputs.** A proof row is reused, at the next prove or at ship-ready, only while the candidate,
   the base commit, the environment identity and the entry's command identity are all unchanged. Anything else runs
   fresh. The environment identity is UNQUALIFIED: platform, architecture, Node version, PATH and each command's
   resolved executable. It does not cover files a command reads through its arguments, other variables, services or
   images. There are no gate-row keys and no reuse across a rebase here.
+- **Policy version.** An opted-in run records the early-checks twin of its version (core version + 100,
+  [execution-harness.md](execution-harness.md) "Policy version"), so an engine without this step refuses to resume it.
+  Unit reviews (`gate unit-review`) are not gated by prove; the final review is.
 - **Review waits for it.** An original review or a confirmation is refused with `prove_required` unless early checks
   and the proof of the current candidate passed and their inputs still hold. Ship-ready refuses the same way without
   passing early checks, and it re-runs a proof whose inputs changed.
