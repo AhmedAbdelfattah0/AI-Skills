@@ -78,6 +78,15 @@ const S = {
     assert.equal(m.mergeStrategyOf(manifest()), 'owner');
     assert.equal(m.mergeStrategyOf(manifest(undefined, { merge_strategy: 'automatic' })), 'automatic');
   },
+  publication_authorization(m) {
+    // PR-6a: optional (absent = none: the PR-5 owner_publish handoff and every approved digest are unchanged)
+    assert.deepEqual(codesOf(manifest(undefined, { publication: 'none' }), m), []);
+    assert.deepEqual(codesOf(manifest(undefined, { publication: 'pull_request' }), m), []);
+    for (const bad of ['merge', 'push', 'pr', '', 'Pull_Request', 'deploy']) assert.deepEqual(codesOf(manifest(undefined, { publication: bad }), m), ['wave_publication_invalid'], bad);
+    assert.deepEqual(codesOf(manifest(undefined, { publication: true }), m), ['wave_schema_invalid']);
+    assert.equal(m.publicationOf(manifest()), 'none');
+    assert.equal(m.publicationOf(manifest(undefined, { publication: 'pull_request' })), 'pull_request');
+  },
   unsafe_paths_and_closed_schema(m) {
     const bad = (over, code = 'wave_path_unsafe') => assert.deepEqual(codesOf(manifest([tk('T1', over)]), m), [code], JSON.stringify(over));
     for (const plan of ['../x.md', '/etc/x.md', '.specs/../x.md', '.specs\\x.md', 'a\0.md', '.specs/plans/x.txt', '-x.md', 'a//b.md', '']) bad({ plan });
@@ -375,6 +384,7 @@ const MUTANTS = [
   ['release-mode-automated-accepted', "export const RELEASE_MODES = Object.freeze(['manual']);", "export const RELEASE_MODES = Object.freeze(['manual', 'automated']);", ['release_mode_enum']],
   ['release-mode-never-checked', 'if (m.release_mode !== undefined && !RELEASE_MODES.includes(m.release_mode))', 'if (false)', ['release_mode_enum']],
   ['merge-strategy-unchecked', "if (m.merge_strategy !== undefined && !MERGE_STRATEGIES.includes(m.merge_strategy))", 'if (false)', ['merge_strategy_and_width_reason']],
+  ['publication-unchecked', "if (m.publication !== undefined && !PUBLICATIONS.includes(m.publication))", 'if (false)', ['publication_authorization']],
   ['width-reason-unchecked', "if (m.width_reason !== undefined && !safeReason(m.width_reason))", 'if (false)', ['merge_strategy_and_width_reason']],
   ['dag-cycle-unchecked', 'if (cycle) add(', 'if (false) add(', ['dag_cycle_refused']],
   ['dep-subset-unchecked', "else if (!keys.has(d)) add('wave_dep_unknown'", "else if (false) add('wave_dep_unknown'", ['dep_outside_wave_and_duplicates']],
