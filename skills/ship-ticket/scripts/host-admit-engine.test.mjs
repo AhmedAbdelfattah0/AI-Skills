@@ -40,7 +40,7 @@ async function waitUntil(pred, ms = 20000) {
   for (const end = Date.now() + ms; Date.now() < end;) { if (await pred()) return true; await new Promise(r => setTimeout(r, 25)); }
   return Boolean(await pred());
 }
-const engineArgv = (fx, ...cmd) => [process.execPath, ENGINE_CLI, ...cmd, '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'];
+const engineArgv = (fx, ...cmd) => [process.execPath, ENGINE_CLI, ...cmd, '--repo', fx.repo, '--ticket', 'T-1', '--run-id', fx.runId ?? 'run-1'];
 /** `host-admit run` in-process (fake host samples, a temp store) wrapping `argv`; the command itself is a real process. */
 async function admitRun(fx, dir, argv, { pressure = 1, flags = [], log = () => {} } = {}) {
   const { run } = await admitCli();
@@ -141,7 +141,7 @@ test('A2 the claim must be ACTIVE for this process: another group, too little we
   assert.equal(unbound.status, 1); assert.match(unbound.stderr, /host_claim_required/); assert.match(unbound.stderr, /bound to no run/, 'not bound to this run');
   // the same claim hand-bound to THIS run (an out-of-protocol same-user edit): still not this process's group
   const f = join(dir, 'claims', 'other-group.json');
-  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), run_state: realpathSync(fx.stateFile()) }));
+  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), run_state: realpathSync(fx.stateFile()), run_id: fx.readState().run_id, run_created_at: fx.readState().created_at }));
   const other = drive('other-group');
   assert.equal(other.status, 1); assert.match(other.stderr, /host_claim_required/); assert.match(other.stderr, /not in claim other-group's process group/);
   const forged = drive('no-such-op');
@@ -217,7 +217,8 @@ test('A1 unknown identity: an unsettled attempt whose group cannot be attributed
   const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { detached: true, stdio: 'ignore' });
   t.after(() => killGroup(p.pid));
   const stateFile = join(runDir, 'state.json');
-  writeFileSync(stateFile, JSON.stringify({ attempts: [{ attempt_id: 'att-x', status: 'launched', pgid: p.pid, leader_start: 'Thu Jan  1 00:00:00 1970' }] }));
+  const RUN = { run_id: 'run-1', created_at: '2026-11-28T00:00:00.000Z' };
+  writeFileSync(stateFile, JSON.stringify({ ...RUN, attempts: [{ attempt_id: 'att-x', status: 'launched', pgid: p.pid, leader_start: 'Thu Jan  1 00:00:00 1970' }] }));
   // The outer claim: bound to a group that is gone, claimer dead, bound to the run's state file.
   const gone = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
   await new Promise(r => gone.on('exit', r));
@@ -225,7 +226,7 @@ test('A1 unknown identity: an unsettled attempt whose group cannot be attributed
   mkdirSync(join(dir, 'claims'), { recursive: true });
   writeFileSync(join(dir, 'claims', 'drv.json'), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: 'drv', class: 'heavy', weight: 1, resources: [],
     container_label: null, pgid: gone.pid, leader_start: leaderStart(process.pid), claimer: { pid: 999999, process_start_time: 'x', host: hostname() },
-    run_state: stateFile, claimed_at: 'x', bound_at: 'x' }));
+    run_state: stateFile, run_id: RUN.run_id, run_created_at: RUN.created_at, claimed_at: 'x', bound_at: 'x' }));
   const r = await heavyClaim(dir, 'h1');
   assert.equal(r.admit, false, 'still charged');
   assert.deepEqual(r.unknown, ['drv'], 'unknown, never reclaimable without proof');
@@ -236,7 +237,7 @@ test('A1 unknown identity: an unsettled attempt whose group cannot be attributed
   writeFileSync(stateFile, '{ torn');
   const torn = await heavyClaim(dir, 'h2');
   assert.deepEqual(torn.unknown, ['drv'], 'an unreadable run record proves nothing: still unknown');
-  writeFileSync(stateFile, JSON.stringify({ attempts: [{ attempt_id: 'att-x', status: 'exited', quiesced: true, pgid: p.pid, leader_start: 'x' }] }));
+  writeFileSync(stateFile, JSON.stringify({ ...RUN, attempts: [{ attempt_id: 'att-x', status: 'exited', quiesced: true, pgid: p.pid, leader_start: 'x' }] }));
   const settled = await heavyClaim(dir, 'h3');
   assert.equal(settled.admit, true, `every attempt settled and the outer group gone: reclaimed (${settled.reasons})`);
   assert.ok(!claimIds(dir).includes('drv'));
@@ -324,29 +325,105 @@ test('R2 (Codex MAJOR-1) the claim check binds to the LOCKED snapshot: a run who
   assert.equal(unflagged.readState().nodes.a.state, 'done', `an unflagged run is unaffected: ${JSON.stringify(out?.outcome)}`);
 });
 
-test('R3 (Codex MAJOR-2) a deferred claim of a run retired by `archive --retire` is reclaimed by proof from the archive; a missing proof stays unknown', { skip: SKIP }, async (t) => {
-  const fx = fixture(t);
+/**
+ * Synthetic durable layout <root>/runs/T-1/state.json + <root>/archive/T-1/<run_id>-<n>/retired/{state.json,retire.json}
+ * (the shape engine-adopt.mjs retireLive leaves), and a dead wrapper's bound claim naming run `id`.
+ */
+async function proofLayout(t) {
+  const root = tmpStore(t), dir = tmpStore(t);
+  const { mkdirSync } = await import('node:fs');
+  const { spawn } = await import('node:child_process');
+  const { hostname } = await import('node:os');
+  const { createHash } = await import('node:crypto');
+  const live = join(root, 'runs', 'T-1', 'state.json');
+  mkdirSync(dirname(live), { recursive: true });
+  const gone = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+  await new Promise(r => gone.on('exit', r));
+  mkdirSync(join(dir, 'claims'), { recursive: true });
+  const S = (id, attempts = []) => ({ run_id: id.run_id, created_at: id.created_at, attempts });
+  return { root, dir, live,
+    writeLive: (st) => writeFileSync(live, JSON.stringify(st)),
+    archive: (st, n = 1, { digest } = {}) => {
+      const d = join(root, 'archive', 'T-1', `${st.run_id}-${n}`, 'retired'); mkdirSync(d, { recursive: true });
+      const raw = JSON.stringify(st); writeFileSync(join(d, 'state.json'), raw);
+      writeFileSync(join(d, 'retire.json'), JSON.stringify({ retired: true, run_id: st.run_id, state_sha256: digest ?? 'sha256:' + createHash('sha256').update(raw).digest('hex') }));
+    },
+    claimFor: (op, id) => writeFileSync(join(dir, 'claims', `${op}.json`), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: op, class: 'heavy', weight: 1,
+      resources: [], container_label: null, pgid: gone.pid, leader_start: 'x', claimer: { pid: 999999, process_start_time: 'x', host: hostname() },
+      run_state: live, run_id: id.run_id, run_created_at: id.created_at, claimed_at: 'x', bound_at: 'x' })),
+    S };
+}
+const A = { run_id: 'run-1', created_at: '2026-11-28T10:00:00.000Z' }, B = { run_id: 'run-1', created_at: '2026-11-28T11:00:00.000Z' }; // same run id, a later run
+const settledAttempt = { attempt_id: 'att-a', status: 'exited', quiesced: true, pgid: 1, leader_start: 'x' };
+
+test('R4 (round 2, Codex MAJOR) proofFor keys on the run identity: A retired, B published at the SAME path -> A proven from ITS archive', { skip: SKIP }, async (t) => {
+  const L = await proofLayout(t);
+  const { spawn } = await import('node:child_process');
+  const { leaderStart } = await import('./engine-quiesce.mjs');
+  const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { detached: true, stdio: 'ignore' });
+  t.after(() => killGroup(p.pid));
+  const liveB = { attempt_id: 'att-b', status: 'launched', pgid: p.pid, leader_start: leaderStart(p.pid) };
+  // (1) A still running: the matching LIVE state with a live attempt keeps A charged
+  L.writeLive(L.S(A, [liveB]));
+  L.claimFor('a', A);
+  let r = await heavyClaim(L.dir, 'h1', 1);
+  assert.ok(claimIds(L.dir).includes('a') && !r.unknown.includes('a'), 'a live attempt of A itself: charged as live');
+  // (2) A retired (settled final state archived), B published at the same path with a LIVE attempt: B's attempts are not A's
+  L.archive(L.S(A, [settledAttempt]));
+  L.writeLive(L.S(B, [liveB]));
+  r = await heavyClaim(L.dir, 'h2', 1);
+  assert.ok(!claimIds(L.dir).includes('a'), `A is reclaimed by proof from A's archive, whatever B does (${JSON.stringify(r.unknown)})`);
+});
+
+test('R4 a stale or unrelated archive cannot release A, B\'s live state alone neither blocks nor releases it, a missing proof stays unknown', { skip: SKIP }, async (t) => {
+  const L = await proofLayout(t);
+  L.writeLive(L.S(B, [settledAttempt])); // another run's settled state at the path: no evidence about A
+  L.claimFor('a', A);
+  let r = await heavyClaim(L.dir, 'h1', 1);
+  assert.deepEqual(r.unknown, ['a'], 'B settled does not release A: unknown (charged, Blocked)');
+  L.archive(L.S({ run_id: 'run-7', created_at: A.created_at }, [settledAttempt]));           // another run id
+  L.archive(L.S({ run_id: 'run-1', created_at: '2026-01-01T00:00:00.000Z' }, [settledAttempt]), 1); // same run id, another run
+  L.archive(L.S(A, [settledAttempt]), 2, { digest: 'sha256:' + '0'.repeat(64) });              // A, but the digest does not match
+  r = await heavyClaim(L.dir, 'h2', 1);
+  assert.deepEqual(r.unknown, ['a'], 'no matching archive: still unknown');
+  rmSync(L.live);
+  r = await heavyClaim(L.dir, 'h3', 1);
+  assert.deepEqual(r.unknown, ['a'], 'absence alone is never proof');
+});
+
+test('R4 end to end: run A finishes, its wrapper\'s claim is left, archive --retire, run B is init-ed at the same path, and B\'s weight-2 drive is admitted', { skip: SKIP }, async (t) => {
+  const fx = fixture(t, { config: { ...REQUIRED, width: 2 }, nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'b', writes: ['src/b.txt'] }],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, b: { write: { 'src/b.txt': 'b1' } } } });
   const dir = tmpStore(t);
+  fx.env.AI_SKILLS_HOST_RESOURCES_DIR = dir;
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
-  assert.equal(fx.cli('drive').status, 0); // the engine finished; every attempt settled
-  const runState = realpathSync(fx.stateFile());
+  const lines = [];
+  assert.equal((await admitRun(fx, dir, engineArgv(fx, 'drive'), { log: (l) => lines.push(l) })).code, 0);
+  const runA = fx.readState();
+  // the wrapper died before its own release: put its (released) claim back as the dead wrapper's bound claim
   const { spawn } = await import('node:child_process');
   const { hostname } = await import('node:os');
   const { mkdirSync } = await import('node:fs');
   const gone = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
   await new Promise(r => gone.on('exit', r));
   mkdirSync(join(dir, 'claims'), { recursive: true });
-  // the wrapper died before its own release: its claim names the run, its group is gone, its claimer dead
-  const orphan = (id, extra) => writeFileSync(join(dir, 'claims', `${id}.json`), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: id, class: 'heavy', weight: 1,
-    resources: [], container_label: null, pgid: gone.pid, leader_start: 'x', claimer: { pid: 999999, process_start_time: 'x', host: hostname() },
-    run_state: runState, run_id: 'run-1', claimed_at: 'x', bound_at: 'x', ...extra }));
-  orphan('drv');
-  const r = fx.cli('archive', { retire: 'true' });
-  assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.equal(existsSync(runState), false, 'the state was moved into the archive');
-  orphan('missing', { run_state: join(dirname(runState), '..', 'NOPE', 'state.json'), run_id: 'run-9' });
-  orphan('other-run', { run_id: 'run-2' }); // same path, but no archive of run-2 exists: absence alone is never proof
-  const h = await heavyClaim(dir, 'next', 1);
-  assert.ok(!claimIds(dir).includes('drv'), 'the retired run is proven settled from its archived final state: reclaimed');
-  assert.deepEqual(h.unknown.sort(), ['missing', 'other-run'], 'a missing or unattributable proof stays unknown (charged, Blocked)');
+  writeFileSync(join(dir, 'claims', 'drv-a.json'), JSON.stringify({ schema: 'ship-ticket-host-claim-v1', op_id: 'drv-a', class: 'heavy', weight: 2, resources: [],
+    container_label: null, pgid: gone.pid, leader_start: 'x', claimer: { pid: 999999, process_start_time: 'x', host: hostname() },
+    run_state: realpathSync(fx.stateFile()), run_id: runA.run_id, run_created_at: runA.created_at, claimed_at: 'x', bound_at: 'x' }));
+  const ar = fx.cli('archive', { retire: 'true' });
+  assert.equal(ar.status, 0, ar.stdout + ar.stderr);
+  // run B of the same ticket, its own run id, published at the SAME runs/T-1/state.json
+  const startA = JSON.parse(readFileSync(fx.planFile, 'utf8').split('\n').find(l => l.includes('"event":"START"')));
+  fx.appendRunState({ ...startA, run_id: 'run-2' });
+  const ib = fx.cli('init', { dag: fx.dagFile }, { runId: 'run-2' });
+  assert.equal(ib.status, 0, ib.stdout + ib.stderr);
+  fx.runId = 'run-2';
+  assert.equal(fx.readState().run_id, 'run-2');
+  fx.behave({ a: { write: { 'src/a.txt': 'a2' } }, b: { write: { 'src/b.txt': 'b2' } } });
+  const seen = [];
+  const drv = await admitRun(fx, dir, engineArgv(fx, 'drive'), { log: (l) => seen.push(l) });
+  assert.equal(drv.code, 0, `B's weight-2 drive is admitted on a healthy two-slot host: ${JSON.stringify(seen[0])}`);
+  assert.equal(seen[0].weight, 2);
+  assert.deepEqual(Object.values(fx.readState().nodes).map(n => n.state), ['done', 'done']);
+  assert.ok(rows(dir).some(x => x.kind === 'reclaimed' && x.op_id === 'drv-a'), 'A\'s claim was reclaimed by proof from A\'s archive');
 });

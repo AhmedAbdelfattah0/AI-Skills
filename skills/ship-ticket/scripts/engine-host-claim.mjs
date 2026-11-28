@@ -70,7 +70,7 @@ export function engineClaimSpec(argv) {
   if (P && existsSync(P.state)) { try { S = JSON.parse(readFileSync(P.state, 'utf8')); } catch { S = null; } }
   const weight = S ? requiredWeight(S, e.cmd, e.gateKind) : heavyCommand(e.cmd, e.gateKind) ? 1 : 0;
   return { cls: weight > 0 ? 'heavy' : 'light', weight, runState: P && existsSync(P.state) ? realpathSync(P.state) : null,
-    runId: typeof S?.run_id === 'string' ? S.run_id : null,
+    runId: typeof S?.run_id === 'string' ? S.run_id : null, runCreatedAt: typeof S?.created_at === 'string' ? S.created_at : null,
     opId: boundedOpId([e.ticket, e.runId ?? 'run', e.cmd, ...(e.gateKind ? [e.gateKind] : []), randomUUID().slice(0, 8)]) };
 }
 
@@ -102,7 +102,8 @@ export function checkHostClaim({ S, statePath, cmd, gateKind, env = process.env,
   if (c.class !== 'heavy' || c.weight < need) return no(`claim ${op} is ${c.class} of weight ${c.weight}`);
   let real;
   try { real = realpathSync(statePath); } catch { return no('the run state is unreadable'); }
-  if (c.run_state !== real) return no(`claim ${op} is bound to ${c.run_state ?? 'no run'}, not to this run (${real})`);
+  if (c.run_state !== real || c.run_id !== S?.run_id || c.run_created_at !== S?.created_at)
+    return no(`claim ${op} is bound to ${c.run_state ?? 'no run'} (run ${c.run_id ?? 'none'}), not to this run (${real}, run ${S?.run_id})`);
   if (c.pgid === null) return no(`claim ${op} is not bound to a process group`);
   const mine = ownPgid();
   if (mine !== c.pgid) return no(`this process (process group ${mine ?? 'unknown'}) is not in claim ${op}'s process group ${c.pgid}`);

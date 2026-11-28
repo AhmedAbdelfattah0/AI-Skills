@@ -114,7 +114,7 @@ async function runClaimed(argv, deps, platform, usage) {
   }
   const env = deps.env ?? process.env;
   const dir = deps.dir ?? storeDir(env);
-  const c = await claim({ dir, opId, cls, weight, resources: a.resources, containerLabel: a.containerLabel, runState: spec?.runState ?? null, runId: spec?.runId ?? null,
+  const c = await claim({ dir, opId, cls, weight, resources: a.resources, containerLabel: a.containerLabel, runState: spec?.runState ?? null, runId: spec?.runId ?? null, runCreatedAt: spec?.runCreatedAt ?? null,
     snapshot: deps.snapshot ?? hostSnapshot, now: deps.now ?? Date.now, platform });
   const head = { admit: c.admit, reason: c.reason, reasons: c.reasons, op_id: opId, class: cls, weight, occupancy: c.occupancy, heavy_slots: c.heavy_slots,
     conflicts: c.conflicts, unknown: c.unknown, blocked: c.blocked ? { raised: c.blocked.raised, op_ids: c.blocked.op_ids } : null, claimed: c.admit,
